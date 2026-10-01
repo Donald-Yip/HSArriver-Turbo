@@ -71,6 +71,44 @@ def rand_sleep(interval):
 # 复位后偶发误选中该卡组；用户最终指定 (70, 60) 作为待命点。
 MOUSE_RESET_POS = (70, 60)
 
+# 右侧辅助点候选：激活后台炉石、取消右键都用它。
+# 历史 bug：这两个点原来写死 (1800,500)/(1700,400)，而右上角日志浮窗
+# （292×628，屏幕矩形约 x1616..1908 / y12..640）正好把它们盖住 —— 浮窗不穿透
+# 鼠标，点击被浮窗吃掉，炉石没被激活，紧接着真正要点的那个左键又被 Unity 当
+# 作“激活窗口”吞掉，动作静默失败。所以改成运行时用 WindowFromPoint 校验，
+# 首选点不落在炉石窗口上就换下一个候选。
+SIDE_POINT_CANDIDATES = ((1800, 500), (1700, 400), (1700, 760), (1500, 520),
+                         (1200, 800))
+
+
+def side_point(hearthstone_hwnd=0, preferred=None,
+               candidates=SIDE_POINT_CANDIDATES):
+    """挑一个真正落在炉石窗口上的辅助点（避开右上角日志浮窗等置顶窗口）。
+
+    * 按「首选点 → 候选列表」顺序，用 point_targets_hearthstone（WindowFromPoint）
+      验证该位置最上层窗口属于炉石；
+    * 全部不命中（炉石最小化/被完全遮挡）或拿不到 hwnd 时，退回首选点，
+      保持与改动前完全一致的行为，不会退化成“什么都不点”。
+    """
+    ordered = []
+    if preferred is not None:
+        ordered.append(tuple(preferred))
+    for point in candidates:
+        point = tuple(point)
+        if point not in ordered:
+            ordered.append(point)
+    if not ordered:
+        return (0, 0)
+    if not hearthstone_hwnd:
+        return ordered[0]
+    for point in ordered:
+        try:
+            if point_targets_hearthstone(point[0], point[1], hearthstone_hwnd):
+                return point
+        except Exception:
+            break
+    return ordered[0]
+
 # ---------------------------------------------------------------- 活人感（可选）
 # 只在【对局中识别盒子意见并执行完之后】生效：由 RecommendationFlow / MulliganFlow
 # 在动作执行成功后经 FSM_action._human_like_post_action_pause() 调用本函数，
@@ -177,7 +215,9 @@ def click_button(x, y, button, require_hearthstone=True):
         # The first physical click on a background Unity window can be
         # consumed solely to activate it. Activate via the same harmless
         # right-side point used by cancel_click, then send the real action.
-        activate_x, activate_y = 1800, 500
+        # 该点必须真的落在炉石上：右上角日志浮窗会盖住固定坐标（见 side_point）。
+        activate_x, activate_y = side_point(hearthstone_hwnd,
+                                            preferred=(1800, 500))
         _send_physical_click(
             mouse, activate_x, activate_y, Button.right)
         rand_sleep(0.25)
@@ -224,12 +264,12 @@ def choose_oppo_hero():
 
 def cancel_click():
     rand_sleep(TINY_OPERATE_INTERVAL)
-    right_click(1700, 400)
+    right_click(*side_point(get_HS_hwnd(), preferred=(1700, 400)))
 
 
 def test_click():
     rand_sleep(TINY_OPERATE_INTERVAL)
-    left_click(1700, 400)
+    left_click(*side_point(get_HS_hwnd(), preferred=(1700, 400)))
 
 
 HAND_CARD_X = [
@@ -497,7 +537,7 @@ def _choose_attack_target_hero():
 
 def _finish_attack():
     time.sleep(0.05)
-    right_click(1700, 400)
+    right_click(*side_point(get_HS_hwnd(), preferred=(1700, 400)))
 
 
 def enter_HS():

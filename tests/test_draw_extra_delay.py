@@ -3,6 +3,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.flow.recommendation_flow import RecommendationFlow
 
@@ -146,6 +147,40 @@ class InTurnDrawTests(unittest.TestCase):
         self.assertEqual(1, len(output))
         self.assertIn("抽到 1 张牌", output[0])
         self.assertIn("延时", output[0])
+
+    def test_delay_is_announced_exactly_once(self):
+        """回归：print 与 controller.output 各推一次，浮窗会看到两条一样的日志。
+
+        ManualController.output 默认就是 print，而 web_ui 用 _TeeStream 把 stdout
+        转进日志浮窗，所以 _announce 只能走一个通道。
+        """
+        flow, sleeps = make_flow()
+        output = []
+        printed = []
+        flow.controller = SimpleNamespace(output=output.append)
+        flow._account_hand_entries(state(10))
+        flow._account_hand_entries(state(11))
+        flow._acted_this_turn = True
+
+        with patch("builtins.print",
+                   side_effect=lambda *a, **k: printed.append(a)):
+            flow._account_hand_entries(state(13))
+
+        self.assertEqual([2.0], sleeps)
+        self.assertEqual(1, len(output) + len(printed))
+        self.assertEqual(1, len(output))
+        self.assertEqual([], printed)
+
+    def test_announce_falls_back_to_print_without_an_output_hook(self):
+        flow, _sleeps = make_flow()
+        flow.controller = SimpleNamespace(output=None)
+        printed = []
+
+        with patch("builtins.print",
+                   side_effect=lambda *a, **k: printed.append(a)):
+            flow._announce("[SYS] 测试")
+
+        self.assertEqual(1, len(printed))
 
     def test_missing_output_hook_is_not_fatal(self):
         flow, sleeps = make_flow()

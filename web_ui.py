@@ -1263,6 +1263,10 @@ def _bind_overlay():
         on_calibrate=_overlay_toggle_calibrate,
         # 关浮窗时把还开着的校准窗口一并关掉（网页/浮窗打开的是同一个窗口）。
         on_calibrate_close=_overlay_close_calibrate,
+        # 「重启炉石」：中止进程 + 清空日志目录 + 重新拉起（确认弹窗在浮窗里）。
+        on_restart=_overlay_restart_hearthstone,
+        # 「退出浮窗」：只关窗口，脚本继续跑，网页可以再打开。
+        on_exit_overlay=_overlay_exit_overlay,
         on_exit=_overlay_exit,
     )
 
@@ -1280,6 +1284,96 @@ def _overlay_close_calibrate():
     """关浮窗/退出脚本时收掉校准窗口（没开着就什么都不做）。"""
     if _calibration_running():
         _stop_calibration()
+
+
+# ---------------------------------------------------------------- 重启炉石
+# 停自动化最多等这么久；超时就放弃（不在不确定的状态下杀进程/删文件）。
+AUTOMATION_STOP_TIMEOUT = 15.0
+
+
+def _fallback_launch_hearthstone():
+    """找不到 Hearthstone.exe 时的退路：走战网点「开始游戏」。"""
+    import click
+    return click.enter_HS()
+
+
+def _overlay_restart_hearthstone():
+    """浮窗「重启炉石」按钮（已确认过）：后台执行，立刻返回不卡浮窗。"""
+    threading.Thread(target=_restart_hearthstone_worker,
+                     name="hs-restart", daemon=True).start()
+    return True
+
+
+def _restart_hearthstone_worker():
+    """停自动化 → 重置日志读取器 → 中止炉石 → 清空日志目录 → 重新拉起炉石。
+
+    每一步都往网页/浮窗写日志；任何一步失败都立刻停下并说明原因，绝不在拿不准
+    的状态下继续删文件。
+    """
+    import hs_restart
+
+    cfg = load_config()
+    log_root = (cfg.get("log_root") or "").strip()
+    info = hs_restart.resolve_paths(log_root)
+    if not info["ok"]:
+        _log("ERROR", f"重启炉石已取消：{info['error']}")
+        return
+
+    _log("SYS", "开始重启炉石：停止自动化 → 中止进程 → 清空日志目录 → 重新启动……")
+    with CTRL.lock:
+        running = CTRL.automation_thread is not None
+    if running:
+        api_stop({"mode": "now"})
+        deadline = time.monotonic() + AUTOMATION_STOP_TIMEOUT
+        stopped = False
+        while time.monotonic() < deadline:
+            with CTRL.lock:
+                if CTRL.automation_thread is None:
+                    stopped = True
+                    break
+            time.sleep(0.3)
+        if not stopped:
+            _log("ERROR", f"重启炉石已取消：自动化没有在 "
+                          f"{AUTOMATION_STOP_TIMEOUT:.0f}s 内停下来。")
+            return
+        _log("SYS", "自动化已停止。")
+
+    # 重建日志读取器：关掉本进程可能还开着的 Power.log 句柄（否则 Windows 上
+    # 删不掉），顺带清空 LogState 里上一局残留的状态。
+    try:
+        fsm = CTRL.fsm
+        if fsm is not None:
+            fsm.init()
+            _log("SYS", "已重置日志读取器（LogState / Power.log 句柄）。")
+    except Exception as exc:
+        _log("WARN", f"重置日志读取器失败（继续执行）：{exc}")
+
+    killed = hs_restart.kill_hearthstone()
+    if not killed.get("ok"):
+        _log("ERROR", f"重启炉石已中止：{killed.get('error')}")
+        return
+    _log("SYS", killed.get("message") or "炉石进程已退出。")
+
+    cleared = hs_restart.clear_logs(info["log_root"],
+                                    logger=lambda text: _log("SYS", text))
+    if not cleared.get("ok"):
+        _log("WARN", "有日志条目删不掉：" + "；".join(cleared.get("errors") or []))
+    kept = f"，保留 {', '.join(cleared['skipped'])}" if cleared["skipped"] else ""
+    _log("SYS", f"日志目录已清空：删除 {cleared['removed']} 项{kept}。")
+
+    launched = hs_restart.launch_hearthstone(
+        info["exe"], fallback=_fallback_launch_hearthstone)
+    if not launched.get("ok"):
+        _log("ERROR", f"炉石启动失败：{launched.get('error')}")
+        return
+    detail = launched.get("warning") or launched.get("message") or "炉石已启动"
+    _log("SYS", f"重启完成：{detail}；确认无误后点「开始对战」继续。")
+
+
+def _overlay_exit_overlay():
+    """浮窗「退出浮窗」：只写一行日志说明发生了什么（脚本继续运行）。"""
+    _log("SYS", "浮窗已退出（脚本与自动化继续运行；"
+                "网页点「🪟 日志浮窗」可再打开）。")
 
 
 def _overlay_account_visible() -> bool:

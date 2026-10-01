@@ -10,6 +10,11 @@ Buttons:
   * ▶ 开始对战            — start automation
   * ⏹ 中止 / ▶ 恢复       — toggle stop/resume (state-aware)
   * ⏸ 本局结束后停止        — toggle; cancel anytime before the match ends
+  * 校准                  — open/close the on-screen calibration window
+  * 💾 保存日志            — dump the battle log to a file
+  * ♻ 重启炉石            — confirm, then kill Hearthstone + wipe logs + relaunch
+  * ✖ 退出浮窗            — close only this window (script keeps running)
+  * 🚪 退出脚本            — stop automation and exit the whole process
 Every button hands the foreground back to Hearthstone afterwards.
 """
 from __future__ import annotations
@@ -39,6 +44,8 @@ WARN = "#d98a2e"
 OK = "#2ea06b"
 GOLD = "#e8b93b"
 DISABLED = "#394050"
+# 「退出浮窗」用中性灰：它不是危险操作（脚本继续跑），别和红色的「退出脚本」混淆。
+NEUTRAL = "#4a5364"
 
 # 浮窗整体不透明度（0.94 = 轻微半透明，既能看到底下的游戏，又不影响阅读）。
 # 单独提出来是为了可测/可调（截图脚本会临时设为 1.0 以免把桌面图标叠进图里）。
@@ -66,15 +73,19 @@ BTN_LAYOUT = {
     "stop_after": (1, 0),
     "calibrate": (2, 0),
     "save": (2, 1),
-    "exit": (3, 0),
+    "restart": (3, 0),
+    "exit_overlay": (3, 1),
+    "exit": (4, 0),
 }
 # 需要横跨整行的按钮（单独一行）。
 BTN_SPAN = {"stop_after": 2, "exit": 2}
 
 # 浮窗尺寸：宽度按最长的一行文字/按钮定，高度 = 品牌行 + 状态面板（4 行）
-# + 四行按钮（开始/中止、本局结束后停止、校准/保存日志、退出脚本）+ 日志区。
-WINDOW_WIDTH = 292
-WINDOW_HEIGHT = 628
+# + 五行按钮（开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
+# 退出脚本）+ 日志区。
+# 宽度按用户要求收窄 10%（292 → 263）：原来的留白偏大。
+WINDOW_WIDTH = 263
+WINDOW_HEIGHT = 654
 
 # 浮窗顶部品牌行：本项目大名 + 一行小字副标题（放在“自动化日志”标题之前）。
 BRAND_NAME = "HSLegendArriver"
@@ -260,6 +271,11 @@ _ON_TOGGLE_ACCOUNT = None
 _ON_CALIBRATE = None
 # 「校准」窗口的收尾回调：关浮窗时把还开着的校准窗口一并关掉。
 _ON_CALIBRATE_CLOSE = None
+# 「重启炉石」按钮：中止进程 → 清空日志目录 → 重新拉起（web_ui 传入）。
+# 确认弹窗在浮窗里完成，确认后才调这个回调。
+_ON_RESTART = None
+# 「退出浮窗」按钮：只关这个窗口，脚本继续跑（web_ui 传入，用来写一行网页日志）。
+_ON_EXIT_OVERLAY = None
 
 
 def account_visible() -> bool:
@@ -413,11 +429,12 @@ def start(on_start=None, on_halt=None, is_running=None,
           human_like_callback=None, concede_callback=None,
           liveness_callback=None, account_callback=None,
           account_visible_setting=None, on_toggle_account=None,
-          on_calibrate=None, on_calibrate_close=None) -> None:
+          on_calibrate=None, on_calibrate_close=None, on_restart=None,
+          on_exit_overlay=None) -> None:
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
-    global _ON_CALIBRATE_CLOSE
+    global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY
     if _STARTED[0]:
         return
     _ON_START = on_start
@@ -435,6 +452,8 @@ def start(on_start=None, on_halt=None, is_running=None,
     _ON_TOGGLE_ACCOUNT = on_toggle_account
     _ON_CALIBRATE = on_calibrate
     _ON_CALIBRATE_CLOSE = on_calibrate_close
+    _ON_RESTART = on_restart
+    _ON_EXIT_OVERLAY = on_exit_overlay
     if account_visible_setting is not None:
         _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
     _STOP.clear()
@@ -540,6 +559,84 @@ def _disable_overlay_activation(root) -> None:
         ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
     except Exception:
         pass
+
+
+def _confirm_restart(root) -> bool:
+    """「重启炉石」的确认小窗：确认返回 True。
+
+    故意不用 tkinter.messagebox：炉石全屏独占时系统对话框可能被压在游戏后面，
+    这里用与浮窗完全相同的 -topmost 机制，一定看得见。
+    """
+    try:
+        import tkinter as tk
+    except Exception:
+        return False
+    outcome = {"ok": False}
+    try:
+        dialog = tk.Toplevel(root)
+    except Exception:
+        return False
+    try:
+        width, height = 344, 208
+        dialog.overrideredirect(True)
+        dialog.attributes("-topmost", True)
+        dialog.configure(bg=BG)
+        root.update_idletasks()
+        x = root.winfo_x() + (root.winfo_width() - width) // 2
+        y = root.winfo_y() + (root.winfo_height() - height) // 2
+        x = max(8, min(x, root.winfo_screenwidth() - width - 8))
+        y = max(8, min(y, root.winfo_screenheight() - height - 8))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        tk.Frame(dialog, bg=DANGER, height=3).pack(fill="x")
+        tk.Label(dialog, text="⚠  中止炉石并清空日志？", bg=BG, fg=DANGER,
+                 font=("Microsoft YaHei", 11, "bold"),
+                 anchor="w").pack(fill="x", padx=12, pady=(10, 4))
+        detail = ("将依次执行：停止自动化 → 强制结束 Hearthstone.exe → "
+                  "清空日志目录内容（保留 Log.config）→ 重新启动炉石。\n"
+                  "对局进行中会直接判负；重启后需再点「开始对战」。")
+        tk.Label(dialog, text=detail, bg=BG, fg=TEXT, justify="left",
+                 font=("Microsoft YaHei", 9),
+                 wraplength=width - 28).pack(fill="x", padx=12)
+
+        def _close(confirm: bool):
+            outcome["ok"] = bool(confirm)
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        row = tk.Frame(dialog, bg=BG)
+        row.pack(fill="x", padx=12, pady=(12, 12), side="bottom")
+        row.columnconfigure(0, weight=1)
+        row.columnconfigure(1, weight=1)
+        tk.Button(row, text="确认执行", bg=DANGER, fg="#ffffff",
+                  activebackground=DANGER, activeforeground="#ffffff", bd=0,
+                  font=("Microsoft YaHei", 10, "bold"), cursor="hand2",
+                  command=lambda: _close(True)
+                  ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=6)
+        tk.Button(row, text="取消", bg=NEUTRAL, fg=TEXT,
+                  activebackground=NEUTRAL, activeforeground=TEXT, bd=0,
+                  font=("Microsoft YaHei", 10), cursor="hand2",
+                  command=lambda: _close(False)
+                  ).grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=6)
+        dialog.bind("<Escape>", lambda _event: _close(False))
+        dialog.bind("<Return>", lambda _event: _close(True))
+
+        dialog.grab_set()
+        dialog.focus_force()
+        dialog.wait_window()
+    except Exception:
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+        return False
+    return bool(outcome["ok"])
 
 
 def _run() -> None:
@@ -789,6 +886,46 @@ def _run() -> None:
 
         calibrate_btn = _make_btn(btn_frame, "校准", ACCENT, _call_calibrate)
         _place(calibrate_btn, "calibrate")
+
+        def _call_restart():
+            """重启炉石：先弹确认，确认后交给 web_ui 后台跑（不阻塞浮窗）。
+
+            用途：日志状态和游戏实际对不上（明明没在游戏却显示在换牌）时，
+            把炉石彻底重启、日志目录清空，状态回到干净起点。
+            """
+            if not _confirm_restart(root):
+                push("[SYS] 已取消重启炉石。")
+                _raise_hearthstone()
+                return
+            try:
+                if _ON_RESTART is not None:
+                    _ON_RESTART()
+            except Exception as exc:
+                push(f"[SYS] 重启炉石失败：{exc}")
+                return
+            finally:
+                _raise_hearthstone()
+
+        restart_btn = _make_btn(btn_frame, "♻  重启炉石", WARN, _call_restart)
+        _place(restart_btn, "restart")
+
+        def _call_exit_overlay():
+            """退出浮窗：只关这个窗口，脚本/自动化/日志照常跑。
+
+            与「退出脚本」区分：那个会停自动化并 os._exit(0) 结束整个进程。
+            想再打开就回网页点「🪟 日志浮窗」。
+            """
+            try:
+                if _ON_EXIT_OVERLAY is not None:
+                    _ON_EXIT_OVERLAY()
+            except Exception:
+                pass
+            # 留一拍，让上面那行“已退出浮窗”先画出来再关窗。
+            root.after(150, stop)
+
+        exit_overlay_btn = _make_btn(btn_frame, "✖  退出浮窗", NEUTRAL,
+                                     _call_exit_overlay)
+        _place(exit_overlay_btn, "exit_overlay")
 
         def _call_exit():
             try:

@@ -240,8 +240,9 @@ class ButtonLayoutTests(unittest.TestCase):
         for key, (row, column) in log_overlay.BTN_LAYOUT.items():
             rows.setdefault(row, []).append(column)
 
-        # 第 3 行只有「退出脚本」（横跨整行），其余都是一行两个。
-        self.assertEqual({0: [0, 1], 1: [0], 2: [0, 1], 3: [0]}, rows)
+        # 5 行：开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
+        # 退出脚本（横跨整行）。
+        self.assertEqual({0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0]}, rows)
         for columns in rows.values():
             self.assertLessEqual(len(columns), 2)
 
@@ -249,6 +250,50 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertEqual(log_overlay.BTN_LAYOUT["save"], (2, 1))
         self.assertEqual(log_overlay.BTN_LAYOUT["calibrate"], (2, 0))
         self.assertNotIn("calibrate", log_overlay.BTN_SPAN)
+
+    def test_restart_sits_next_to_exit_overlay(self):
+        """重启炉石（危险，有确认弹窗）和退出浮窗（安全）同排。"""
+        self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (3, 0))
+        self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (3, 1))
+        self.assertNotIn("restart", log_overlay.BTN_SPAN)
+        self.assertNotIn("exit_overlay", log_overlay.BTN_SPAN)
+
+    def test_exit_overlay_is_not_the_script_exit(self):
+        """「退出浮窗」不能和「退出脚本」同槽位/同颜色，避免误点杀进程。"""
+        self.assertNotEqual(log_overlay.BTN_LAYOUT["exit_overlay"],
+                            log_overlay.BTN_LAYOUT["exit"])
+        source = inspect.getsource(log_overlay._run)
+        self.assertIn('_make_btn(btn_frame, "✖  退出浮窗", NEUTRAL',
+                      source)
+        self.assertIn('_make_btn(btn_frame, "🚪  退出脚本", DANGER', source)
+        self.assertIn('_make_btn(btn_frame, "♻  重启炉石", WARN', source)
+
+    def test_exit_overlay_only_closes_the_window(self):
+        """退出浮窗走 _ON_EXIT_OVERLAY + stop()，绝不去碰 _ON_EXIT。"""
+        source = inspect.getsource(log_overlay._run)
+        body = source.split("def _call_exit_overlay", 1)[1]
+        body = body.split("exit_overlay_btn = ", 1)[0]
+
+        self.assertIn("_ON_EXIT_OVERLAY", body)
+        self.assertIn("stop", body)
+        self.assertNotIn("_ON_EXIT(", body)
+
+    def test_restart_button_asks_for_confirmation_first(self):
+        source = inspect.getsource(log_overlay._run)
+        body = source.split("def _call_restart", 1)[1]
+        body = body.split("restart_btn = ", 1)[0]
+
+        self.assertIn("_confirm_restart(root)", body)
+        self.assertIn("_ON_RESTART", body)
+        # 取消时不能去调回调
+        self.assertIn("已取消重启炉石", body)
+
+    def test_restart_confirmation_is_a_topmost_window(self):
+        source = inspect.getsource(log_overlay._confirm_restart)
+
+        self.assertIn('attributes("-topmost", True)', source)
+        self.assertIn("Hearthstone.exe", source)
+        self.assertIn("Log.config", source)
 
     def test_exit_spans_the_whole_last_row(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
@@ -271,6 +316,17 @@ class ButtonLayoutTests(unittest.TestCase):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
         self.assertLessEqual(log_overlay.BTN_PADY, 4)
+
+    def test_window_is_ten_percent_narrower(self):
+        """用户要求浮窗收窄 10%：292 → 263。"""
+        self.assertEqual(263, log_overlay.WINDOW_WIDTH)
+        self.assertLessEqual(log_overlay.WINDOW_WIDTH,
+                             int(292 * 0.9) + 1)
+
+    def test_window_fits_the_extra_button_row(self):
+        # 多了一行按钮（重启炉石 / 退出浮窗），高度必须补回来。
+        self.assertGreaterEqual(log_overlay.WINDOW_HEIGHT,
+                                628 + 20)
 
     def test_buttons_are_placed_with_grid(self):
         source = inspect.getsource(log_overlay._run)

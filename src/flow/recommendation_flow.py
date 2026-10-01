@@ -251,16 +251,21 @@ class RecommendationFlow:
         return gained
 
     def _announce(self, text):
-        """把延时说明同时打到控制台与浮窗（浮窗按「延时」关键字收）。"""
-        try:
-            print(text)
-        except Exception:
-            pass
+        """把延时说明打到控制台与浮窗（浮窗按「延时」关键字收）。
+
+        只走**一个**通道：ManualController.output 默认就是 print，而 web_ui 用
+        _TeeStream 把 stdout 转进 _log → log_overlay.push。原来 print + output
+        各推一次，同一行会在浮窗里出现两条完全一样的日志（抽牌额外延时实测）。
+        """
         output = getattr(self.controller, "output", None)
-        if output is None:
+        if output is not None:
+            try:
+                output(text)
+            except Exception:
+                pass
             return
         try:
-            output(text)
+            print(text)
         except Exception:
             pass
 
