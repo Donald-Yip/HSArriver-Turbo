@@ -1291,10 +1291,28 @@ def _overlay_close_calibrate():
 AUTOMATION_STOP_TIMEOUT = 15.0
 
 
-def _fallback_launch_hearthstone():
-    """找不到 Hearthstone.exe 时的退路：走战网点「开始游戏」。"""
+def _launch_hearthstone_via_battlenet():
+    """走战网「开始游戏」拉起炉石（与脚本平时拉起炉石的方式一致）。"""
     import click
     return click.enter_HS()
+
+
+def _hearthstone_window_ready() -> bool:
+    """炉石游戏窗口是否已经出现——启动成功的真正判据。"""
+    try:
+        import get_screen
+        return bool(get_screen.test_hs_available())
+    except Exception:
+        return False
+
+
+def _battlenet_window_ready() -> bool:
+    """战网窗口是否已经出现（战网没开时先拉起它，再点「开始游戏」）。"""
+    try:
+        import get_screen
+        return bool(get_screen.get_battlenet_hwnd())
+    except Exception:
+        return False
 
 
 def _overlay_restart_hearthstone():
@@ -1350,9 +1368,16 @@ def _restart_hearthstone_worker():
 
     killed = hs_restart.kill_hearthstone()
     if not killed.get("ok"):
-        _log("ERROR", f"重启炉石已中止：{killed.get('error')}")
-        return
-    _log("SYS", killed.get("message") or "炉石进程已退出。")
+        _log("ERROR", f"中止炉石未确认：{killed.get('error')}")
+        if killed.get("running") is True:
+            # 进程确确实实还在：既不能删它正在写的日志，也不能再起第二个实例。
+            _log("ERROR", "炉石进程还在，已取消后续操作（未删日志、未重复启动）。")
+            return
+        # 状态不明（或确认超时）时继续往下走：宁可多试一次把炉石拉回来，
+        # 也不要让它停在“被关掉且没人重启”的状态里。
+        _log("WARN", "进程状态不明确，继续尝试把炉石拉起来（避免停在关闭状态）。")
+    else:
+        _log("SYS", killed.get("message") or "炉石进程已退出。")
 
     cleared = hs_restart.clear_logs(info["log_root"],
                                     logger=lambda text: _log("SYS", text))
@@ -1361,13 +1386,22 @@ def _restart_hearthstone_worker():
     kept = f"，保留 {', '.join(cleared['skipped'])}" if cleared["skipped"] else ""
     _log("SYS", f"日志目录已清空：删除 {cleared['removed']} 项{kept}。")
 
+    # 优先走战网（脚本平时就是这么拉炉石的）；战网没开就先拉战网。
+    # 直启 Hearthstone.exe 时进程会秒起秒退（没有战网登录态），所以成功判据是
+    # 「游戏窗口出现」，不是「进程存在」。
     launched = hs_restart.launch_hearthstone(
-        info["exe"], fallback=_fallback_launch_hearthstone)
+        info["exe"],
+        battlenet_exe=info.get("battlenet_exe"),
+        launcher=_launch_hearthstone_via_battlenet,
+        battlenet_ready=_battlenet_window_ready,
+        window_ready=_hearthstone_window_ready,
+        logger=lambda text: _log("SYS", text))
     if not launched.get("ok"):
-        _log("ERROR", f"炉石启动失败：{launched.get('error')}")
+        _log("ERROR", f"炉石没能自动启动：{launched.get('error')}；"
+                      "请手动打开战网/炉石后再点「开始对战」。")
         return
-    detail = launched.get("warning") or launched.get("message") or "炉石已启动"
-    _log("SYS", f"重启完成：{detail}；确认无误后点「开始对战」继续。")
+    _log("SYS", f"重启完成：{launched.get('message')}；"
+                "确认无误后点「开始对战」继续。")
 
 
 def _overlay_exit_overlay():

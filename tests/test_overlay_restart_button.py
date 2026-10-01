@@ -102,8 +102,10 @@ class RestartWorkerTests(unittest.TestCase):
                     "ok": True, "removed": 2, "skipped": ["Log.config"],
                     "failed": [], "errors": []}),
             launch_hearthstone=launch or (
-                lambda exe, fallback=None: calls.append(("launch", exe)) or {
-                    "ok": True, "started": "exe", "message": "炉石已启动"}),
+                lambda exe, **kwargs:
+                calls.append(("launch", exe)) or {
+                    "ok": True, "started": "launcher", "running": True,
+                    "message": "炉石已启动（战网「开始游戏」）"}),
         )
         return module
 
@@ -188,17 +190,34 @@ class RestartWorkerTests(unittest.TestCase):
         self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
 
     def test_reports_a_failed_relaunch(self):
-        def failing_launch(exe, fallback=None):
+        def failing_launch(exe, **kwargs):
             self.calls.append(("launch", exe))
-            return {"ok": False, "started": None, "running": None,
-                    "error": "找不到 Hearthstone.exe，且没有可用的战网入口"}
+            return {"ok": False, "started": None, "running": False,
+                    "error": "战网「开始游戏」：进程起来后马上又退出了"}
 
         module = self._fake_hs_restart(launch=failing_launch)
 
         logger = self._run(module)
 
         self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
+        self.assertIn("没能自动启动", logger.call_args_list[-1].args[1])
         self.assertTrue(any("clear" == call[0] for call in self.calls))
+
+    def test_keeps_going_when_the_kill_cannot_be_confirmed(self):
+        """回归：杀进程没确认就中止的话，炉石会停在“被关掉且没人重启”的状态。"""
+        def unsure_kill():
+            self.calls.append(("kill",))
+            return {"ok": False, "killed": False, "running": None,
+                    "error": "读不到进程列表，无法确认炉石是否已退出"}
+
+        module = self._fake_hs_restart(kill=unsure_kill)
+
+        logger = self._run(module)
+
+        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch"],
+                         [call[0] for call in self.calls])
+        self.assertTrue(any("继续尝试把炉石拉起来" in msg
+                            for msg in self._messages(logger)))
 
 
 if __name__ == "__main__":
