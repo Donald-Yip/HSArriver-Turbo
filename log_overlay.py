@@ -20,6 +20,7 @@ Every button hands the foreground back to Hearthstone afterwards.
 from __future__ import annotations
 
 import datetime
+import gc
 import os
 import re
 import threading
@@ -30,6 +31,11 @@ _LOCK = threading.Lock()
 _LINES: deque = deque(maxlen=2000)
 _STARTED = [False]
 _REFRESH_MS = 350
+# 当前浮窗线程：start() 时用来等上一轮彻底收尾，避免两个 Tk 解释器交叠
+# （见 _join_previous_thread 的注释）。
+_THREAD = None
+# 等上一轮结束时最多等多久（秒）。窗口销毁后线程只剩回收动作，正常远小于这个值。
+_SHUTDOWN_TIMEOUT = 3.0
 
 # ---- flat dark palette ---------------------------------------------------
 BG = "#171b24"
@@ -439,6 +445,33 @@ def account_row(info, show_account: bool = True) -> dict:
             "detail": _clip(names[0] if names else info.get("config"))}
 
 
+def _join_previous_thread(timeout: float = _SHUTDOWN_TIMEOUT) -> None:
+    """等上一轮浮窗线程彻底收尾（含在它自己线程里回收 Tk 对象）。
+
+    Tk 解释器必须在**创建它的线程**里销毁，否则 Tcl 会打印
+    “Tcl_AsyncDelete: async handler deleted by the wrong thread”——这也是
+    “急停后点恢复”最容易撞上的报错：窗口刚 destroy、旧解释器还没回收，
+    新线程一分配对象触发 GC，就替别的线程把解释器回收了。
+    这里宁可多等几百毫秒，也不要让两个 Tk 解释器交叠。
+    """
+    global _THREAD
+    thread = _THREAD
+    if thread is None or thread is threading.current_thread():
+        return                      # 没有上一轮；或从浮窗线程自己调用（不能自 join）
+    try:
+        alive = bool(thread.is_alive())
+    except Exception:
+        alive = False               # 不是真线程（测试替身）：直接放掉即可
+    if alive:
+        try:
+            thread.join(timeout)
+            alive = bool(thread.is_alive())
+        except Exception:
+            alive = False
+    if not alive:
+        _THREAD = None
+
+
 def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
           is_in_game=None, score_callback=None, on_exit=None,
@@ -450,8 +483,12 @@ def start(on_start=None, on_halt=None, is_running=None,
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
-    global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY
+    global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
+    if _STARTED[0] and not _STOP.is_set():
+        return                      # 已经开着，且不是在退出中
+    _join_previous_thread()
     if _STARTED[0]:
+        # 收尾超时：宁可不重复开窗，也不要同时存在两个 Tk 解释器。
         return
     _ON_START = on_start
     _ON_HALT = on_halt
@@ -474,7 +511,12 @@ def start(on_start=None, on_halt=None, is_running=None,
         _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
     _STOP.clear()
     _STARTED[0] = True
-    threading.Thread(target=_run, name="hs-log-overlay", daemon=True).start()
+    # 线程入口是 _run_overlay_thread（它包住 _run，好在帧释放后回收 Tk 对象）；
+    # 单独提出来是为了让测试仍能 patch _run 而不真的开窗。
+    thread = threading.Thread(target=_run_overlay_thread,
+                              name="hs-log-overlay", daemon=True)
+    _THREAD = thread
+    thread.start()
 
 
 def stop() -> None:
@@ -495,7 +537,13 @@ def stop() -> None:
 
 
 def is_running() -> bool:
-    return bool(_STARTED[0])
+    """浮窗是否真的在显示。
+
+    「已经在退出中」（_STOP 已置位、窗口还没销毁）算**没在跑**：这样网页点一下
+    「关闭浮窗」再点「开启浮窗」能立刻重开，而不是被当成“还开着”而无反应。
+    重开时 start() 会先等上一轮线程收尾，不会出现两个 Tk 解释器交叠。
+    """
+    return bool(_STARTED[0]) and not _STOP.is_set()
 
 
 def _raise_hearthstone() -> None:
@@ -1151,4 +1199,29 @@ def _run() -> None:
         root.mainloop()
     except Exception as exc:
         print(f"[overlay] 日志浮窗禁用: {type(exc).__name__}: {exc}")
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def _run_overlay_thread() -> None:
+    """浮窗线程入口：跑真正的窗口逻辑，再**在窗口帧释放之后**回收 Tk 对象。
+
+    为什么回收不能写在 _run() 里：tkinter 的 Tk 实例、控件和回调闭包互相引用成环，
+    引用计数永远不归零，只能靠 GC 回收；而 _run() 自己的帧（一堆控件局部变量 +
+    嵌套函数）在它返回之前一直钉着整张图，在帧里 gc.collect() 什么都回收不掉
+    （实测：关闭浮窗后仍能扫到 1 个 Tk 实例 + 26 个 tkinter 控件）。等 _run()
+    返回、帧被释放之后再回收，才真正回收在**创建解释器的这个线程**里。
+    否则下一次 GC 若发生在别的线程（急停后点「恢复」最容易：新线程一分配对象就
+    触发 GC），Tcl 会直接 panic：
+        Tcl_AsyncDelete: async handler deleted by the wrong thread
+    """
+    try:
+        _run()
+    finally:
+        try:
+            gc.collect()
+        except Exception:
+            pass
         _STARTED[0] = False

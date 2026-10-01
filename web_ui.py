@@ -1420,9 +1420,18 @@ def _restart_hearthstone_worker():
 
 
 def _overlay_exit_overlay():
-    """浮窗「退出浮窗」：只写一行日志说明发生了什么（脚本继续运行）。"""
-    _log("SYS", "浮窗已退出（脚本与自动化继续运行；"
-                "网页点「🪟 日志浮窗」可再打开）。")
+    """浮窗「退出浮窗」：只写一行日志说明发生了什么（脚本继续运行）。
+
+    同时把「就绪」状态放掉：浮窗关掉之后再点网页大按钮，必须先走「开始运行
+    （准备）」把浮窗重新开起来，而不是直接被当成「开始对战」一点就开打。
+    """
+    try:
+        with CTRL.lock:
+            CTRL.prepared = False
+    except Exception:
+        pass
+    _log("SYS", "浮窗已退出（脚本与自动化继续运行）。再次开始：网页点「开始运行（准备）」"
+                "→再点「开始对战」；只想看日志就点「🪟 日志浮窗」。")
 
 
 def _overlay_account_visible() -> bool:
@@ -1446,14 +1455,24 @@ def _overlay_save_account_visible(visible: bool) -> None:
 
 
 def api_toggle_overlay(body=None):
-    """开/关右上角实时日志浮窗。"""
+    """开/关右上角实时日志浮窗。
+
+    就绪状态跟着浮窗走：关掉浮窗 = 回到未就绪（网页大按钮变回「开始运行（准备）」
+    而不是「开始对战」，避免浮窗都没开就被一点直接开打）；重新开出来 = 就绪。
+    """
     if log_overlay is None:
         return {"ok": False, "error": "日志浮窗模块不可用"}
     if log_overlay.is_running():
         log_overlay.stop()
-        return {"ok": True, "enabled": False, "message": "日志浮窗已关闭"}
+        with CTRL.lock:
+            CTRL.prepared = False
+        return {"ok": True, "enabled": False,
+                "message": "日志浮窗已关闭（已回到未就绪；点「开始运行」重新准备）"}
     _bind_overlay()
-    return {"ok": True, "enabled": True, "message": "日志浮窗已开启"}
+    with CTRL.lock:
+        CTRL.prepared = True
+    return {"ok": True, "enabled": True,
+            "message": "日志浮窗已开启（已就绪；点「开始对战」或浮窗的 ▶ 开始）"}
 
 
 def api_cancel_schedule():
@@ -1519,12 +1538,20 @@ def status_snapshot():
         prepared = CTRL.prepared
     elapsed = int(time.time() - time_begin) if time_begin > 0 else 0
     win_rate = round(wins * 100.0 / games, 1) if games else 0.0
+    # 浮窗是否真的开着：网页用它同步「🪟 日志浮窗（开/关）」按钮文字，
+    # 也能解释「为什么大按钮回到了开始运行」。
+    try:
+        overlay_running = bool(log_overlay is not None
+                               and log_overlay.is_running())
+    except Exception:
+        overlay_running = False
     return {
         "server_time": datetime.now().isoformat(timespec="seconds"),
         "is_admin": IS_ADMIN,
         "running": running,
         "starting": starting,
         "prepared": prepared,
+        "overlay_running": overlay_running,
         "phase": phase,
         "stopped_by": stopped_by,
         "stop_after_game": stop_after,

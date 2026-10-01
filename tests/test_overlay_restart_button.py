@@ -45,16 +45,22 @@ class OverlayWiringTests(unittest.TestCase):
         self.assertIs(bound["on_exit_overlay"], web_ui._overlay_exit_overlay)
 
     def test_exit_overlay_callback_only_logs(self):
-        """退出浮窗只写一行日志，绝不碰 _overlay_exit（那个会 os._exit）。"""
+        """退出浮窗只写一行日志 + 放掉就绪状态，绝不碰 _overlay_exit（会 os._exit）。"""
         logged = []
-        with (
-            patch.object(web_ui, "_log",
-                         side_effect=lambda level, msg: logged.append((level, msg))),
-            patch.object(web_ui, "_overlay_exit") as script_exit,
-        ):
-            web_ui._overlay_exit_overlay()
+        saved = web_ui.CTRL.prepared
+        try:
+            with (
+                patch.object(web_ui, "_log",
+                             side_effect=lambda level, msg: logged.append((level, msg))),
+                patch.object(web_ui, "_overlay_exit") as script_exit,
+            ):
+                web_ui.CTRL.prepared = True
+                web_ui._overlay_exit_overlay()
 
-        script_exit.assert_not_called()
+            script_exit.assert_not_called()
+            self.assertFalse(web_ui.CTRL.prepared)     # 关掉浮窗 = 回到未就绪
+        finally:
+            web_ui.CTRL.prepared = saved
         self.assertEqual("SYS", logged[0][0])
         self.assertIn("日志浮窗", logged[0][1])
 

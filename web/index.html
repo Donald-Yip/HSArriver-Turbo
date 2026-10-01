@@ -255,7 +255,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
-      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。<br>🖥️ 炉石请使用 <b>全屏模式</b>（<code>设置 → 选项 → 显示 → 全屏</code>），<b>不要用「最大化窗口」</b>：最大化时窗口坐标与 1920×1080 全屏不一致，硬编码的点击坐标会整体偏移——下随从因有吸附还能成功，法术指定目标则会一直失败重试。<br>♻ 浮窗上的 <b>「重启炉石」</b>会先弹确认，再执行「停自动化 → 强制结束 Hearthstone.exe → 清空日志目录（保留 Log.config）→ 重新启动炉石」，用于<b>日志状态和游戏对不上</b>（没在游戏却显示在换牌）的情况；重启会<b>优先走战网</b>（战网没开就先开战网，再点「开始游戏」），而且以<b>游戏窗口出现</b>才算成功，不会出现“报已启动、其实炉石已经关了”；<b>「退出浮窗」</b>只关窗口、脚本继续跑，改完这里的设置再点上面的「🪟 日志浮窗」就能打开。</div>
+      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。<br>🖥️ 炉石请使用 <b>全屏模式</b>（<code>设置 → 选项 → 显示 → 全屏</code>），<b>不要用「最大化窗口」</b>：最大化时窗口坐标与 1920×1080 全屏不一致，硬编码的点击坐标会整体偏移——下随从因有吸附还能成功，法术指定目标则会一直失败重试。<br>♻ 浮窗上的 <b>「重启炉石」</b>会先弹确认，再执行「停自动化 → 强制结束 Hearthstone.exe → 清空日志目录（保留 Log.config）→ 重新启动炉石」，用于<b>日志状态和游戏对不上</b>（没在游戏却显示在换牌）的情况；重启会<b>优先走战网</b>（战网没开就先开战网，再点「开始游戏」），而且以<b>游戏窗口出现</b>才算成功，不会出现“报已启动、其实炉石已经关了”；<b>「退出浮窗」</b>只关窗口、脚本继续跑；关掉浮窗会回到<b>未就绪</b>状态（大按钮变回「🪄 开始运行（准备）」），再点上面的「🪟 日志浮窗」或「开始运行」把浮窗开出来，然后点「⚔️ 开始对战」才会开始。</div>
     </section>
 
     <section class="card wide">
@@ -553,6 +553,9 @@ function render(s){
 
   $("btnStart").disabled = busy;
   if (!s.starting) $("btnStart").textContent = s.prepared ? "⚔️ 开始对战" : "🪄 开始运行（准备）";
+  /* 浮窗开着才算就绪：浮窗里点了「退出浮窗」后，按钮文字要跟着变回「开始运行」，
+     否则用户以为点一下只是弹浮窗，实际会直接开打（见 /api/overlay 的就绪同步）。 */
+  $("btnOverlay").textContent = "🪟 日志浮窗（" + (s.overlay_running ? "开" : "关") + "）";
   $("btnAfterGame").disabled = !running || s.stop_after_game;
   $("btnStopNow").disabled = !running;
   $("btnSchedule").disabled = busy;
@@ -930,6 +933,9 @@ $("btnOverlay").addEventListener("click", function(){
     if (r.ok) {
       toast(r.message || (r.enabled ? "日志浮窗已开启" : "日志浮窗已关闭"), "ok");
       btn.textContent = "🪟 日志浮窗（" + (r.enabled ? "开" : "关") + "）";
+      /* 就绪状态跟着浮窗走：立刻刷新一次，让「开始运行 / 开始对战」马上跟上，
+         不用等 1 秒轮询。 */
+      refreshStatus();
     } else {
       toast(r.error || "切换失败", "error");
     }

@@ -2,6 +2,7 @@
 
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import web_ui
@@ -94,6 +95,144 @@ class PrepareTests(unittest.TestCase):
         self.assertFalse(web_ui.status_snapshot()["prepared"])
         web_ui.CTRL.prepared = True
         self.assertTrue(web_ui.status_snapshot()["prepared"])
+
+    def test_prepare_reopens_the_overlay_without_starting(self):
+        """退出浮窗 → 再点「开始运行」：只把浮窗开回来，绝不开始对战。"""
+        started, bound = [], []
+        overlay = types.SimpleNamespace(is_running=lambda: False)
+
+        with (
+            patch.object(web_ui, "log_overlay", overlay),
+            patch.object(web_ui, "api_start",
+                         side_effect=lambda body=None: started.append(body)),
+            patch.object(web_ui, "_bind_overlay",
+                         side_effect=lambda: bound.append(1)),
+            patch.object(web_ui, "_bring_hearthstone_foreground"),
+            patch.object(web_ui.threading, "Thread", _SyncThread),
+            patch.object(web_ui, "_log"),
+        ):
+            web_ui.CTRL.automation_thread = None
+            web_ui.CTRL.starting = False
+            web_ui.CTRL.prepared = False        # 刚点过「退出浮窗」
+            result = web_ui.api_prepare({})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, len(bound))         # 浮窗重新开出来
+        self.assertEqual([], started)           # 关键：没有开始操作
+        self.assertTrue(web_ui.CTRL.prepared)   # 就绪 → 按钮变「开始对战」
+
+
+class OverlayStateSyncTests(unittest.TestCase):
+    """就绪状态跟着浮窗走：浮窗关掉 → 回到「开始运行」，重开 → 「开始对战」。"""
+
+    def setUp(self):
+        self._saved = (web_ui.CTRL.prepared, web_ui.CTRL.automation_thread,
+                       web_ui.CTRL.starting)
+
+    def tearDown(self):
+        (web_ui.CTRL.prepared, web_ui.CTRL.automation_thread,
+         web_ui.CTRL.starting) = self._saved
+
+    def test_exit_overlay_button_resets_prepared(self):
+        logged = []
+        web_ui.CTRL.prepared = True
+
+        with patch.object(web_ui, "_log",
+                          side_effect=lambda level, msg: logged.append((level, msg))):
+            web_ui._overlay_exit_overlay()
+
+        self.assertFalse(web_ui.CTRL.prepared)
+        self.assertFalse(web_ui.status_snapshot()["prepared"])
+        self.assertIn("日志浮窗", logged[0][1])
+        # 告诉用户下一步该点哪个按钮，别再以为“点一下就直接开打”
+        self.assertIn("开始运行", logged[0][1])
+        self.assertIn("开始对战", logged[0][1])
+
+    def test_toggle_overlay_off_resets_prepared(self):
+        stopped = []
+        overlay = types.SimpleNamespace(is_running=lambda: True,
+                                        stop=lambda: stopped.append(1))
+        web_ui.CTRL.prepared = True
+
+        with patch.object(web_ui, "log_overlay", overlay):
+            result = web_ui.api_toggle_overlay({})
+
+        self.assertEqual([1], stopped)
+        self.assertFalse(result["enabled"])
+        self.assertFalse(web_ui.CTRL.prepared)
+        self.assertIn("开始运行", result["message"])
+
+    def test_toggle_overlay_on_marks_prepared(self):
+        bound = []
+        overlay = types.SimpleNamespace(is_running=lambda: False)
+        web_ui.CTRL.prepared = False
+
+        with (
+            patch.object(web_ui, "log_overlay", overlay),
+            patch.object(web_ui, "_bind_overlay",
+                         side_effect=lambda: bound.append(1)),
+        ):
+            result = web_ui.api_toggle_overlay({})
+
+        self.assertEqual(1, len(bound))
+        self.assertTrue(result["enabled"])
+        self.assertTrue(web_ui.CTRL.prepared)
+        self.assertIn("开始对战", result["message"])
+
+    def test_toggle_overlay_without_the_module_is_refused(self):
+        web_ui.CTRL.prepared = True
+
+        with patch.object(web_ui, "log_overlay", None):
+            result = web_ui.api_toggle_overlay({})
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(web_ui.CTRL.prepared)      # 没动就绪状态
+
+    def test_status_exposes_overlay_running(self):
+        with patch.object(web_ui, "log_overlay",
+                          types.SimpleNamespace(is_running=lambda: True)):
+            self.assertTrue(web_ui.status_snapshot()["overlay_running"])
+
+        with patch.object(web_ui, "log_overlay",
+                          types.SimpleNamespace(is_running=lambda: False)):
+            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
+
+        with patch.object(web_ui, "log_overlay", None):
+            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
+
+    def test_status_tolerates_a_broken_overlay_module(self):
+        def _boom():
+            raise RuntimeError("浮窗线程崩了")
+
+        with patch.object(web_ui, "log_overlay",
+                          types.SimpleNamespace(is_running=_boom)):
+            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
+
+
+class OverlayPageTests(unittest.TestCase):
+    """网页要跟着状态走：🪟 按钮文字、切换后立即刷新、按钮语义提示。"""
+
+    def setUp(self):
+        path = Path(__file__).resolve().parent.parent / "web" / "index.html"
+        self.html = path.read_text(encoding="utf8")
+
+    def test_overlay_button_label_follows_status(self):
+        self.assertIn('$("btnOverlay").textContent = "🪟 日志浮窗（" '
+                      '+ (s.overlay_running ? "开" : "关") + "）"',
+                      self.html)
+
+    def test_toggle_refreshes_the_status_immediately(self):
+        handler = self.html[self.html.index('$("btnOverlay")'):]
+        handler = handler[:handler.index("$(\"btnStart\")")]
+        self.assertIn("refreshStatus()", handler)
+
+    def test_start_button_still_depends_on_prepared(self):
+        self.assertIn('s.prepared ? "⚔️ 开始对战" : "🪄 开始运行（准备）"',
+                      self.html)
+
+    def test_hint_explains_the_two_step_after_exit_overlay(self):
+        self.assertIn("关掉浮窗会回到", self.html)
+        self.assertIn("未就绪", self.html)
 
 
 class StartAfterPrepareTests(unittest.TestCase):
