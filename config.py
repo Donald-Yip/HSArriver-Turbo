@@ -286,25 +286,36 @@ OCR_MODEL_ROOT = os.environ.get("HS_OCR_MODEL_ROOT") or os.path.normpath(
 
 
 # ---------------------------------------------------------------- 推荐自动化调优
-def _user_roi() -> Optional[tuple[int, int, int, int]]:
-    """读取用户校准的推荐区域（ui_config.json 的 recommendation_roi）。
+# 校准工具可以写回 ui_config.json 的区域键白名单（同时是 RecommendationConfig
+# 的字段名）。新增一个可校准区域时，这里和 screen_regions.CALIBRATION_TARGETS
+# 一起加即可。
+_USER_BOX_KEYS = ("recommendation_roi", "mulligan_confirm_roi",
+                  "ai_win_rate_roi", "ai_win_rate_wide_roi")
 
-    校准工具 calibrate_roi.py 把桌面上拖拽结果写入该文件；这里在每次创建
+
+def _user_box(key: str) -> Optional[tuple[int, int, int, int]]:
+    """读取 ui_config.json 顶层某个区域键（值为 [left, top, right, bottom]）。
+
+    校准工具 calibrate_roi.py 把桌面上拖拽的结果写入该文件；这里在每次创建
     配置时应用（打包版/源码版路径一致：应用目录=本文件所在目录）。
-    未配置或格式非法时返回 None 走默认值。
+    未配置或格式非法时返回 None，调用方继续用代码默认值。
 
     返回格式：(left, top, right, bottom)，必须满足 left<right && top<bottom。
     """
     try:
         cfg_path = ROOT / "ui_config.json"
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        roi = data.get("recommendation_roi")
-        vals = tuple(int(v) for v in roi)
+        vals = tuple(int(v) for v in data.get(key))
         if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
             return vals
     except Exception:
         pass
     return None
+
+
+def _user_roi() -> Optional[tuple[int, int, int, int]]:
+    """读取用户校准的推荐区域（ui_config.json 的 recommendation_roi）。"""
+    return _user_box("recommendation_roi")
 
 
 def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
@@ -313,16 +324,7 @@ def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
     用于换牌阶段检测“确认”按钮是否在场：按钮在 → 可安全执行换牌并点击确认；
     按钮不在 → 面板未就绪或已提交，不盲目点击。格式同 recommendation_roi。
     """
-    try:
-        cfg_path = ROOT / "ui_config.json"
-        data = json.loads(cfg_path.read_text(encoding="utf-8"))
-        roi = data.get("mulligan_confirm_roi")
-        vals = tuple(int(v) for v in roi)
-        if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
-            return vals
-    except Exception:
-        pass
-    return None
+    return _user_box("mulligan_confirm_roi")
 
 
 # 可通过 ui_config.json 的 delays 段覆盖的延时字段白名单。
@@ -416,6 +418,12 @@ class RecommendationConfig:
     # 可通过 ui_config.json 的 mulligan_confirm_roi 覆盖。
     mulligan_confirm_roi: tuple[int, int, int, int] = (860, 810, 1060, 890)
 
+    # 盒子「AI胜率 X%」浮动条区域（开了自动投降时 OCR 读取）。
+    # 主区域读不到时用 ai_win_rate_wide_roi（= 主区域外扩一圈）再读一次兜底。
+    # 两者都可通过 ui_config.json 同名键覆盖（校准工具写入）。
+    ai_win_rate_roi: tuple[int, int, int, int] = (110, 8, 270, 48)
+    ai_win_rate_wide_roi: tuple[int, int, int, int] = (95, 0, 300, 60)
+
     # ------------------------------------------------------------------ 第一回合额外延时
     # 第一回合开始时会有一批"开局生效的全局卡"（如黑暗主教本尼迪塔斯 SW_448
     # 触发 TriggerKeyword=START_OF_GAME_KEYWORD），它们要跑入场/效果动画，导致
@@ -460,13 +468,11 @@ class RecommendationConfig:
 
     def __post_init__(self) -> None:
         # 用户可覆盖项依次应用（代码默认 < ui_config.json）：
-        # 1) 推荐区域 ROI；2) 换牌确认按钮 ROI；3) 各延时。
-        roi = _user_roi()
-        if roi is not None:
-            object.__setattr__(self, "recommendation_roi", roi)
-        confirm_roi = _user_confirm_roi()
-        if confirm_roi is not None:
-            object.__setattr__(self, "mulligan_confirm_roi", confirm_roi)
+        # 1) 校准工具写入的各区域 ROI；2) 各延时。
+        for key in _USER_BOX_KEYS:
+            box = _user_box(key)
+            if box is not None:
+                object.__setattr__(self, key, box)
         # 用户可在 ui_config.json 的 delays 段覆盖延时（默认采用上游时序）。
         for key, value in _user_delays().items():
             object.__setattr__(self, key, value)

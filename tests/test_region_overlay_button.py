@@ -31,6 +31,21 @@ class FakeOverlay:
         return self.visible
 
 
+class FakeCalibrationProc:
+    """替身：模拟校准工具子进程（poll/terminate）。"""
+
+    def __init__(self, alive=True):
+        self.alive = alive
+        self.terminated = False
+
+    def poll(self):
+        return None if self.alive else 0
+
+    def terminate(self):
+        self.terminated = True
+        self.alive = False
+
+
 class _BlockingRunner:
     """替身窗口循环：一直阻塞到被放行，模拟真实叠加层“显示中”。"""
 
@@ -210,22 +225,71 @@ class OverlayButtonTests(unittest.TestCase):
             web_ui._bind_overlay()
 
         self.assertIs(bound["on_calibrate"], web_ui._overlay_toggle_calibrate)
+        # 关浮窗时要能把还开着的校准窗口一起收掉。
+        self.assertIs(bound["on_calibrate_close"],
+                      web_ui._overlay_close_calibrate)
 
-    def test_web_ui_callback_returns_the_new_state(self):
+    def test_stopping_the_overlay_hides_the_region_boxes(self):
         fake = FakeOverlay(visible_after_toggle=True)
-        with patch.dict("sys.modules", {"region_overlay": fake}):
+        fake.visible = True
+        saved = log_overlay._STOP.is_set()
+        saved_close = log_overlay._ON_CALIBRATE_CLOSE
+        try:
+            log_overlay._ON_CALIBRATE_CLOSE = None
+            with patch.dict("sys.modules", {"region_overlay": fake}):
+                log_overlay.stop()
+            self.assertFalse(fake.visible)
+        finally:
+            log_overlay._ON_CALIBRATE_CLOSE = saved_close
+            if not saved:
+                log_overlay._STOP.clear()
+
+    def test_stopping_the_overlay_closes_the_calibration_window(self):
+        calls = []
+        saved = log_overlay._STOP.is_set()
+        saved_close = log_overlay._ON_CALIBRATE_CLOSE
+        try:
+            log_overlay._ON_CALIBRATE_CLOSE = lambda: calls.append("closed")
+            log_overlay.stop()
+        finally:
+            log_overlay._ON_CALIBRATE_CLOSE = saved_close
+            if not saved:
+                log_overlay._STOP.clear()
+
+        self.assertEqual(["closed"], calls)
+
+
+class CalibrationSessionTests(unittest.TestCase):
+    """浮窗「校准」按钮与网页「校准」按钮 = 同一个校准窗口。"""
+
+    def setUp(self):
+        self.saved = web_ui._CALIBRATION_PROC
+        web_ui._CALIBRATION_PROC = None
+
+    def tearDown(self):
+        web_ui._CALIBRATION_PROC = self.saved
+
+    def _patch_popen(self, proc):
+        started = []
+        return started, patch.object(
+            web_ui.subprocess, "Popen",
+            side_effect=lambda *args, **kwargs: (started.append(args), proc)[1])
+
+    def test_toggle_starts_then_closes_the_same_window(self):
+        proc = FakeCalibrationProc()
+        started, popen = self._patch_popen(proc)
+        with popen, patch.object(web_ui, "_log"):
             self.assertTrue(web_ui._overlay_toggle_calibrate())
-
-        fake.after = False
-        with patch.dict("sys.modules", {"region_overlay": fake}):
+            self.assertEqual(1, len(started))
+            self.assertIn("calibrate_roi.py", str(started[0]))
             self.assertFalse(web_ui._overlay_toggle_calibrate())
+        self.assertTrue(proc.terminated)
 
-    def test_web_ui_callback_reports_failures(self):
-        broken = SimpleNamespace(toggle=lambda: (_ for _ in ()).throw(
-            RuntimeError("窗口建不出来")))
+    def test_toggle_reports_failures(self):
         logged = []
         with (
-            patch.dict("sys.modules", {"region_overlay": broken}),
+            patch.object(web_ui.subprocess, "Popen",
+                         side_effect=OSError("窗口建不出来")),
             patch.object(web_ui, "_log",
                          side_effect=lambda level, msg: logged.append((level, msg))),
         ):
@@ -234,17 +298,27 @@ class OverlayButtonTests(unittest.TestCase):
         self.assertEqual("WARN", logged[0][0])
         self.assertIn("窗口建不出来", logged[0][1])
 
-    def test_stopping_the_overlay_hides_the_region_boxes(self):
-        fake = FakeOverlay(visible_after_toggle=True)
-        fake.visible = True
-        saved = log_overlay._STOP.is_set()
-        try:
-            with patch.dict("sys.modules", {"region_overlay": fake}):
-                log_overlay.stop()
-            self.assertFalse(fake.visible)
-        finally:
-            if not saved:
-                log_overlay._STOP.clear()
+    def test_web_button_reuses_a_running_window(self):
+        web_ui._CALIBRATION_PROC = FakeCalibrationProc()
+        with patch.object(web_ui.subprocess, "Popen") as popen, \
+                patch.object(web_ui, "_log"):
+            result = web_ui.api_calibrate()
+
+        self.assertTrue(result["ok"])
+        popen.assert_not_called()
+
+    def test_closing_the_overlay_closes_the_calibration_window(self):
+        proc = FakeCalibrationProc()
+        web_ui._CALIBRATION_PROC = proc
+        web_ui._overlay_close_calibrate()
+
+        self.assertTrue(proc.terminated)
+        self.assertFalse(web_ui._calibration_running())
+
+    def test_closing_when_nothing_runs_is_a_no_op(self):
+        with patch.object(web_ui, "_log") as log:
+            web_ui._overlay_close_calibrate()
+        log.assert_not_called()
 
 
 def _stub_callback():

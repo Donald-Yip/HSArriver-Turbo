@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """脚本实际用到的「屏幕截图区域 / 状态判定点」清单，以及区域框预览图生成。
 
-Web 控制台「🎯 校准 / 截图区域框」卡片里的 [显示截图区域框] 按钮
-→ GET /api/regions → build_region_preview()：截一张当前屏幕，把脚本所有
-截图区域画成彩色框、状态判定点画成十字准星，直接把图返回给浏览器显示。
+这是区域坐标的**唯一来源**：校准窗口（calibrate_roi.py）、屏幕叠加层
+（region_overlay.py）、网页预览（GET /api/regions → build_region_preview()）
+以及自动投降读 AI胜率，全都从这里取框，避免「画的框和实际截的不是同一个」。
+
+* ``CALIBRATION_TARGETS`` / ``calibration_targets()`` —— 用户能拖、能保存到
+  ui_config.json 的区域（推荐面板 / 换牌确认按钮 / AI胜率浮动条）；
+* ``screenshot_regions()`` —— 屏幕上会画出来的**全部**区域（含兜底框，只读）；
+* ``build_region_preview()`` —— 截一张当前屏幕、画上所有框，给浏览器看。
 
 用户据此一眼确认三件事：
     1. 分辨率 / 缩放对不对——框的整体位置和整屏大小是否和 1920×1080 吻合；
@@ -12,8 +17,8 @@ Web 控制台「🎯 校准 / 截图区域框」卡片里的 [显示截图区域
     3. 换牌「确认」按钮、AI胜率浮动条这些区域有没有对偏。
 
 整个过程只截屏，不点击、不移动鼠标，自动化运行中也能安全使用。
-区域坐标全部来自 config.py（用户可在 ui_config.json 覆盖），
-本模块不重复定义，避免「预览画的和实际截的不是同一个框」。
+区域坐标全部来自 config.py（用户可在 ui_config.json 覆盖，校准窗口写入），
+本模块不重复定义默认值以外的坐标。
 """
 from __future__ import annotations
 
@@ -27,8 +32,41 @@ from selfcheck import STATUS_FAIL, STATUS_OK, STATUS_WARN
 
 # 盒子浮动条「AI胜率 X%」的截图区域，必须与 FSM_action._AI_WIN_RATE_REGIONS
 # 一致（test_screen_regions.py 会导入 FSM_action 校验，防止两边改岔）。
+# 用户用校准工具改过后走 ui_config.json 的 ai_win_rate_roi，这里是代码默认值。
 AI_WIN_RATE_REGION = (110, 8, 270, 48)
-AI_WIN_RATE_WIDE_REGION = (95, 0, 300, 60)
+# 兜底区域 = 主区域按「左/上/右/下」外扩，完全包住主区域。
+# 注意：不要直接写死兜底坐标，否则改了主区域默认值两边就会悄悄不一致。
+AI_WIN_RATE_WIDE_MARGIN = (15, 8, 30, 12)
+
+
+def expand_box(box, margin) -> tuple[int, int, int, int]:
+    """把区域按 (左, 上, 右, 下) 边距外扩一圈，左上角不越过屏幕原点。"""
+    left, top, right, bottom = (int(v) for v in box)
+    margin_left, margin_top, margin_right, margin_bottom = (int(v) for v in margin)
+    return (max(0, left - margin_left), max(0, top - margin_top),
+            right + margin_right, bottom + margin_bottom)
+
+
+AI_WIN_RATE_WIDE_REGION = expand_box(AI_WIN_RATE_REGION, AI_WIN_RATE_WIDE_MARGIN)
+
+# 可用校准工具拖拽并保存到 ui_config.json 的区域（校准目标登记表）。
+# key 与屏幕叠加层的区域 key 一致；config_key 是 ui_config.json 的顶层键，
+# 同时也是 config.RecommendationConfig 的字段名。dict 的 "default" 是代码默认值。
+# 新增一个「可校准区域」只需要在这里加一项：校准工具、网页与叠加层都自动跟上。
+CALIBRATION_TARGETS = (
+    {"key": "recommendation", "config_key": "recommendation_roi",
+     "label": "盒子推荐面板", "short": "推荐面板", "color": "#63c76f",
+     "default": (7, 200, 202, 500),
+     "hint": "把盒子的「打法参考A」面板框进绿框"},
+    {"key": "mulligan_confirm", "config_key": "mulligan_confirm_roi",
+     "label": "换牌「确认」按钮", "short": "换牌确认", "color": "#5fa8e6",
+     "default": (860, 810, 1060, 890),
+     "hint": "框住换牌界面里的「确认」按钮"},
+    {"key": "win_rate", "config_key": "ai_win_rate_roi",
+     "label": "盒子「AI胜率」浮动条", "short": "AI胜率", "color": "#e2a84e",
+     "default": AI_WIN_RATE_REGION,
+     "hint": "框住左上角盒子的「AI胜率 X%」浮动条"},
+)
 
 # get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
 # 它们不是区域而是单点，所以画成十字准星：位置偏了状态识别就会错。
@@ -64,25 +102,66 @@ def _box(value, fallback):
     return tuple(int(v) for v in fallback)
 
 
+def ai_win_rate_boxes(config=None) -> tuple[tuple, tuple]:
+    """AI胜率的主区域与兜底区域（都优先取用户校准值，非法则回代码默认值）。"""
+    cfg = config if config is not None else _default_config()
+    main = _box(getattr(cfg, "ai_win_rate_roi", None), AI_WIN_RATE_REGION)
+    raw_wide = getattr(cfg, "ai_win_rate_wide_roi", None)
+    if raw_wide is None:
+        wide = expand_box(main, AI_WIN_RATE_WIDE_MARGIN)
+    else:
+        wide = _box(raw_wide, expand_box(main, AI_WIN_RATE_WIDE_MARGIN))
+    return main, wide
+
+
+def calibration_targets(config=None) -> list[dict]:
+    """可校准区域清单（校准工具/叠加层/AI胜率读取共用的唯一来源）。
+
+    返回 [{key, config_key, label, short, color, box, hint}, ...]，
+    box 是「当前生效」的 (left, top, right, bottom)：优先 ui_config.json
+    里用户校准过的值，否则用 CALIBRATION_TARGETS 里的代码默认值。
+    """
+    cfg = config if config is not None else _default_config()
+    targets = []
+    for item in CALIBRATION_TARGETS:
+        target = dict(item)
+        target["box"] = _box(getattr(cfg, item["config_key"], None), item["default"])
+        targets.append(target)
+    return targets
+
+
+def calibration_target(config=None, key: str = "") -> Optional[dict]:
+    """按 key 取一个可校准区域；找不到返回 None。"""
+    for target in calibration_targets(config):
+        if target["key"] == key:
+            return target
+    return None
+
+
 def screenshot_regions(config=None) -> list[dict]:
     """脚本所有截图区域（区域框预览与文档共同的唯一来源）。"""
     cfg = config if config is not None else _default_config()
+    by_key = {target["key"]: target for target in calibration_targets(cfg)}
+    win_rate, win_rate_wide = ai_win_rate_boxes(cfg)
     return [
         {"key": "recommendation", "color": "#63c76f",
          "label": "盒子推荐面板（OCR 识别来源）",
-         "box": _box(getattr(cfg, "recommendation_roi", None), (7, 200, 202, 500)),
+         "box": by_key["recommendation"]["box"],
+         "config_key": "recommendation_roi",
          "note": "对战中把盒子的「打法参考A」面板拖进这个绿框，脚本就靠它读出牌建议"},
         {"key": "mulligan_confirm", "color": "#5fa8e6",
          "label": "换牌「确认」按钮（提交校验）",
-         "box": _box(getattr(cfg, "mulligan_confirm_roi", None), (860, 810, 1060, 890)),
+         "box": by_key["mulligan_confirm"]["box"],
+         "config_key": "mulligan_confirm_roi",
          "note": "换牌阶段用来确认按钮是否已经消失（还在=没提交成功，要重试）"},
         {"key": "win_rate", "color": "#e2a84e",
          "label": "盒子「AI胜率」浮动条",
-         "box": AI_WIN_RATE_REGION,
+         "box": win_rate,
+         "config_key": "ai_win_rate_roi",
          "note": "开了自动投降才用得到：靠它读左上角 AI胜率"},
         {"key": "win_rate_wide", "color": "#e2705f",
          "label": "AI胜率兜底区域",
-         "box": AI_WIN_RATE_WIDE_REGION,
+         "box": win_rate_wide,
          # 兜底区域完全包住主区域，所以画细一点、标签放框下面，避免和上面重叠。
          "width": 1, "label_below": True,
          "note": "主区域读不到时放宽再读一次，偏一点也能兜住"},
@@ -122,14 +201,27 @@ def _default_panel_detector(crop) -> bool:
     return bool(DesktopCapture._panel_is_visible(pixels))
 
 
+_FONT_CACHE: dict[int, object] = {}
+
+
 def _font(size: int):
+    """按字号加载字体（带缓存）。
+
+    渲染循环每帧都要画十几次字，FreeType 每次重新打开 msyh.ttc 会明显拖慢
+    拖框手感，所以按字号缓存住。
+    """
+    if size in _FONT_CACHE:
+        return _FONT_CACHE[size]
     from PIL import ImageFont
+    font = None
     for path in _FONT_CANDIDATES:
         try:
-            return ImageFont.truetype(path, size)
+            font = ImageFont.truetype(path, size)
+            break
         except OSError:
             continue
-    return None
+    _FONT_CACHE[size] = font
+    return font
 
 
 def label_font(size: int):
@@ -208,7 +300,13 @@ def draw_region_boxes(image, config=None, scale: float = 1.0) -> list[dict]:
         else:
             label_y = y0 - text_height - 8
             if label_y < 0:
-                label_y = min(y0 + 4, max(0, height - text_height - 4))
+                # 框贴着屏幕顶边（例如左上角的「AI胜率」浮动条）：标签挪到框
+                # 右边，别盖在框上——校准/对照时得看得见框里的东西。
+                if x1 + 6 + text_width + 3 <= width:
+                    label_x = x1 + 6
+                    label_y = y0
+                else:
+                    label_y = min(y0 + 4, max(0, height - text_height - 4))
         draw.rectangle((label_x - 3, label_y - 2,
                         label_x + text_width + 3, label_y + text_height + 3),
                        fill=(0, 0, 0))

@@ -893,17 +893,72 @@ def api_schedule(body: dict):
     return {"ok": True, "message": "定时任务已设置，请保持本程序运行。"}
 
 
-def api_calibrate():
-    """启动推荐区域校准工具（绿框对齐，无实时 OCR 预览窗）。"""
+# ---------------------------------------------------------------- 校准工具
+# 网页按钮、浮窗「校准」按钮、命令行 python calibrate_roi.py 打开的都是同一个
+# 校准窗口（calibrate_roi.py）。这里只维护「同一时刻最多一个」的会话句柄。
+_CALIBRATION_PROC = None
+CALIBRATION_HINT = ("拖框对齐后按 S 保存：1 推荐面板 · 2 换牌确认按钮 · "
+                    "3 AI胜率浮动条（Tab 切换，Esc 退出）")
+
+
+def _calibration_running() -> bool:
+    proc = _CALIBRATION_PROC
+    try:
+        return proc is not None and proc.poll() is None
+    except Exception:
+        return False
+
+
+def _start_calibration() -> dict:
+    """启动校准窗口（已在跑就直接复用，不重复开窗）。"""
+    global _CALIBRATION_PROC
+    if _calibration_running():
+        return {"ok": True, "running": True,
+                "message": f"校准窗口已在屏幕上：{CALIBRATION_HINT}"}
     script = ROOT / "calibrate_roi.py"
     if not script.exists():
+        _log("WARN", f"校准工具缺失：{script}")
         return {"ok": False, "error": f"校准工具缺失：{script}"}
     try:
-        subprocess.Popen([sys.executable, str(script)], cwd=str(ROOT))
+        _CALIBRATION_PROC = subprocess.Popen([sys.executable, str(script)],
+                                             cwd=str(ROOT))
     except Exception as exc:
+        _log("WARN", f"启动校准窗口失败：{exc}")
         return {"ok": False, "error": f"启动校准工具失败：{exc}"}
-    _log("SYS", "已启动推荐区域校准：拖绿框对齐盒子面板，按 S 保存，Esc 退出。")
-    return {"ok": True, "message": "校准工具已启动（无预览：拖绿框对齐盒子面板后按 S 保存，Esc 退出）"}
+    _log("SYS", f"已启动校准窗口：{CALIBRATION_HINT}")
+    return {"ok": True, "running": True,
+            "message": f"校准窗口已启动：{CALIBRATION_HINT}"}
+
+
+def _stop_calibration() -> dict:
+    """关掉校准窗口（浮窗「校准」再点一次 / 关闭脚本时）。"""
+    global _CALIBRATION_PROC
+    proc, _CALIBRATION_PROC = _CALIBRATION_PROC, None
+    if proc is None:
+        return {"ok": True, "running": False, "message": "校准窗口未在运行"}
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+    except Exception as exc:
+        return {"ok": False, "error": f"关闭校准工具失败：{exc}"}
+    return {"ok": True, "running": False, "message": "已关闭校准窗口"}
+
+
+def _toggle_calibration() -> bool:
+    """切换校准窗口，返回切换后是否正在显示（浮窗按钮的返回值）。"""
+    if _calibration_running():
+        _stop_calibration()
+        return False
+    _start_calibration()
+    return _calibration_running()
+
+
+def api_calibrate():
+    """网页「🎯 校准区域」卡片：启动同一个校准窗口。"""
+    result = _start_calibration()
+    if not result.get("ok"):
+        return result
+    return {"ok": True, "message": result.get("message", "")}
 
 
 def _hearthstone_foreground_guard():
@@ -1164,6 +1219,11 @@ def _overlay_exit():
         _log("SYS", "用户从浮窗点击“退出脚本”。")
     except Exception:
         pass
+    # 屏幕上还开着校准窗口的话先关掉，别让它留在桌面上。
+    try:
+        _stop_calibration()
+    except Exception:
+        pass
     # 立即可靠结束进程（浮窗/自动化均为 daemon 线程，os._exit 直接终止）。
     os._exit(0)
 
@@ -1201,26 +1261,25 @@ def _bind_overlay():
         account_visible_setting=_overlay_account_visible(),
         on_toggle_account=_overlay_save_account_visible,
         on_calibrate=_overlay_toggle_calibrate,
+        # 关浮窗时把还开着的校准窗口一并关掉（网页/浮窗打开的是同一个窗口）。
+        on_calibrate_close=_overlay_close_calibrate,
         on_exit=_overlay_exit,
     )
 
 
 def _overlay_toggle_calibrate():
-    """浮窗「校准」按钮：在屏幕上叠加显示/收起所有截图区域框。
+    """浮窗「校准」按钮：开/关屏幕上的校准窗口（与网页按钮同一个窗口）。
 
-    框是置顶且鼠标穿透的，只用来对照着把盒子 UI 摆正；返回切换后是否显示。
+    窗口里三个截图区域都能拖、都能存；框以外的鼠标是穿透的，只用来对照着把
+    盒子 UI 摆正。返回切换后是否显示。
     """
-    try:
-        import region_overlay
-    except Exception as exc:
-        _log("WARN", f"截图区域框不可用：{exc}")
-        return False
-    try:
-        visible = region_overlay.toggle()
-    except Exception as exc:
-        _log("WARN", f"显示截图区域框失败：{exc}")
-        return False
-    return bool(visible)
+    return bool(_toggle_calibration())
+
+
+def _overlay_close_calibrate():
+    """关浮窗/退出脚本时收掉校准窗口（没开着就什么都不做）。"""
+    if _calibration_running():
+        _stop_calibration()
 
 
 def _overlay_account_visible() -> bool:

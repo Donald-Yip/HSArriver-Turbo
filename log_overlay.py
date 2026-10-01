@@ -256,8 +256,10 @@ _ACCOUNT = None
 # 「账号」行是否显示昵称（点眼睛按钮切换；由 start() 用保存的偏好初始化）。
 _ACCOUNT_VISIBLE = [True]
 _ON_TOGGLE_ACCOUNT = None
-# 「校准」按钮：在屏幕上叠加显示截图区域框（web_ui 传入）。
+# 「校准」按钮：开/关屏幕上的校准窗口（web_ui 传入，网页按钮同一个窗口）。
 _ON_CALIBRATE = None
+# 「校准」窗口的收尾回调：关浮窗时把还开着的校准窗口一并关掉。
+_ON_CALIBRATE_CLOSE = None
 
 
 def account_visible() -> bool:
@@ -411,10 +413,11 @@ def start(on_start=None, on_halt=None, is_running=None,
           human_like_callback=None, concede_callback=None,
           liveness_callback=None, account_callback=None,
           account_visible_setting=None, on_toggle_account=None,
-          on_calibrate=None) -> None:
+          on_calibrate=None, on_calibrate_close=None) -> None:
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
+    global _ON_CALIBRATE_CLOSE
     if _STARTED[0]:
         return
     _ON_START = on_start
@@ -431,6 +434,7 @@ def start(on_start=None, on_halt=None, is_running=None,
     _ACCOUNT = account_callback
     _ON_TOGGLE_ACCOUNT = on_toggle_account
     _ON_CALIBRATE = on_calibrate
+    _ON_CALIBRATE_CLOSE = on_calibrate_close
     if account_visible_setting is not None:
         _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
     _STOP.clear()
@@ -445,6 +449,12 @@ def stop() -> None:
     try:
         import region_overlay
         region_overlay.hide()
+    except Exception:
+        pass
+    # 还开着校准窗口（网页按钮/浮窗按钮打开的是同一个窗口）时一并关掉。
+    try:
+        if _ON_CALIBRATE_CLOSE is not None:
+            _ON_CALIBRATE_CLOSE()
     except Exception:
         pass
 
@@ -759,23 +769,23 @@ def _run() -> None:
         _place(save_btn, "save")
 
         def _call_calibrate():
-            """在屏幕上叠加显示截图区域框（对齐盒子 UI 用），再点一次收起。"""
+            """开/关屏幕上的校准窗口（三个截图区域都能拖、都能存），再点一次收起。"""
             visible = None
             try:
                 if _ON_CALIBRATE is not None:
                     visible = _ON_CALIBRATE()
             except Exception as exc:
-                push(f"[SYS] 显示截图区域框失败：{exc}")
+                push(f"[SYS] 打开校准窗口失败：{exc}")
                 return
             finally:
-                # 框是鼠标穿透的，但点浮窗按钮本身会把浮窗带到前台，
+                # 校准窗口是置顶的，但点浮窗按钮本身会把浮窗带到前台，
                 # 顺手把炉石切回前台，方便对着游戏画面调盒子。
                 _raise_hearthstone()
             if visible:
-                push("[SYS] 已显示截图区域框：请对齐相应UI"
-                     "（Esc 或再点「校准」关闭）")
+                push("[SYS] 校准窗口已打开：1 推荐面板 / 2 换牌确认 / 3 AI胜率"
+                     "（Tab 切换，拖框对齐后按 S 保存，Esc 或再点「校准」关闭）")
             else:
-                push("[SYS] 已关闭截图区域框。")
+                push("[SYS] 已关闭校准窗口。")
 
         calibrate_btn = _make_btn(btn_frame, "校准", ACCENT, _call_calibrate)
         _place(calibrate_btn, "calibrate")

@@ -1,28 +1,33 @@
 # -*- coding: utf-8 -*-
-"""推荐区域校准工具：桌面绿框对齐 + 实时 OCR 预览。
+"""截图区域校准工具：屏幕上拖框，把脚本要截的每一块都对齐好。
 
-启动方式（三选一）：
-  * Web 控制台（打包版）：点「校准推荐区域」按钮
+三个入口打开的都是**同一个窗口**（同一个实现，不再有“只能看不能拖”的那种）：
+  * 网页控制台「🎯 校准区域」卡片 → [📐 显示校准框（屏幕上）]
+  * 日志浮窗右上角「校准」按钮
   * 源码运行：python calibrate_roi.py
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
-    （不加载 OCR 引擎，验证窗口/图层链路可用）
+  * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-对战时启动（盒子推荐面板只在对局内出现）：
-  1. 屏幕上的绿框 = 程序实际截图区域 recommendation_roi（默认 7,200,202,500）；
-  2. 拖动绿框边框可整体移动，拖右下角手柄可调整大小，
-     把盒子「打法参考A」面板框进绿框；
-  3. 右侧预览窗按 OCR 同款 1.5x 放大显示，并逐帧跑实际 OCR，
-     看到「✓ 识别到『打法参考A』」即对齐成功（绿框保持绿色）；
-  4. 点 [保存]（或按 S）把区域写入 ui_config.json，Esc 退出。
+三个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
-原理：盒子推荐面板顶部才是「打法参考A」红头标题；面板没被框进
-推荐区域时 OCR 读不到信标 → 程序判定面板不存在 → 回合内
-recommendation_not_stable 重试——这正是「回合开始无法打牌」
-最常见的原因。校准 = 让截图区域与面板重合。
+| # | 目标 | 写入 ui_config.json | 对齐方法 |
+| --- | --- | --- | --- |
+| 1 | 盒子推荐面板（绿） | `recommendation_roi` | 把盒子的「打法参考A」面板框进绿框 |
+| 2 | 换牌「确认」按钮（蓝） | `mulligan_confirm_roi` | 框住换牌界面的确认按钮 |
+| 3 | 盒子「AI胜率」浮动条（橙） | `ai_win_rate_roi` | 框住左上角 AI胜率浮动条（兜底区域自动跟着外扩） |
 
-注意：
-  * 校准完成后请关闭本工具再启动自动化（预览窗会遮挡游戏画面）；
-  * 无需管理员权限——本工具只画框+截图，不模拟鼠标/键盘。
+操作：
+  * 拖框的边框可整体移动，拖右下角手柄可调整大小；
+  * **S** 或点 [保存] 把三个区域一起写回 `ui_config.json`；**Esc** 退出；
+  * 画面空白处的鼠标是**穿透**的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到
+    炉石上，所以可以边看游戏画面边调；
+  * 顶部提示条每 1.5s 重判一次「绿框里有没有盒子面板」，对齐成功会变绿。
+
+原理：盒子推荐面板顶部才是「打法参考A」红头标题；面板没被框进推荐区域时
+OCR 读不到信标 → 程序判定面板不存在 → 回合内 recommendation_not_stable
+重试——这正是「回合开始无法打牌」最常见的原因。校准 = 让截图区域与面板重合。
+
+注意：无需管理员权限——本工具只画框+截图，不模拟鼠标/键盘。
 """
 from __future__ import annotations
 
@@ -33,35 +38,23 @@ import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
+from types import SimpleNamespace
 
-import cv2
-import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageGrab
+from PIL import Image, ImageColor, ImageDraw
 
-# ---------------------------------------------------------------- DPI
-# 与程序截图坐标一致：物理像素坐标（进程声明 DPI aware，1.0x 缩放直接吻合）。
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+from region_overlay import (
+    LayeredWindow, MSG, PM_REMOVE, USER32, label_font, paint_layer, panel_state,
+)
+from screen_regions import (
+    AI_WIN_RATE_WIDE_MARGIN, CALIBRATION_TARGETS, calibration_targets,
+    expand_box,
+)
 
 # ---------------------------------------------------------------- Win32
-USER32 = ctypes.windll.user32
-GDI32 = ctypes.windll.gdi32
-KERNEL32 = ctypes.windll.kernel32
-
-WS_POPUP = 0x80000000
-WS_VISIBLE = 0x10000000
-WS_EX_LAYERED = 0x00080000
-WS_EX_TOPMOST = 0x00000008
-WS_EX_TOOLWINDOW = 0x00000080
-WS_EX_NOACTIVATE = 0x08000000
-ULW_ALPHA = 0x00000002
-PM_REMOVE = 0x0001
-CLASS_NAME = "HSLegendArriverCalibrate"
+USER32.SetCapture.argtypes = [wintypes.HWND]
+USER32.ReleaseCapture.argtypes = []
+USER32.GetCursorPos.argtypes = [ctypes.c_void_p]
+USER32.GetCursorPos.restype = wintypes.BOOL
 
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
@@ -70,126 +63,64 @@ WM_RBUTTONDOWN = 0x0204
 
 VK_ESCAPE = 0x1B
 VK_S = 0x53
+VK_TAB = 0x09
 
-EDGE = 6          # 边框厚度（画在截图区域外侧，捕捉画面保持干净）
-HANDLE = 22       # 右下角缩放手柄边长
-MIN_SIZE = 60     # 区域最小边长
+EDGE = 6           # 边框抓取厚度（画在截图区域外侧，捕捉画面保持干净）
+HANDLE = 22        # 右下角缩放手柄边长
+MIN_SIZE = 60      # 区域最小边长
+CLASS_NAME = "HSLegendArriverCalibrate"
 
+# 顶部提示条的重判间隔（与 region_overlay 保持一致）。
+PANEL_REFRESH_SECONDS = 1.5
+# OCR 预览的自动刷新间隔（秒）：只在校准「推荐面板」时跑，避免拖框时满核。
+OCR_REFRESH_SECONDS = 2.5
 
-class MSG(ctypes.Structure):
-    _fields_ = [("hwnd", wintypes.HWND), ("message", wintypes.UINT),
-                ("wParam", wintypes.WPARAM), ("lParam", wintypes.LPARAM),
-                ("time", wintypes.DWORD), ("pt_x", wintypes.LONG),
-                ("pt_y", wintypes.LONG)]
+# ---------------------------------------------------------------- 配色（RGBA）
+CARD_BG = (24, 28, 36, 238)
+CARD_BORDER = (232, 185, 59, 245)
+CARD_ROW_BG = (44, 50, 62, 235)
+CARD_ROW_ACTIVE = (92, 74, 30, 245)
+TEXT_MAIN = (240, 240, 240, 255)
+TEXT_DIM = (166, 172, 182, 255)
+TEXT_OK = (99, 199, 111, 255)
+TEXT_WARN = (226, 168, 78, 255)
+TEXT_BAD = (240, 120, 110, 255)
+BUTTON_BG = (196, 132, 40, 250)
+BUTTON_TEXT = (255, 255, 255, 255)
+PANEL_BG = (18, 21, 27, 238)
+PANEL_BORDER = (118, 124, 132, 245)
 
-
-class WNDCLASSW(ctypes.Structure):
-    _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", ctypes.c_void_p),
-                ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
-                ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
-                ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HANDLE),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR)]
-
-
-class BLENDFUNCTION(ctypes.Structure):
-    _fields_ = [("BlendOp", ctypes.c_ubyte), ("BlendFlags", ctypes.c_ubyte),
-                ("SourceConstantAlpha", ctypes.c_ubyte),
-                ("AlphaFormat", ctypes.c_ubyte)]
-
-
-class BITMAPINFOHEADER(ctypes.Structure):
-    _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
-                ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
-                ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
-                ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
-                ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
-                ("biClrImportant", wintypes.DWORD)]
-
-
-class BITMAPINFO(ctypes.Structure):
-    _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
-
-
-WNDPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
-    wintypes.WPARAM, wintypes.LPARAM)
+# ---------------------------------------------------------------- 目标条布局
+# 目标条画在**屏幕正中央**：左上角正好压着盒子「AI胜率」浮动条
+# （95,0,300,60，校准时要能看见它），顶部中间又是「请对齐相应UI」提示条，
+# 屏幕正中才是空出来的地方（推荐面板在左、换牌确认在右下、判定点不在正中）。
+CARD_W = 356
+CARD_PAD = 12
+ROW_H = 32
+SAVE_BTN_H = 36
+CARD_H = (CARD_PAD + 20 + 8          # 标题
+          + len(CALIBRATION_TARGETS) * ROW_H + 6   # 目标行
+          + 3 * 18 + 8               # 当前目标提示 / 坐标 / 保存状态
+          + SAVE_BTN_H + CARD_PAD)
 
 
-def _passive_wndproc(hwnd, msg, wparam, lparam):
-    """窗口类回调：消息全部在主循环手动处理，这里只走默认流程。"""
-    return USER32.DefWindowProcW(hwnd, msg, wparam, lparam)
+def card_rect(width: int, height: int) -> tuple[int, int, int, int]:
+    """目标条的矩形：屏幕正中央（屏幕比卡片还小时贴左上角）。"""
+    left = max(8, (int(width) - CARD_W) // 2)
+    top = max(8, (int(height) - CARD_H) // 2)
+    return (left, top, left + CARD_W, top + CARD_H)
+
+# ---------------------------------------------------------------- 预览面板
+PREVIEW_W, PREVIEW_H = 360, 430
+PREVIEW_IMG_H = 240
+
+# 每帧要画十几次字，按字号缓存字体（FreeType 每次重开 msyh.ttc 会拖慢拖框）。
+_FONT_CACHE: dict[int, object] = {}
 
 
-_WNDPROC_IMPL = WNDPROC(_passive_wndproc)  # 全局引用防止被回收
-
-USER32.RegisterClassW.argtypes = [ctypes.c_void_p]
-USER32.RegisterClassW.restype = ctypes.c_ushort
-USER32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR,
-                                   wintypes.LPCWSTR, wintypes.DWORD,
-                                   ctypes.c_int, ctypes.c_int, ctypes.c_int,
-                                   ctypes.c_int, wintypes.HWND,
-                                   wintypes.HMENU, wintypes.HINSTANCE,
-                                   wintypes.LPVOID]
-USER32.CreateWindowExW.restype = wintypes.HWND
-USER32.SetCapture.argtypes = [wintypes.HWND]
-USER32.ReleaseCapture.argtypes = []
-USER32.PeekMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND,
-                                wintypes.UINT, wintypes.UINT, wintypes.UINT]
-USER32.PeekMessageW.restype = wintypes.BOOL
-USER32.TranslateMessage.argtypes = [ctypes.c_void_p]
-USER32.DispatchMessageW.argtypes = [ctypes.c_void_p]
-USER32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
-                                  wintypes.WPARAM, wintypes.LPARAM]
-USER32.DefWindowProcW.restype = ctypes.c_ssize_t
-USER32.GetSystemMetrics.argtypes = [ctypes.c_int]
-USER32.GetSystemMetrics.restype = ctypes.c_int
-USER32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-USER32.GetAsyncKeyState.restype = ctypes.c_short
-USER32.GetDC.argtypes = [wintypes.HWND]
-USER32.GetDC.restype = wintypes.HDC
-USER32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-USER32.DestroyWindow.argtypes = [wintypes.HWND]
-GDI32.CreateCompatibleDC.argtypes = [wintypes.HDC]
-GDI32.CreateCompatibleDC.restype = wintypes.HDC
-GDI32.CreateDIBSection.argtypes = [wintypes.HDC, ctypes.c_void_p,
-                                   wintypes.UINT, ctypes.c_void_p,
-                                   wintypes.HANDLE, wintypes.DWORD]
-GDI32.CreateDIBSection.restype = wintypes.HBITMAP
-GDI32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
-GDI32.DeleteDC.argtypes = [wintypes.HDC]
-GDI32.DeleteObject.argtypes = [wintypes.HANDLE]
-KERNEL32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-KERNEL32.GetModuleHandleW.restype = wintypes.HINSTANCE
-USER32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC,
-                                       ctypes.c_void_p, ctypes.c_void_p,
-                                       wintypes.HDC, ctypes.c_void_p,
-                                       wintypes.DWORD, ctypes.c_void_p,
-                                       wintypes.DWORD]
-USER32.UpdateLayeredWindow.restype = wintypes.BOOL
-
-# ---------------------------------------------------------------- 配色（BGR）
-GREEN = (80, 200, 80)          # 对齐成功：绿框
-SAVE_COLOR = (240, 140, 50)    # 保存成功：亮蓝反馈框
-ORANGE = (0, 140, 255)         # 尚未确认信标
-RED = (56, 56, 235)            # 错误
-PANEL_BG = (36, 40, 48)
-PANEL_BORDER = (118, 124, 132)
-BTN_BLUE = (216, 150, 62)
-TEXT_MAIN = (240, 240, 240)
-TEXT_DIM = (168, 172, 180)
-TEXT_RED = (80, 92, 240)
-TEXT_GREEN = (96, 226, 96)
-
-
-def _font(size: int):
-    for path in (r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyh.ttf",
-                 r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\simsun.ttc"):
-        try:
-            return ImageFont.truetype(path, size)
-        except OSError:
-            continue
-    return None
+def _rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
+    red, green, blue = ImageColor.getrgb(hex_color)
+    return (red, green, blue, alpha)
 
 
 def _user_config_path() -> Path:
@@ -197,135 +128,183 @@ def _user_config_path() -> Path:
     return Path(__file__).resolve().parent / "ui_config.json"
 
 
-def _current_roi() -> list[int]:
-    """优先读用户配置（校准结果），否则用 config 默认值。"""
+def _load_config():
+    """尽力拿一个 RecommendationConfig（拿不到就返回 None，各方都走默认值）。"""
     try:
-        from src.recommendation_config import RecommendationConfig
-        default = list(RecommendationConfig().recommendation_roi)
-    except Exception:
-        default = [7, 200, 202, 500]
-    try:
-        data = json.loads(_user_config_path().read_text(encoding="utf-8"))
-        roi = data.get("recommendation_roi")
-        vals = [int(v) for v in roi]
-        if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
-            return vals
-    except Exception:
-        pass
-    return default
-
-
-def _grab_crop(l: int, t: int, r: int, b: int) -> np.ndarray | None:
-    sw = USER32.GetSystemMetrics(0)
-    sh = USER32.GetSystemMetrics(1)
-    if l < 0 or t < 0 or r > sw or b > sh or r - l < 4 or b - t < 4:
-        return None
-    try:
-        rgb = np.asarray(ImageGrab.grab(bbox=(l, t, r, b), all_screens=False))
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        from config import RecommendationConfig
+        return RecommendationConfig()
     except Exception:
         return None
 
 
-class Calibrator:
-    """绿框 + 预览窗 + 逐帧 OCR 的完整校准界面。"""
+class CalibrationSession:
+    """屏幕上的交互式校准窗口：三个目标都能拖、都能存。"""
 
-    def __init__(self, selftest: bool, ocr_enabled: bool):
-        self.selftest = selftest
-        self.ocr_enabled = ocr_enabled and not selftest
+    def __init__(self, selftest: bool = False, ocr_enabled: bool = True,
+                 start_key: str = ""):
+        self.selftest = bool(selftest)
+        self.ocr_enabled = bool(ocr_enabled) and not self.selftest
         self.running = True
-        self.hwnd = None
-        self.roi = _current_roi()
-        self.drag = None            # None | ("move", dx, dy) | ("resize",)
+        self.window: LayeredWindow | None = None
+        self.width = 0
+        self.height = 0
+
+        config = _load_config()
+        self.targets = [dict(target, box=list(target["box"]))
+                        for target in calibration_targets(config)]
+        self.active_index = 0
+        if start_key:
+            for index, target in enumerate(self.targets):
+                if target["key"] == start_key:
+                    self.active_index = index
+                    break
+
+        self.panel_state = None
+        self.drag = None              # None | ("move", dx, dy) | ("resize",)
         self.save_pending = False
-        self.capture_pending = False
         self.saved_flash_until = 0.0
-        self._flash_active = False
-        self._dirty = True
+        self.dirty = True
+        self._es_held = False
+        self._s_held = False
+        self._tab_held = False
+        self._msg = MSG()
+
+        # OCR 预览
         self.last_crop = None
         self.crop_event = threading.Event()
         self.ocr_result = {"status": "loading", "lines": [], "beacon": None,
-                           "conf": 0.0, "msg": "正在加载 OCR 引擎……"}
-        self._esheld = False
-        self._shed = False
-        self._msg = MSG()
+                           "msg": "正在加载 OCR 引擎……"}
+
+    # ------------------------------------------------------------ 目标
+    @property
+    def active(self) -> dict:
+        return self.targets[self.active_index]
+
+    def select(self, index: int) -> None:
+        if 0 <= index < len(self.targets) and index != self.active_index:
+            self.active_index = index
+            self.dirty = True
+            print(f"[校准] 当前目标：{self.active['label']}"
+                  f"（{self.active['config_key']}）")
+
+    def cycle(self, step: int = 1) -> None:
+        self.select((self.active_index + step) % len(self.targets))
 
     # ------------------------------------------------------------ 布局/命中
-    def preview_rect(self, sw: int, sh: int):
-        w = self.roi[2] - self.roi[0]
-        h = self.roi[3] - self.roi[1]
-        img_h = min(int(round(h * 1.5)), 470)
-        img_w = max(int(round(w * 1.5)), 150)
-        panel_w = img_w + 16
-        panel_h = img_h + 282                    # 标题+文本+按钮区
-        panel_h = min(panel_h, sh - 20)
-        px = max(8, sw - panel_w - 12)
-        py = 16
-        save_btn = (px + panel_w - 130, py + panel_h - 44,
-                    px + panel_w - 12, py + panel_h - 12)
-        capture_btn = (px + 12, py + panel_h - 44,
-                       px + panel_w - 142, py + panel_h - 12)
-        return (px, py, px + panel_w, py + panel_h), save_btn, capture_btn
+    def _chip_rects(self, width: int, height: int):
+        left, top = card_rect(width, height)[:2]
+        rects = []
+        row_top = top + CARD_PAD + 20 + 8
+        for index in range(len(self.targets)):
+            rects.append(((left + CARD_PAD, row_top,
+                           left + CARD_W - CARD_PAD, row_top + ROW_H - 4), index))
+            row_top += ROW_H
+        return rects
 
-    def _hit_test(self, sx: int, sy: int, sw: int, sh: int):
-        l, t, r, b = self.roi
-        _, save_btn, capture_btn = self.preview_rect(sw, sh)
-        if (capture_btn[0] <= sx <= capture_btn[2]
-                and capture_btn[1] <= sy <= capture_btn[3]):
-            return "btn_capture"
-        if save_btn[0] <= sx <= save_btn[2] and save_btn[1] <= sy <= save_btn[3]:
-            return "btn_save"
-        if r + 2 <= sx <= r + 2 + HANDLE and b + 2 <= sy <= b + 2 + HANDLE:
-            return "corner"
-        if l - EDGE <= sx <= r + EDGE and t - EDGE <= sy <= b + EDGE:
-            return "edge"
+    @staticmethod
+    def _save_rect(width: int, height: int) -> tuple[int, int, int, int]:
+        left, top = card_rect(width, height)[:2]
+        bottom = top + CARD_H - CARD_PAD
+        return (left + CARD_PAD, bottom - SAVE_BTN_H,
+                left + CARD_W - CARD_PAD, bottom)
+
+    @staticmethod
+    def _preview_rect(width: int) -> tuple[int, int, int, int]:
+        left = max(8, width - PREVIEW_W - 16)
+        return (left, 16, left + PREVIEW_W, 16 + PREVIEW_H)
+
+    def _hit_test(self, sx: int, sy: int, width: int, height: int):
+        """返回 (类型, 目标序号)；不在可交互区域上返回 None。"""
+        for rect, index in self._chip_rects(width, height):
+            if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
+                return ("target", index)
+        rect = self._save_rect(width, height)
+        if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
+            return ("save", None)
+        left, top, right, bottom = self.active["box"]
+        if (right + 2 <= sx <= right + 2 + HANDLE
+                and bottom + 2 <= sy <= bottom + 2 + HANDLE):
+            return ("corner", None)
+        if (left - EDGE <= sx <= right + EDGE
+                and top - EDGE <= sy <= bottom + EDGE):
+            return ("edge", None)
         return None
 
-    # ------------------------------------------------------------ 事件
-    def _on_mouse_down(self, sx: int, sy: int, sw: int, sh: int):
-        kind = self._hit_test(sx, sy, sw, sh)
-        if kind == "btn_capture":
-            self.capture_pending = True
-        elif kind == "btn_save":
-            self.save_pending = True
-        elif kind == "corner":
-            self.drag = ("resize",)
-        elif kind == "edge":
-            self.drag = ("move", sx - self.roi[0], sy - self.roi[1])
-        else:
-            return
-        USER32.SetCapture(self.hwnd)
+    # ------------------------------------------------------------ 鼠标
+    def _clamp(self, box) -> list[int]:
+        """把框收进屏幕内（保存用，不改变大小）。
 
-    def _on_mouse_up(self, sx: int, sy: int, sw: int, sh: int):
-        if self.capture_pending:
-            self.capture_pending = False
-            if self._hit_test(sx, sy, sw, sh) == "btn_capture":
-                self._do_capture()
+        这里**不**强制 MIN_SIZE：拖框时有最小尺寸保护，但「AI胜率」浮动条本身
+        只有 160×40，比推荐面板小得多，用 MIN_SIZE 收会把用户框好的区域改掉。
+        """
+        width = self.width or 1920
+        height = self.height or 1080
+        left, top, right, bottom = (int(v) for v in box)
+        box_width = min(max(1, right - left), width)
+        box_height = min(max(1, bottom - top), height)
+        left = min(max(0, left), max(0, width - box_width))
+        top = min(max(0, top), max(0, height - box_height))
+        return [left, top, left + box_width, top + box_height]
+
+    def _on_mouse_down(self, sx: int, sy: int, width: int, height: int) -> None:
+        kind = self._hit_test(sx, sy, width, height)
+        if kind is None:
+            return
+        name, index = kind
+        if name == "target":
+            self.select(index)
+        elif name == "save":
+            self.save_pending = True
+        elif name == "corner":
+            self.drag = ("resize",)
+        elif name == "edge":
+            left, top = self.active["box"][0], self.active["box"][1]
+            self.drag = ("move", sx - left, sy - top)
+        self.dirty = True
+        if self.window is not None and self.window.hwnd is not None:
+            USER32.SetCapture(self.window.hwnd)
+
+    def _on_mouse_up(self, sx: int, sy: int, width: int, height: int) -> None:
         if self.save_pending:
             self.save_pending = False
-            if self._hit_test(sx, sy, sw, sh) == "btn_save":
-                self.save_roi(flash=True)
+            if self._hit_test(sx, sy, width, height) == ("save", None):
+                self.save(flash=True)
         self.drag = None
         USER32.ReleaseCapture()
+        self.dirty = True
 
-    def _on_mouse_move(self, sx: int, sy: int, sw: int, sh: int):
+    def _on_mouse_move(self, sx: int, sy: int, width: int, height: int) -> None:
         if self.drag is None:
             return
-        l, t, r, b = self.roi
+        left, top, right, bottom = self.active["box"]
         if self.drag[0] == "move":
             _, dx, dy = self.drag
-            l = min(max(0, sx - dx), sw - MIN_SIZE)
-            t = min(max(0, sy - dy), sh - MIN_SIZE)
-            r = min(sw, l + (r - l))
-            b = min(sh, t + (b - t))
-        else:  # resize
-            r = min(sw, max(l + MIN_SIZE, sx))
-            b = min(sh, max(t + MIN_SIZE, sy))
-        self.roi = [l, t, r, b]
-        self._dirty = True
+            box_width, box_height = right - left, bottom - top
+            new_left = min(max(0, sx - dx), max(0, width - box_width))
+            new_top = min(max(0, sy - dy), max(0, height - box_height))
+            new_right = new_left + box_width
+            new_bottom = new_top + box_height
+        else:  # resize（右下角手柄）
+            new_left, new_top = left, top
+            new_right = min(width, max(left + MIN_SIZE, sx))
+            new_bottom = min(height, max(top + MIN_SIZE, sy))
+        self.active["box"] = [new_left, new_top, new_right, new_bottom]
+        self.dirty = True
 
     # ------------------------------------------------------------ 保存
-    def save_roi(self, flash: bool = False):
+    def _boxes_to_save(self) -> dict:
+        boxes = {}
+        for target in self.targets:
+            key = target["config_key"]
+            boxes[key] = self._clamp(target["box"])
+            if key == "ai_win_rate_roi":
+                # AI胜率兜底区域永远跟着主区域外扩，不给用户单独拖。
+                boxes["ai_win_rate_wide_roi"] = list(
+                    expand_box(boxes[key], AI_WIN_RATE_WIDE_MARGIN))
+        return boxes
+
+    def save(self, flash: bool = False) -> bool:
+        boxes = self._boxes_to_save()
         path = _user_config_path()
         try:
             cfg = json.loads(path.read_text(encoding="utf-8"))
@@ -333,62 +312,91 @@ class Calibrator:
                 cfg = {}
         except Exception:
             cfg = {}
-        cfg["recommendation_roi"] = [int(v) for v in self.roi]
+        cfg.update(boxes)
         try:
-            path.write_text(
-                json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
         except OSError as exc:
             print(f"[校准] 保存失败：{exc}")
-            return
+            return False
         if flash:
             self.saved_flash_until = time.time() + 1.5
-            self._flash_active = True
-        self._dirty = True
-        print(f"[校准] 已保存推荐区域 -> {path}")
-        print(f"[校准] recommendation_roi={tuple(self.roi)}（重开对局生效，"
-              "不覆盖名字/日志目录等配置）")
+        self.dirty = True
+        print(f"[校准] 已保存 {len(boxes)} 个区域 -> {path}")
+        for key, box in boxes.items():
+            print(f"[校准]   {key} = {tuple(box)}")
+        print("[校准] 重开对局生效（不覆盖名字/日志目录/延时等其它配置）")
+        return True
 
-    # ------------------------------------------------------------ OCR 线程
-    def _ocr_worker(self):
+    # ------------------------------------------------------------ OCR
+    def _grab_crop(self, box):
+        """抓一块屏幕，返回 PIL RGB 图（失败返回 None）。"""
+        from PIL import ImageGrab
+        left, top, right, bottom = (int(v) for v in box)
+        if right - left < 4 or bottom - top < 4:
+            return None
         try:
+            return ImageGrab.grab(bbox=(left, top, right, bottom),
+                                  all_screens=False).convert("RGB")
+        except Exception:
+            return None
+
+    def _capture_for_ocr(self) -> None:
+        target = next((t for t in self.targets
+                       if t["key"] == "recommendation"), None)
+        if target is None:
+            return
+        crop = self._grab_crop(target["box"])
+        if crop is None:
+            return
+        self.last_crop = crop
+        self.crop_event.set()
+
+    def _ocr_worker(self) -> None:
+        try:
+            import numpy as np
             from src.ocr.paddle_adapter import PaddleOcrAdapter
             from src.ocr.preprocess import iter_preprocess_recommendation
+
             adapter = PaddleOcrAdapter()
             while self.running:
                 self.crop_event.wait(timeout=5.0)
                 self.crop_event.clear()
                 if not self.running:
                     break
-                # 节流：拖动时截图事件密，限制 OCR 最小间隔，避免满速空转拖卡主循环
-                time.sleep(0.25)
+                time.sleep(0.2)     # 节流：拖框时事件密，别满速空转
                 crop = self.last_crop
                 if crop is None:
                     continue
+                # 预处理链路要 BGR 的 ndarray（cv2 约定）。
+                pixels = np.ascontiguousarray(np.asarray(crop)[:, :, ::-1])
                 started = time.time()
-                ev = None
-                for tag, candidate in iter_preprocess_recommendation(crop):
+                evidence = None
+                for tag, candidate in iter_preprocess_recommendation(pixels):
                     if tag != "scaled_color_v1":
                         continue
-                    ev = adapter.recognize(
+                    evidence = adapter.recognize(
                         candidate, f"calib-{id(crop)}", "calib_scaled")
                     break
-                if ev is None:
+                if evidence is None:
                     continue
-                lines = [ln.text for ln in ev.lines if ln.text]
-                beacon = any("打法参考A" in ln or "打法参考Ａ" in ln
-                             for ln in lines)
+                lines = [line.text for line in evidence.lines if line.text]
+                beacon = any("打法参考A" in text or "打法参考Ａ" in text
+                             for text in lines)
                 self.ocr_result = {
                     "status": "ok", "lines": lines[:6], "beacon": beacon,
-                    "conf": ev.confidence,
-                    "msg": f"OCR {len(lines)} 行 置信 {ev.confidence:.2f}"
+                    "conf": evidence.confidence,
+                    "msg": f"OCR {len(lines)} 行 置信 {evidence.confidence:.2f}"
                            f" 耗时 {time.time() - started:.0f}s",
                 }
+                self.dirty = True
         except Exception as exc:
             self.ocr_result = {"status": "error", "lines": [], "beacon": False,
                                "conf": 0.0,
                                "msg": f"OCR 未运行：{type(exc).__name__}: {exc}"}
+            self.dirty = True
 
-    def _start_ocr_thread(self):
+    def _start_ocr_thread(self) -> None:
         if not self.ocr_enabled:
             self.ocr_result = {"status": "off", "lines": [], "beacon": False,
                                "conf": 0.0, "msg": "预览模式（--no-ocr）"}
@@ -396,250 +404,265 @@ class Calibrator:
         threading.Thread(target=self._ocr_worker, name="calib-ocr",
                          daemon=True).start()
 
-    def _do_capture(self):
-        """手动触发一次：抓取当前推荐区域并刷新 OCR 预览。"""
-        l, t, r, b = self.roi
-        crop = _grab_crop(l, t, r, b)
-        if crop is not None:
-            self.last_crop = crop
-            self.crop_event.set()
-
     # ------------------------------------------------------------ 渲染
-    def _paint(self, sw: int, sh: int) -> np.ndarray:
-        layer = np.zeros((sh, sw, 4), dtype=np.uint8)  # 内存序即 DIB BGRA
-        l, t, r, b = self.roi
-        color = SAVE_COLOR if time.time() < self.saved_flash_until else GREEN
-        alpha = layer[:, :, 3]
-        band = np.zeros((sh, sw), dtype=bool)
-        # 四周边框，画在截图区域【外侧】，捕捉画面保持干净
-        band[max(0, t - EDGE):min(sh, b + EDGE),
-             max(0, l - EDGE):max(0, l)] = True            # 左
-        band[max(0, t - EDGE):min(sh, b + EDGE),
-             min(sw, r):min(sw, r + EDGE)] = True          # 右
-        band[max(0, t - EDGE):max(0, t),
-             max(0, l - EDGE):min(sw, r + EDGE)] = True    # 上
-        band[min(sh, b):min(sh, b + EDGE),
-             max(0, l - EDGE):min(sw, r + EDGE)] = True    # 下
-        layer[band, 0:3] = color
-        alpha[band] = 255
-        # 右下角缩放手柄
-        hx, hy = min(sw - 1, r + 2), min(sh - 1, b + 2)
-        hx1, hy1 = min(sw, hx + HANDLE), min(sh, hy + HANDLE)
-        layer[hy:hy1, hx:hx1, 0:3] = color
-        alpha[hy:hy1, hx:hx1] = 255
-        for i in range(6, HANDLE - 4, 7):   # 对角抓握点
-            y, x = hy + i, hx + i
-            if x < hx1 and y < hy1:
-                layer[y, x, 0:3] = TEXT_MAIN
+    def _preview_config(self):
+        """把「正在拖的框」包成 config，交给 paint_layer 画成实时的叠加层。"""
+        boxes = {target["config_key"]: tuple(target["box"])
+                 for target in self.targets}
+        main = boxes.get("ai_win_rate_roi", (110, 8, 270, 48))
+        return SimpleNamespace(
+            desktop_size=(self.width or 1920, self.height or 1080),
+            desktop_dpi=96,
+            recommendation_roi=boxes.get("recommendation_roi", (7, 200, 202, 500)),
+            mulligan_confirm_roi=boxes.get("mulligan_confirm_roi",
+                                           (860, 810, 1060, 890)),
+            ai_win_rate_roi=main,
+            ai_win_rate_wide_roi=expand_box(main, AI_WIN_RATE_WIDE_MARGIN),
+        )
+
+    def render(self, width: int, height: int):
+        """画出一整屏 RGBA：所有区域框 + 提示条 + 当前目标高亮 + 目标条/预览。"""
+        layer = paint_layer(width, height, self.panel_state, self._preview_config())
+        draw = ImageDraw.Draw(layer)
+        self._draw_active_target(draw, width, height)
+        self._draw_card(draw, width, height)
+        self._draw_preview(draw, width, layer)
         return layer
 
-    def _draw_preview(self, layer: np.ndarray, sw: int, sh: int):
-        (px, py, px1, py1), save_btn, capture_btn = self.preview_rect(sw, sh)
-        panel_w = px1 - px
-        panel_h = py1 - py
-        panel = np.full((panel_h, panel_w, 3), PANEL_BG, dtype=np.uint8)
-        self._draw_text(panel, "推荐区域预览（1.5x 缩放）",
-                        font=_font(13), xy=(8, 6), color=TEXT_MAIN)
-        img_h = min(int(round((self.roi[3] - self.roi[1]) * 1.5)), 470)
-        img_h = max(1, min(img_h, panel_h - 60))   # 小屏兜底
-        img_w = max(int(round((self.roi[2] - self.roi[0]) * 1.5)), 1)
-        crop = self.last_crop
-        if crop is not None and crop.size:
-            shown = cv2.resize(crop, (img_w, img_h), interpolation=cv2.INTER_CUBIC)
-            panel[30:30 + img_h, 8:8 + img_w] = shown
-        else:
-            self._draw_text(panel, "等待画面……", font=_font(13),
-                            xy=(10, 44), color=TEXT_DIM)
-        # OCR 结果文本区
-        res = self.ocr_result
-        lines = res.get("lines") or []
-        ys = 30 + img_h + 10
-        status = res.get("status")
-        if status == "ok":
-            for i, ln in enumerate(lines[:6]):
-                color = TEXT_GREEN if ("打法参考A" in ln
-                                       or "打法参考Ａ" in ln) else TEXT_MAIN
-                self._draw_text(panel, ln[:40], font=_font(12),
-                                xy=(10, ys + i * 17), color=color)
-            self._draw_text(panel, res.get("msg", ""), font=_font(11),
-                            xy=(10, ys + 6 * 17 + 2), color=TEXT_DIM)
-            if time.time() < self.saved_flash_until:
-                self._draw_text(panel, "✓ 已保存，重开对局后生效",
-                                font=_font(14), xy=(10, ys + 7 * 17 + 6),
-                                color=TEXT_GREEN)
-            elif res.get("beacon"):
-                self._draw_text(panel, "✓ 识别到『打法参考A』→ 对齐成功",
-                                font=_font(14), xy=(10, ys + 7 * 17 + 6),
-                                color=TEXT_GREEN)
-            else:
-                self._draw_text(panel, "把盒子面板移入绿框，等待刷新后再看",
-                                font=_font(12), xy=(10, ys + 7 * 17 + 8),
-                                color=TEXT_RED)
-        elif status == "loading":
-            self._draw_text(panel, res.get("msg", ""), font=_font(13),
-                            xy=(10, ys), color=TEXT_DIM)
-        elif status == "error":
-            self._draw_text(panel, res.get("msg", "OCR 不可用"), font=_font(12),
-                            xy=(10, ys), color=TEXT_RED)
-        else:  # off
-            self._draw_text(panel, res.get("msg", ""), font=_font(13),
-                            xy=(10, ys), color=TEXT_DIM)
-        self._draw_text(panel, "拖框·缩放手柄·[保存]·Esc退出",
-                        font=_font(12), xy=(10, max(4, min(panel_h - 78,
-                                                          ys + 8 * 17 + 8))),
-                        color=TEXT_DIM)
-        # 截图按钮
-        cx0, cy0, cx1, cy1 = capture_btn
-        c_btn_w, c_btn_h = cx1 - cx0, cy1 - cy0
-        c_btn_img = np.full((c_btn_h, c_btn_w, 3), BTN_BLUE, dtype=np.uint8)
-        self._draw_text(c_btn_img, "截图", font=_font(15),
-                        xy=(c_btn_w // 2 - 16, c_btn_h // 2 - 10),
-                        color=TEXT_MAIN)
-        panel[cy0 - py:cy1 - py, cx0 - px:cx1 - px] = c_btn_img
-        # 保存按钮
-        bx0, by0, bx1, by1 = save_btn
-        btn_w, btn_h = bx1 - bx0, by1 - by0
-        btn_img = np.full((btn_h, btn_w, 3), BTN_BLUE, dtype=np.uint8)
-        self._draw_text(btn_img, "保存 (S)", font=_font(15),
-                        xy=(btn_w // 2 - 30, btn_h // 2 - 10), color=TEXT_MAIN)
-        panel[by0 - py:by1 - py, bx0 - px:bx1 - px] = btn_img
-        # 组合
-        layer[py:py1, px:px1, 0:3] = panel
-        layer[py:py1, px:px1, 3] = 246
-        layer[py, px:px1, 0:3] = PANEL_BORDER
-        layer[py1 - 1, px:px1, 0:3] = PANEL_BORDER
-        layer[py:py1, px, 0:3] = PANEL_BORDER
-        layer[py:py1, px1 - 1, 0:3] = PANEL_BORDER
-
-    @staticmethod
-    def _draw_text(img: np.ndarray, text: str, font, xy: tuple[int, int],
-                   color: tuple[int, int, int]):
-        if not text or font is None:
+    def _draw_text(self, draw, xy, text: str, size: int, color) -> None:
+        font = _FONT_CACHE.get(size) or label_font(size)
+        _FONT_CACHE[size] = font
+        if font is None:
             return
-        h, w = img.shape[:2]
-        pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        ImageDraw.Draw(pil).text(xy, text, fill=(
-            color[2], color[1], color[0]), font=font)
-        out = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
-        img[:h, :w] = out[:h, :w]
+        draw.text(xy, text, fill=color, font=font)
 
-    # ------------------------------------------------------------ 窗口
-    def _create_window(self, sw: int, sh: int) -> wintypes.HWND:
-        inst = KERNEL32.GetModuleHandleW(None)
-        wc = WNDCLASSW()
-        wc.lpfnWndProc = ctypes.cast(_WNDPROC_IMPL, ctypes.c_void_p).value
-        wc.hInstance = inst
-        wc.lpszClassName = CLASS_NAME
-        USER32.RegisterClassW(ctypes.byref(wc))
-        return USER32.CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            CLASS_NAME, "HSLegendArriver 校准", WS_POPUP | WS_VISIBLE,
-            0, 0, sw, sh, None, None, inst, None)
+    def _draw_active_target(self, draw, width: int, height: int) -> None:
+        """把当前目标画成粗框 + 右下角手柄。
 
-    def _handle_message(self, sw: int, sh: int):
+        坐标写在正中央的目标条里，不在框旁边飘字：左上角的
+        「AI胜率」浮动条贴着屏幕顶边，飘字要么出屏、要么压住别的框。
+        """
+        left, top, right, bottom = self.active["box"]
+        color = _rgba(self.active["color"])
+        draw.rectangle((left, top, right, bottom), outline=color, width=3)
+        # 右下角缩放手柄
+        hx, hy = min(width - 1, right + 2), min(height - 1, bottom + 2)
+        hx1, hy1 = min(width, hx + HANDLE), min(height, hy + HANDLE)
+        draw.rectangle((hx, hy, hx1, hy1), fill=color)
+        for offset in range(6, HANDLE - 4, 7):
+            x, y = hx + offset, hy + offset
+            if x < hx1 and y < hy1:
+                draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
+
+    def _draw_card(self, draw, width: int, height: int) -> None:
+        card_left, card_top, card_right, card_bottom = card_rect(width, height)
+        draw.rectangle((card_left, card_top, card_right, card_bottom),
+                       fill=CARD_BG, outline=CARD_BORDER, width=2)
+        self._draw_text(draw, (card_left + CARD_PAD, card_top + CARD_PAD),
+                        "校准目标（Tab 切换）", 15, CARD_BORDER)
+        for rect, index in self._chip_rects(width, height):
+            target = self.targets[index]
+            active = index == self.active_index
+            draw.rectangle(rect, fill=CARD_ROW_ACTIVE if active else CARD_ROW_BG)
+            swatch = (rect[0] + 6, rect[1] + 7, rect[0] + 22, rect[1] + 21)
+            draw.rectangle(swatch, fill=_rgba(target["color"]))
+            text = f"{index + 1}. {target['label']}"
+            self._draw_text(draw, (rect[0] + 30, rect[1] + 6), text, 15,
+                            TEXT_MAIN if active else TEXT_DIM)
+            box = target["box"]
+            size_text = f"{box[2] - box[0]}×{box[3] - box[1]}"
+            self._draw_text(draw, (rect[2] - 74, rect[1] + 7), size_text, 13,
+                            TEXT_DIM)
+        # 当前目标：说明 + 实时坐标 + 保存状态
+        line_y = card_top + CARD_PAD + 20 + 8 + len(self.targets) * ROW_H + 4
+        self._draw_text(draw, (card_left + CARD_PAD, line_y),
+                        self.active["hint"], 13, TEXT_DIM)
+        box = self.active["box"]
+        self._draw_text(draw, (card_left + CARD_PAD, line_y + 18),
+                        f"当前：{box[0]},{box[1]} → {box[2]},{box[3]}"
+                        f"（{box[2] - box[0]}×{box[3] - box[1]}）", 13, TEXT_MAIN)
+        if time.time() < self.saved_flash_until:
+            self._draw_text(draw, (card_left + CARD_PAD, line_y + 36),
+                            "已保存，重开对局生效", 13, TEXT_OK)
+        else:
+            self._draw_text(draw, (card_left + CARD_PAD, line_y + 36),
+                            "S 保存 · Esc 退出 · 空白处鼠标可穿透", 13, TEXT_DIM)
+        # 保存按钮
+        rect = self._save_rect(width, height)
+        draw.rectangle(rect, fill=BUTTON_BG)
+        self._draw_text(draw, (rect[0] + 12, rect[1] + 8),
+                        "保存全部区域 (S)", 15, BUTTON_TEXT)
+
+    def _draw_preview(self, draw, width: int, layer) -> None:
+        left, top, right, bottom = self._preview_rect(width)
+        draw.rectangle((left, top, right, bottom), fill=PANEL_BG,
+                       outline=PANEL_BORDER, width=2)
+        self._draw_text(draw, (left + 10, top + 8),
+                        "推荐区域预览（OCR 实时识别）", 14, TEXT_MAIN)
+        img_top = top + 32
+        area_w = right - left - 20
+        crop = self.last_crop
+        if crop is not None and crop.size[0] > 0 and crop.size[1] > 0:
+            scale = min(area_w / crop.size[0], PREVIEW_IMG_H / crop.size[1])
+            target_size = (max(1, int(crop.size[0] * scale)),
+                           max(1, int(crop.size[1] * scale)))
+            resized = crop.resize(target_size, Image.LANCZOS).convert("RGBA")
+            layer.alpha_composite(resized, dest=(left + 10, img_top))
+        else:
+            self._draw_text(draw, (left + 12, img_top + 8),
+                            "等待画面……（拖动后自动刷新）", 12, TEXT_DIM)
+        draw.rectangle((left + 10, img_top, left + 10 + area_w,
+                        img_top + PREVIEW_IMG_H), outline=PANEL_BORDER)
+        # OCR 结果
+        result = self.ocr_result
+        status = result.get("status")
+        text_y = img_top + PREVIEW_IMG_H + 8
+        if status == "ok":
+            for index, line in enumerate((result.get("lines") or [])[:6]):
+                color = (TEXT_OK if ("打法参考A" in line
+                                     or "打法参考Ａ" in line) else TEXT_MAIN)
+                self._draw_text(draw, (left + 12, text_y + index * 17),
+                                line[:34], 13, color)
+            msg_y = text_y + 6 * 17 + 2
+            self._draw_text(draw, (left + 12, msg_y), result.get("msg", ""), 12,
+                            TEXT_DIM)
+            if result.get("beacon"):
+                self._draw_text(draw, (left + 12, msg_y + 18),
+                                "识别到『打法参考A』→ 对齐成功", 13, TEXT_OK)
+            else:
+                self._draw_text(draw, (left + 12, msg_y + 18),
+                                "没读到『打法参考A』：把面板框进绿框", 13,
+                                TEXT_WARN)
+        else:
+            color = TEXT_BAD if status == "error" else TEXT_DIM
+            self._draw_text(draw, (left + 12, text_y), result.get("msg", ""), 13,
+                            color)
+
+    # ------------------------------------------------------------ 按键
+    def _handle_keys(self) -> None:
+        escape = bool(USER32.GetAsyncKeyState(VK_ESCAPE) & 0x8000)
+        if escape and not self._es_held:
+            self.running = False
+        self._es_held = escape
+
+        s_key = bool(USER32.GetAsyncKeyState(VK_S) & 0x8000)
+        if s_key and not self._s_held:
+            self.save(flash=True)
+        self._s_held = s_key
+
+        tab = bool(USER32.GetAsyncKeyState(VK_TAB) & 0x8000)
+        if tab and not self._tab_held:
+            self.cycle(1)
+        self._tab_held = tab
+
+    def _handle_message(self, width: int, height: int) -> None:
         msg = self._msg
-        if msg.message == WM_LBUTTONDOWN:
+        if msg.message in (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE):
             sx = ctypes.c_short(msg.lParam & 0xFFFF).value
             sy = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-            self._on_mouse_down(sx, sy, sw, sh)
-        elif msg.message == WM_LBUTTONUP:
-            sx = ctypes.c_short(msg.lParam & 0xFFFF).value
-            sy = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-            self._on_mouse_up(sx, sy, sw, sh)
-        elif msg.message == WM_MOUSEMOVE:
-            sx = ctypes.c_short(msg.lParam & 0xFFFF).value
-            sy = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-            self._on_mouse_move(sx, sy, sw, sh)
+            if msg.message == WM_LBUTTONDOWN:
+                self._on_mouse_down(sx, sy, width, height)
+            elif msg.message == WM_LBUTTONUP:
+                self._on_mouse_up(sx, sy, width, height)
+            else:
+                self._on_mouse_move(sx, sy, width, height)
         elif msg.message == WM_RBUTTONDOWN:
             self.running = False
         else:
             USER32.TranslateMessage(ctypes.byref(msg))
             USER32.DispatchMessageW(ctypes.byref(msg))
 
+    # ------------------------------------------------------------ 鼠标穿透
+    def _sync_click_through(self, width: int, height: int) -> None:
+        """只有光标压在框/手柄/按钮上时才拦鼠标，其余时候点得到炉石。"""
+        window = self.window
+        if window is None:
+            return
+        point = wintypes.POINT()
+        if not USER32.GetCursorPos(ctypes.byref(point)):
+            return
+        interactive = (self.drag is not None
+                       or self._hit_test(point.x, point.y, width, height)
+                       is not None)
+        window.set_click_through(not interactive)
+
     # ------------------------------------------------------------ 主循环
     def run(self) -> int:
-        sw = USER32.GetSystemMetrics(0)
-        sh = USER32.GetSystemMetrics(1)
-        self.hwnd = self._create_window(sw, sh)
-        if not self.hwnd:
+        self.width = int(USER32.GetSystemMetrics(0))
+        self.height = int(USER32.GetSystemMetrics(1))
+        window = LayeredWindow("HSLegendArriver 校准", CLASS_NAME,
+                               click_through=True)
+        if not window.open(self.width, self.height):
             print("[校准] 创建窗口失败")
             return 1
-        print(f"[校准] 屏幕 {sw}x{sh}，当前推荐区域 recommendation_roi="
-              f"{tuple(self.roi)}")
-        print("[校准] 拖动绿框->对齐盒子面板->按 S 保存，Esc 退出。"
-              "（窗口置顶，空白处鼠标可穿透操作游戏，无预览窗）")
-        hdc = USER32.GetDC(None)
-        mem_dc = GDI32.CreateCompatibleDC(hdc)
-        bmi = BITMAPINFO()
-        bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        bmi.bmiHeader.biWidth = sw
-        bmi.bmiHeader.biHeight = -sh            # 顶向下
-        bmi.bmiHeader.biPlanes = 1
-        bmi.bmiHeader.biBitCount = 32
-        bmi.bmiHeader.biCompression = 0
-        bits = ctypes.c_void_p()
-        dib = GDI32.CreateDIBSection(hdc, ctypes.byref(bmi), 0,
-                                     ctypes.byref(bits), None, 0)
-        GDI32.SelectObject(mem_dc, dib)
-        USER32.ReleaseDC(None, hdc)
-        blend = BLENDFUNCTION(0, 0, 255, 1)
-        pt_dst = wintypes.POINT(0, 0)
-        size = wintypes.SIZE(sw, sh)
-        pt_src = wintypes.POINT(0, 0)
-        deadline = time.time() + 1.3 if self.selftest else None
+        self.window = window
+        print(f"[校准] 屏幕 {self.width}x{self.height}，可校准区域：")
+        for index, target in enumerate(self.targets, start=1):
+            print(f"[校准]   {index}. {target['label']:<16}"
+                  f" {target['config_key']:<22} = {tuple(target['box'])}")
+        print("[校准] Tab 切换目标 · 拖框/拖右下角手柄调整 · S 保存 · Esc 退出"
+              "（空白处鼠标穿透，不影响你操作炉石）")
         self._start_ocr_thread()
+        deadline = time.time() + 1.3 if self.selftest else None
+        next_panel_check = 0.0
+        next_ocr = 0.0
+        last_paint = 0.0
         try:
             while self.running:
-                # 排空消息队列（拖动时消息密，必须全部处理）
-                while USER32.PeekMessageW(ctypes.byref(self._msg), None,
-                                          0, 0, PM_REMOVE):
-                    self._handle_message(sw, sh)
+                while USER32.PeekMessageW(ctypes.byref(self._msg), None, 0, 0,
+                                          PM_REMOVE):
+                    self._handle_message(self.width, self.height)
                     if not self.running:
                         break
                 if not self.running:
                     break
-                # 全局按键：Esc 退出，S 保存
-                esc = bool(USER32.GetAsyncKeyState(VK_ESCAPE) & 0x8000)
-                if esc and not self._esheld:
-                    self.running = False
-                self._esheld = esc
-                s_key = bool(USER32.GetAsyncKeyState(VK_S) & 0x8000)
-                if s_key and not self._shed:
-                    self.save_roi(flash=True)
-                self._shed = s_key
-                if (self._flash_active
-                        and time.time() >= self.saved_flash_until):
-                    self._flash_active = False
-                    self._dirty = True
-                if self.running and self._dirty:
-                    layer = self._paint(sw, sh)
-                    ctypes.memmove(bits.value, layer.tobytes(), layer.nbytes)
-                    USER32.UpdateLayeredWindow(
-                        self.hwnd, None, ctypes.byref(pt_dst),
-                        ctypes.byref(size), mem_dc, ctypes.byref(pt_src), 0,
-                        ctypes.byref(blend), ULW_ALPHA)
-                    self._dirty = False
+                self._handle_keys()
+                if not self.running:
+                    break
+
+                now = time.time()
+                if now >= next_panel_check:
+                    next_panel_check = now + PANEL_REFRESH_SECONDS
+                    state = panel_state(self._preview_config())
+                    if state is not self.panel_state:
+                        self.panel_state = state
+                        self.dirty = True
+                # OCR 只在校准「推荐面板」时自动跑：拖别的框时别占满 CPU。
+                if (self.ocr_enabled and self.active["key"] == "recommendation"
+                        and now >= next_ocr):
+                    next_ocr = now + OCR_REFRESH_SECONDS
+                    self._capture_for_ocr()
+
+                if self.dirty or now - last_paint >= 0.3:
+                    window.blit(self.render(self.width, self.height))
+                    self.dirty = False
+                    last_paint = now
+                self._sync_click_through(self.width, self.height)
+
                 if deadline is not None and time.time() > deadline:
                     break
-                time.sleep(0.1)
+                time.sleep(0.03)
         finally:
-            if self.hwnd:
-                USER32.ReleaseCapture()
-                USER32.DestroyWindow(self.hwnd)
-                self.hwnd = None
-            GDI32.DeleteDC(mem_dc)
-            GDI32.DeleteObject(dib)
             self.running = False
+            window.close()
+            self.window = None
         print("[校准] 已退出。")
         return 0
 
 
 def main() -> int:
-    selftest = "--selftest" in sys.argv
-    ocr_enabled = "--no-ocr" not in sys.argv
-    cal = Calibrator(selftest=selftest, ocr_enabled=ocr_enabled)
+    args = sys.argv[1:]
+    selftest = "--selftest" in args
+    ocr_enabled = "--no-ocr" not in args
+    start_key = ""
+    if "--target" in args:
+        index = args.index("--target")
+        if len(args) > index + 1:
+            start_key = args[index + 1]
+    session = CalibrationSession(selftest=selftest, ocr_enabled=ocr_enabled,
+                                 start_key=start_key)
     try:
-        code = cal.run()
+        code = session.run()
     except Exception:
         import traceback
         traceback.print_exc()

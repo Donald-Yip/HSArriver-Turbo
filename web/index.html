@@ -387,10 +387,11 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
     <section class="card wide" id="cardRegions">
       <h2 class="card-title">🎯 校准区域</h2>
       <div class="btn-row">
-        <button id="btnCalibrate" class="btn btn-ghost" type="button">📐 显示校准框（屏幕上）</button>
+        <button id="btnCalibrate" class="btn btn-ghost" type="button">📐 打开校准窗口（屏幕上）</button>
       </div>
-      <div class="hint-line">📐 <b>屏幕校准</b>：对战中启动，屏幕显示绿框（= 程序截图区域）+ 右侧实时 OCR 预览。拖动绿框使盒子的「打法参考A」面板对齐，识别到后点 [保存]（写入即生效，不覆盖名字/日志目录），Esc 退出。</div>
-      <div class="hint-line">🧭 <b>只想看一眼框对不对</b>：不用开这个工具，直接在右上角<b>日志浮窗</b>点 <b>「校准」</b> —— 屏幕上会叠加显示脚本实际使用的全部截图区域（🟩 盒子推荐面板、🟦 换牌确认按钮、🟧 AI胜率浮动条、✛ 阶段判定点），并提示<b>「请对齐相应UI」</b>；框是鼠标穿透的，不影响你操作，Esc 或再点一次「校准」收起。</div>
+      <div class="hint-line">📐 <b>校准窗口</b>：对战中启动，屏幕上显示脚本实际使用的全部截图区域（🟩 盒子推荐面板、🟦 换牌确认按钮、🟧 AI胜率浮动条、🟥 AI胜率兜底区域、✛ 阶段判定点）+ 屏幕正中央的目标条 + 右侧推荐区域实时 OCR 预览，并提示<b>「请对齐相应UI」</b>。三个区域都能拖、都能存：<b>1 盒子推荐面板</b>（把「打法参考A」面板框进来）、<b>2 换牌「确认」按钮</b>、<b>3 盒子「AI胜率」浮动条</b>（兜底区域自动跟着外扩）。<b>Tab</b> 切换目标、拖框边框移动、拖右下角手柄缩放、<b>S</b> 保存（写入 <code>ui_config.json</code>，不覆盖名字/日志目录/延时）、<b>Esc</b> 退出。</div>
+      <div class="hint-line">🖱️ 框以外的画面是<b>鼠标穿透</b>的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到炉石上，可以边看游戏画面边调。顶部提示条每 1.5 秒重判一次「绿框里有没有盒子面板」，对齐好了会变绿。</div>
+      <div class="hint-line">🧭 右上角<b>日志浮窗</b>的 <b>「校准」</b> 按钮打开的是<b>同一个窗口</b>（再点一次收起），三个入口不用记不同的用法。</div>
     </section>
 
     <section class="card wide">

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""屏幕上叠加显示「截图区域框」——浮窗「校准」按钮触发。
+"""屏幕上叠加显示「截图区域框」——所有截图区域的统一绘制/叠加层实现。
 
 用途：对战中一眼确认盒子 UI 有没有摆正，并提示「请对齐相应UI」。
 屏幕上直接画出脚本实际使用的截图区域（颜色与网页预览一致）：
@@ -8,15 +8,20 @@
     🟧 橙框 = 盒子「AI胜率」浮动条   🟥 红细框 = AI胜率兜底区域
     ✛  黄十字 = 阶段判定点
 
+本模块对外提供三样东西，校准工具（calibrate_roi.py）全部复用：
+  * ``paint_layer()`` —— 纯函数，画出一整屏 RGBA 叠加层（框 + 提示条）；
+  * ``hint_lines()`` —— 顶部提示条内容（「请对齐相应UI」+ 面板判定）；
+  * ``LayeredWindow`` —— 整屏分层窗口（UpdateLayeredWindow，可动态切换鼠标穿透）；
+  * ``RegionBoxOverlay`` —— 只看不动的叠加层（鼠标穿透），供命令行自检/调试。
+
 设计要点：
   * 置顶 + **鼠标穿透**（WS_EX_TRANSPARENT）：框只是用来看的，点击照常落到炉石上；
   * 不抢焦点（WS_EX_NOACTIVATE）、不出现在任务栏（WS_EX_TOOLWINDOW）；
   * 顶部提示条每 1.5s 重新判断一次「绿框里有没有盒子面板」，对齐成功会变 ✅；
   * Esc 或再点一次浮窗「校准」关闭；窗口随进程退出自动消失。
 
-窗口用与 calibrate_roi.py 相同的分层窗口（UpdateLayeredWindow）实现，
-不依赖 Tk，也不与浮窗抢焦点。绘制逻辑复用 screen_regions 的区域登记表，
-保证屏幕上画的框和网页预览/程序实际截图的是同一批区域。
+绘制逻辑复用 screen_regions 的区域登记表，保证屏幕上画的框、网页预览、
+校准工具里拖的框和程序实际截图的是同一批区域。
 """
 from __future__ import annotations
 
@@ -98,6 +103,114 @@ def _passive_wndproc(hwnd, msg, wparam, lparam):
 
 _WNDPROC_IMPL = WNDPROC(_passive_wndproc)  # 全局引用防止被回收
 
+
+class LayeredWindow:
+    """整屏分层窗口：把一张 RGBA 图直接贴到屏幕上（UpdateLayeredWindow）。
+
+    「屏幕区域框叠加层」与「校准工具」共用这一套窗口实现，避免各自维护一份
+    Win32 样板：
+
+      * 置顶、不抢焦点、不进任务栏；
+      * ``click_through`` 决定鼠标是否穿透 —— 叠加层恒为穿透（点得到炉石），
+        校准工具则按光标位置动态切换（只有框/按钮上拦鼠标）。
+    """
+
+    def __init__(self, title: str, class_name: str = CLASS_NAME,
+                 click_through: bool = True):
+        self.title = title
+        self.class_name = class_name
+        self.click_through = bool(click_through)
+        self.hwnd = None
+        self._mem_dc = None
+        self._dib = None
+        self._bits = None
+        self._size = None
+        self._blend = None
+        self._point_dst = None
+        self._point_src = None
+
+    # -------------------------------------------------- 生命周期
+    def open(self, width: int, height: int) -> bool:
+        """创建整屏窗口并准备好 DIB；失败返回 False。"""
+        self.close()
+        if width <= 0 or height <= 0:
+            return False
+        inst = KERNEL32.GetModuleHandleW(None)
+        wc = WNDCLASSW()
+        wc.lpfnWndProc = ctypes.cast(_WNDPROC_IMPL, ctypes.c_void_p).value
+        wc.hInstance = inst
+        wc.lpszClassName = self.class_name
+        USER32.RegisterClassW(ctypes.byref(wc))
+        ex_style = (WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
+                    | WS_EX_NOACTIVATE)
+        if self.click_through:
+            ex_style |= WS_EX_TRANSPARENT
+        hwnd = USER32.CreateWindowExW(
+            ex_style, self.class_name, self.title, WS_POPUP | WS_VISIBLE,
+            0, 0, width, height, None, None, inst, None)
+        if not hwnd:
+            return False
+
+        hdc = USER32.GetDC(None)
+        mem_dc = GDI32.CreateCompatibleDC(hdc)
+        info = BITMAPINFO()
+        info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        info.bmiHeader.biWidth = width
+        info.bmiHeader.biHeight = -height            # 顶向下
+        info.bmiHeader.biPlanes = 1
+        info.bmiHeader.biBitCount = 32
+        info.bmiHeader.biCompression = 0
+        bits = ctypes.c_void_p()
+        dib = GDI32.CreateDIBSection(hdc, ctypes.byref(info), 0,
+                                     ctypes.byref(bits), None, 0)
+        GDI32.SelectObject(mem_dc, dib)
+        USER32.ReleaseDC(None, hdc)
+
+        self.hwnd = hwnd
+        self._mem_dc = mem_dc
+        self._dib = dib
+        self._bits = bits
+        self._size = wintypes.SIZE(width, height)
+        self._blend = BLENDFUNCTION(0, 0, 255, 1)
+        self._point_dst = wintypes.POINT(0, 0)
+        self._point_src = wintypes.POINT(0, 0)
+        return True
+
+    def blit(self, image) -> bool:
+        """把一张尺寸等于屏幕的 RGBA 图贴上去（PIL 的 RGBA 要转成 BGRA）。"""
+        if self.hwnd is None or self._bits is None:
+            return False
+        data = image.tobytes("raw", "BGRA")
+        ctypes.memmove(self._bits.value, data, len(data))
+        return bool(USER32.UpdateLayeredWindow(
+            self.hwnd, None, ctypes.byref(self._point_dst),
+            ctypes.byref(self._size), self._mem_dc, ctypes.byref(self._point_src),
+            0, ctypes.byref(self._blend), ULW_ALPHA))
+
+    def set_click_through(self, enabled: bool) -> None:
+        """动态切换鼠标穿透（只在状态真的变了才调 SetWindowLongW）。"""
+        if self.hwnd is None or bool(enabled) == self.click_through:
+            return
+        style = USER32.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
+        if enabled:
+            style |= WS_EX_TRANSPARENT
+        else:
+            style &= ~WS_EX_TRANSPARENT
+        USER32.SetWindowLongW(self.hwnd, GWL_EXSTYLE, style)
+        self.click_through = bool(enabled)
+
+    def close(self) -> None:
+        if self.hwnd is not None:
+            USER32.DestroyWindow(self.hwnd)
+            self.hwnd = None
+        if self._mem_dc is not None:
+            GDI32.DeleteDC(self._mem_dc)
+            self._mem_dc = None
+        if self._dib is not None:
+            GDI32.DeleteObject(self._dib)
+            self._dib = None
+        self._bits = None
+
 USER32.RegisterClassW.argtypes = [ctypes.c_void_p]
 USER32.RegisterClassW.restype = ctypes.c_ushort
 USER32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR,
@@ -140,6 +253,12 @@ USER32.UpdateLayeredWindow.argtypes = [wintypes.HWND, wintypes.HDC,
                                        wintypes.DWORD, ctypes.c_void_p,
                                        wintypes.DWORD]
 USER32.UpdateLayeredWindow.restype = wintypes.BOOL
+# 动态切换鼠标穿透（校准工具：只有框上拦鼠标，空白处照常落到炉石上）。
+GWL_EXSTYLE = -20
+USER32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+USER32.GetWindowLongW.restype = ctypes.c_long
+USER32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+USER32.SetWindowLongW.restype = ctypes.c_long
 
 # ---------------------------------------------------------------- 提示条
 HINT_TITLE = "请对齐相应UI"
@@ -212,6 +331,22 @@ def paint_layer(width: int, height: int, panel_state: Optional[bool] = None,
     return canvas
 
 
+def panel_state(config=None, detector=None) -> Optional[bool]:
+    """截一小块推荐区域，看看绿框里现在有没有盒子面板（判断不了返回 None）。
+
+    叠加层与校准工具共用：顶部提示条与「已检测到盒子面板」都看这个返回值。
+    """
+    detect = detector or panel_visible
+    try:
+        from PIL import ImageGrab
+        regions = screenshot_regions(config)
+        roi = next(r for r in regions if r["key"] == "recommendation")["box"]
+        crop = ImageGrab.grab(bbox=tuple(roi), all_screens=False)
+        return bool(detect(crop))
+    except Exception:
+        return None
+
+
 class RegionBoxOverlay:
     """屏幕上的截图区域框叠加层（单例用法见 default_overlay()）。"""
 
@@ -270,15 +405,8 @@ class RegionBoxOverlay:
     # -------------------------------------------------- 面板判定
     def _panel_state(self, config=None) -> Optional[bool]:
         """截一小块推荐区域，看看绿框里现在有没有盒子面板（判断不了返回 None）。"""
-        try:
-            from PIL import ImageGrab
-            regions = screenshot_regions(
-                self._config() if config is None else config)
-            roi = next(r for r in regions if r["key"] == "recommendation")["box"]
-            crop = ImageGrab.grab(bbox=tuple(roi), all_screens=False)
-            return bool(self._detector(crop))
-        except Exception:
-            return None
+        return panel_state(self._config() if config is None else config,
+                           self._detector)
 
     def _config(self):
         if self._config_provider is not None:
@@ -294,35 +422,15 @@ class RegionBoxOverlay:
 
     # -------------------------------------------------- 窗口主循环
     def _run_window(self):
-        from PIL import Image
-
         width, height = self._screen_size()
         if width <= 0 or height <= 0:
             print("[校准] 读不到屏幕尺寸，无法显示区域框")
             return
-        hwnd = self._create_window(width, height)
-        if not hwnd:
+        window = LayeredWindow("HSLegendArriver 截图区域框", CLASS_NAME,
+                               click_through=True)
+        if not window.open(width, height):
             print("[校准] 创建区域框窗口失败")
             return
-        hdc = USER32.GetDC(None)
-        mem_dc = GDI32.CreateCompatibleDC(hdc)
-        info = BITMAPINFO()
-        info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-        info.bmiHeader.biWidth = width
-        info.bmiHeader.biHeight = -height            # 顶向下
-        info.bmiHeader.biPlanes = 1
-        info.bmiHeader.biBitCount = 32
-        info.bmiHeader.biCompression = 0
-        bits = ctypes.c_void_p()
-        dib = GDI32.CreateDIBSection(hdc, ctypes.byref(info), 0,
-                                     ctypes.byref(bits), None, 0)
-        GDI32.SelectObject(mem_dc, dib)
-        USER32.ReleaseDC(None, hdc)
-
-        blend = BLENDFUNCTION(0, 0, 255, 1)
-        point_dst = wintypes.POINT(0, 0)
-        size = wintypes.SIZE(width, height)
-        point_src = wintypes.POINT(0, 0)
         msg = MSG()
         panel_state = None
         next_panel_check = 0.0
@@ -342,35 +450,10 @@ class RegionBoxOverlay:
                 if now >= next_panel_check:
                     next_panel_check = now + self._refresh_seconds
                     panel_state = self._panel_state(config)
-                layer = paint_layer(width, height, panel_state, config)
-                # UpdateLayeredWindow 要的是 BGRA 字节序（PIL 的 RGBA 直接
-                # 塞进去会把红蓝调换），用 raw BGRA 转一次再提交。
-                data = layer.tobytes("raw", "BGRA")
-                ctypes.memmove(bits.value, data, len(data))
-                USER32.UpdateLayeredWindow(
-                    hwnd, None, ctypes.byref(point_dst), ctypes.byref(size),
-                    mem_dc, ctypes.byref(point_src), 0, ctypes.byref(blend),
-                    ULW_ALPHA)
+                window.blit(paint_layer(width, height, panel_state, config))
                 time.sleep(0.06)
         finally:
-            if hwnd:
-                USER32.DestroyWindow(hwnd)
-            GDI32.DeleteDC(mem_dc)
-            GDI32.DeleteObject(dib)
-
-    @staticmethod
-    def _create_window(width: int, height: int):
-        inst = KERNEL32.GetModuleHandleW(None)
-        wc = WNDCLASSW()
-        wc.lpfnWndProc = ctypes.cast(_WNDPROC_IMPL, ctypes.c_void_p).value
-        wc.hInstance = inst
-        wc.lpszClassName = CLASS_NAME
-        USER32.RegisterClassW(ctypes.byref(wc))
-        return USER32.CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST
-            | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            CLASS_NAME, "HSLegendArriver 截图区域框", WS_POPUP | WS_VISIBLE,
-            0, 0, width, height, None, None, inst, None)
+            window.close()
 
 
 _DEFAULT = RegionBoxOverlay()

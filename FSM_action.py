@@ -817,6 +817,8 @@ def confirm_button_present() -> bool:
 
 # ---------------------------------------------------------------- 自动投降检测
 # 盒子浮动条“AI胜率 X%”的截图区域（1920x1080 实测）：主区域 + 放宽的兜底区域。
+# 这是代码默认值；用户用校准工具改过之后走 ui_config.json 的
+# ai_win_rate_roi / ai_win_rate_wide_roi（见 _ai_win_rate_regions）。
 _AI_WIN_RATE_REGIONS = ((110, 8, 270, 48), (95, 0, 300, 60))
 # 浮动条字号很小，放大后再送 OCR，识别率明显更高。
 _AI_WIN_RATE_SCALE = 2.0
@@ -824,6 +826,30 @@ _AI_WIN_RATE_SCALE = 2.0
 # 只读一次就丢掉整个回合会表现为“有时候根本没在检测”。
 _CONCEDE_MAX_ATTEMPTS = 3
 _CONCEDE_RETRY_WAIT = 0.6
+
+
+def _ai_win_rate_regions() -> tuple:
+    """AI胜率截图区域 (主区域, 兜底区域)：优先用用户校准值，否则用默认值。
+
+    recommendation_config 在 initialize_recommendation_automation() 里每次
+    对局都会重建，因此校准完重开对局即生效，不用重启脚本。
+    """
+    config = recommendation_config
+    if config is None:
+        return _AI_WIN_RATE_REGIONS
+    main = getattr(config, "ai_win_rate_roi", None)
+    wide = getattr(config, "ai_win_rate_wide_roi", None)
+    if main is None and wide is None:
+        return _AI_WIN_RATE_REGIONS
+    try:
+        regions = list(_AI_WIN_RATE_REGIONS)
+        if main is not None:
+            regions[0] = tuple(int(v) for v in main)
+        if wide is not None:
+            regions[1] = tuple(int(v) for v in wide)
+        return tuple(regions)
+    except (TypeError, ValueError):
+        return _AI_WIN_RATE_REGIONS
 
 
 def concede_detection_state() -> dict:
@@ -875,7 +901,7 @@ def read_ai_win_rate():
         from PIL import ImageGrab
     except Exception:
         return None
-    for index, box in enumerate(_AI_WIN_RATE_REGIONS):
+    for index, box in enumerate(_ai_win_rate_regions()):
         try:
             rgb = np.asarray(ImageGrab.grab(bbox=box, all_screens=False))
             img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

@@ -73,6 +73,79 @@ class RegionRegistryTests(unittest.TestCase):
         self.assertEqual(3, len(points))
         self.assertIn((1090, 1070), [p["point"] for p in points])
 
+
+class CalibrationTargetTests(unittest.TestCase):
+    """可校准区域清单：校准工具、叠加层、AI胜率读取共用这一份来源。"""
+
+    def test_lists_the_three_calibratable_targets(self):
+        targets = screen_regions.calibration_targets(make_config())
+
+        self.assertEqual(["recommendation", "mulligan_confirm", "win_rate"],
+                         [target["key"] for target in targets])
+        self.assertEqual(
+            ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi"],
+            [target["config_key"] for target in targets])
+        for target in targets:
+            self.assertTrue(target["label"])
+            self.assertTrue(target["short"])
+            self.assertTrue(target["hint"])
+            self.assertRegex(target["color"], r"^#[0-9a-fA-F]{6}$")
+
+    def test_boxes_come_from_the_config_with_defaults(self):
+        boxes = {target["key"]: target["box"]
+                 for target in screen_regions.calibration_targets(make_config())}
+
+        self.assertEqual((7, 200, 202, 500), boxes["recommendation"])
+        self.assertEqual((860, 810, 1060, 890), boxes["mulligan_confirm"])
+        self.assertEqual(screen_regions.AI_WIN_RATE_REGION, boxes["win_rate"])
+
+    def test_calibrated_win_rate_box_wins_over_the_default(self):
+        targets = screen_regions.calibration_targets(
+            make_config(ai_win_rate_roi=(120, 12, 280, 52)))
+
+        box = next(t["box"] for t in targets if t["key"] == "win_rate")
+        self.assertEqual((120, 12, 280, 52), box)
+
+    def test_wide_box_follows_the_calibrated_main_box(self):
+        regions = screen_regions.screenshot_regions(
+            make_config(ai_win_rate_roi=(100, 10, 260, 50)))
+
+        wide = next(r["box"] for r in regions if r["key"] == "win_rate_wide")
+        self.assertEqual(screen_regions.expand_box(
+            (100, 10, 260, 50), screen_regions.AI_WIN_RATE_WIDE_MARGIN), wide)
+
+    def test_default_wide_box_is_derived_from_the_default_main_box(self):
+        self.assertEqual(
+            (95, 0, 300, 60),
+            screen_regions.expand_box(
+                screen_regions.AI_WIN_RATE_REGION,
+                screen_regions.AI_WIN_RATE_WIDE_MARGIN))
+
+    def test_target_lookup_by_key(self):
+        self.assertEqual(
+            "ai_win_rate_roi",
+            screen_regions.calibration_target(make_config(),
+                                              "win_rate")["config_key"])
+        self.assertIsNone(
+            screen_regions.calibration_target(make_config(), "nope"))
+
+    def test_automation_reads_the_calibrated_win_rate_region(self):
+        """自动投降实际截的区域也要跟着校准值走。"""
+        import FSM_action
+
+        saved = FSM_action.recommendation_config
+        try:
+            FSM_action.recommendation_config = SimpleNamespace(
+                ai_win_rate_roi=(120, 12, 280, 52),
+                ai_win_rate_wide_roi=(105, 0, 310, 64))
+            self.assertEqual(((120, 12, 280, 52), (105, 0, 310, 64)),
+                             FSM_action._ai_win_rate_regions())
+            FSM_action.recommendation_config = None
+            self.assertEqual(FSM_action._AI_WIN_RATE_REGIONS,
+                             FSM_action._ai_win_rate_regions())
+        finally:
+            FSM_action.recommendation_config = saved
+
     def test_state_probe_points_are_copies(self):
         points = screen_regions.state_probe_points()
         points[0]["point"] = (0, 0)
