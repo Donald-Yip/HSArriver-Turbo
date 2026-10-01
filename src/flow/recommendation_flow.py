@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import inspect
 import time
 
 from src.flow.hand_animation_delay import HandAnimationDelay
@@ -11,6 +12,24 @@ from src.safety.recommendation_validator import ConsumedActionStore
 
 # 「回合号还没记录过」的哨兵：不能用 None，因为有些状态里回合号就是 None。
 _UNSET_TURN = object()
+
+
+def _accepts_action_kind(hook) -> bool:
+    """挂点是否接受 action_kind 参数（老挂点只接受 0 个参数）。
+
+    按函数签名判断，而不是靠 TypeError 兜底——挂点内部真正的 TypeError 会被
+    误当成“参数不对”，反而把错误吞掉。
+    """
+    try:
+        parameters = inspect.signature(hook).parameters
+    except (TypeError, ValueError):
+        return False
+    for parameter in parameters.values():
+        if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY,
+                              inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                              inspect.Parameter.VAR_POSITIONAL):
+            return True
+    return False
 
 
 class FlowStepStatus(str, Enum):
@@ -55,10 +74,14 @@ class RecommendationFlow:
         self.stopped = stopped
         self.consumed = consumed or ConsumedActionStore()
         self.post_action_delay = post_action_delay
-        # 「活人感」（可选）：盒子意见执行完后的随机延时 + 鼠标在手牌区悬停。
+        # 「活人感」（可选）：盒子意见执行完后的随机延时 + 鼠标悬停。
         # 返回 True 表示已接管本次延时，就不再叠加固定的 post_action_delay。
         # 只有走到这里的“识别盒子意见并执行完”的对局动作才会触发它。
         self.post_action_pause = post_action_pause
+        # 挂点是否接受 action_kind（新挂点会据此决定“看手牌”还是“看场面”）。
+        self._pause_takes_action_kind = (
+            post_action_pause is not None
+            and _accepts_action_kind(post_action_pause))
         # 「抽牌额外延时」（秒/张，网页「延时设置」可调）。判定看手牌入场数：
         #   * 每回合开始那一下的常规抽 1 张不算（那 1 张是免费的）；
         #   * 同一回合里再多抽的（比如开局一次抽 2 张）要算；
@@ -136,12 +159,16 @@ class RecommendationFlow:
             self._acted_this_turn = True
             # 操作结束后延时再开始下一轮截图+OCR（盒子更新面板留时间）。
             # 通过 controller.output 推送延时行，让浮窗底部计时表显示该延时。
-            # 「活人感」开启时由 post_action_pause 接管（随机 0.5~3s + 手牌悬停），
-            # 此时不再叠加固定延时。
+            # 「活人感」开启时由 post_action_pause 接管（随机 0.5~3s + 鼠标悬停），
+            # 此时不再叠加固定延时。把刚执行完的 action_kind 一起传过去：攻击之后
+            # 就不再盯手牌，改看己方随从行（新挂点才收这个参数，老的照旧 0 参数调）。
             paused = False
             if self.post_action_pause is not None:
                 try:
-                    paused = bool(self.post_action_pause())
+                    if self._pause_takes_action_kind:
+                        paused = bool(self.post_action_pause(proposed.action))
+                    else:
+                        paused = bool(self.post_action_pause())
                 except Exception:
                     paused = False
             if not paused and self.post_action_delay:

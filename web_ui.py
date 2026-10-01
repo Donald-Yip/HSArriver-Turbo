@@ -636,24 +636,39 @@ def api_save_human_like(body):
         cfg = load_config()
         hl = _current_human_like()
         hl["enabled"] = bool(body.get("enabled", hl["enabled"]))
+        # 「看卡牌」「看随从」两个独立开关：关掉看卡牌 = 连随机延时一起关，
+        # 关掉看随从 = 不再对着新随从动鼠标。
+        hl["hand_hover_enabled"] = bool(
+            body.get("hand_hover_enabled", hl["hand_hover_enabled"]))
+        hl["minion_hover_enabled"] = bool(
+            body.get("minion_hover_enabled", hl["minion_hover_enabled"]))
         try:
             lo = float(body.get("post_delay_min", hl["post_delay_min"]))
             hi = float(body.get("post_delay_max", hl["post_delay_max"]))
             h_lo = float(body.get("hover_min", hl["hover_min"]))
             h_hi = float(body.get("hover_max", hl["hover_max"]))
+            m_lo = float(body.get("minion_hover_min", hl["minion_hover_min"]))
+            m_hi = float(body.get("minion_hover_max", hl["minion_hover_max"]))
         except (TypeError, ValueError):
             return {"ok": False, "error": "延时时长/悬停时长必须为数字。"}
         lo = max(0.0, min(60.0, lo))
         hi = max(lo, min(60.0, hi))
         h_lo = max(0.05, min(30.0, h_lo))
         h_hi = max(h_lo, min(30.0, h_hi))
+        m_lo = max(0.05, min(30.0, m_lo))
+        m_hi = max(m_lo, min(30.0, m_hi))
         hl.update({"post_delay_min": lo, "post_delay_max": hi,
-                   "hover_min": h_lo, "hover_max": h_hi})
+                   "hover_min": h_lo, "hover_max": h_hi,
+                   "minion_hover_min": m_lo, "minion_hover_max": m_hi})
         hl.pop("hover_seconds", None)   # 旧的固定悬停字段不再使用
         cfg["human_like"] = hl
         save_config(cfg)
+    hand_on = "开" if hl["hand_hover_enabled"] else "关"
+    minion_on = "开" if hl["minion_hover_enabled"] else "关"
     _log("SYS", f"活人感配置已保存：{'开启' if hl['enabled'] else '关闭'}"
-                f"（随机延时 {lo:.1f}~{hi:.1f}s，每处悬停 {h_lo:.1f}~{h_hi:.1f}s）。")
+                f"（看卡牌 {hand_on} · 随机延时 {lo:.1f}~{hi:.1f}s"
+                f" · 悬停 {h_lo:.1f}~{h_hi:.1f}s；"
+                f"看随从 {minion_on} · {m_lo:.1f}~{m_hi:.1f}s）。")
     return {"ok": True, "message": "活人感配置已保存", "human_like": hl}
 
 

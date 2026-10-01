@@ -311,6 +311,12 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
           <span class="field-label">启用</span>
           <input id="chkHumanLike" type="checkbox" style="width:auto;height:22px">
         </label>
+      </div>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:250px">
+          <span class="field-label">看卡牌（延时期间在手牌区随手停）</span>
+          <input id="chkHlHand" type="checkbox" style="width:auto;height:22px">
+        </label>
         <label class="field">
           <span class="field-label">随机延时下限（秒）</span>
           <input id="inpHlMin" type="number" min="0" max="60" step="0.1">
@@ -328,10 +334,24 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
           <input id="inpHlHoverMax" type="number" min="0.05" max="30" step="0.05">
         </label>
       </div>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:250px">
+          <span class="field-label">看随从（对手新随从出现时看一眼）</span>
+          <input id="chkHlMinion" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">随从悬停下限（秒）</span>
+          <input id="inpHlMinionMin" type="number" min="0.05" max="30" step="0.05">
+        </label>
+        <label class="field">
+          <span class="field-label">随从悬停上限（秒）</span>
+          <input id="inpHlMinionMax" type="number" min="0.05" max="30" step="0.05">
+        </label>
+      </div>
       <div class="btn-row">
         <button id="btnSaveHumanLike" class="btn btn-ghost" type="button">💾 保存活人感</button>
       </div>
-      <div class="hint-line">开启后：每次操作结束不再用固定的「操作后延时」，而是 <b>0.5~3 秒随机延时</b>；延时期间鼠标会在手牌区像真人一样随机悬停（每处 <b>0.2~1 秒随机</b>），最后仍复位到左上角。全程只移动、绝不点击，不影响出牌判定。日志浮窗会显示活人感开/关与投降检测状态，随机延时会显示在浮窗底部进度条上。默认关闭；自动化运行中不可修改，下一局开始时生效。</div>
+      <div class="hint-line"><b>启用</b>：活人感总开关。<b>看卡牌</b>：每次操作结束后不再用固定的「操作后延时」，而是先随机等 <b>0.5~3 秒</b>（可调），等待期间鼠标在手牌区像真人一样随手停一停（每处 <b>0.2~1 秒</b>，可调）；关掉它连这段随机延时一起取消，回到固定延时。<b>看随从</b>：对手场上出现新随从时，鼠标移到该随从上随机悬停 <b>0.2~1.5 秒</b>（可调，只在对手回合，一次最多 3 个）。全程只移动、绝不点击，不影响出牌判定；每段悬停结束都复位到左上角。默认关闭；自动化运行中不可修改，下一局开始时生效。</div>
     </section>
 
     <section class="card wide">
@@ -553,17 +573,25 @@ function render(s){
 
   /* 活人感 */
   $("chkHumanLike").disabled = busy;
+  $("chkHlHand").disabled = busy;
+  $("chkHlMinion").disabled = busy;
   $("inpHlMin").disabled = busy;
   $("inpHlMax").disabled = busy;
   $("inpHlHoverMin").disabled = busy;
   $("inpHlHoverMax").disabled = busy;
+  $("inpHlMinionMin").disabled = busy;
+  $("inpHlMinionMax").disabled = busy;
   $("btnSaveHumanLike").disabled = busy;
   if (s.human_like && !dirtyHumanLike){
     $("chkHumanLike").checked = !!s.human_like.enabled;
+    $("chkHlHand").checked = !!s.human_like.hand_hover_enabled;
+    $("chkHlMinion").checked = !!s.human_like.minion_hover_enabled;
     $("inpHlMin").value = s.human_like.post_delay_min;
     $("inpHlMax").value = s.human_like.post_delay_max;
     $("inpHlHoverMin").value = s.human_like.hover_min;
     $("inpHlHoverMax").value = s.human_like.hover_max;
+    $("inpHlMinionMin").value = s.human_like.minion_hover_min;
+    $("inpHlMinionMax").value = s.human_like.minion_hover_max;
   }
 
   /* 自动投降检测状态（每回合刷新，方便确认“到底有没有在检测”） */
@@ -967,18 +995,24 @@ $("btnSaveConcede").addEventListener("click", function(){
 });
 
 /* ---------- 活人感 ---------- */
-$("chkHumanLike").addEventListener("change", function(){ dirtyHumanLike = true; });
-["inpHlMin","inpHlMax","inpHlHoverMin","inpHlHoverMax"].forEach(function(id){
+["chkHumanLike","chkHlHand","chkHlMinion"].forEach(function(id){
+  $(id).addEventListener("change", function(){ dirtyHumanLike = true; });
+});
+["inpHlMin","inpHlMax","inpHlHoverMin","inpHlHoverMax","inpHlMinionMin","inpHlMinionMax"].forEach(function(id){
   $(id).addEventListener("input", function(){ dirtyHumanLike = true; });
 });
 
 $("btnSaveHumanLike").addEventListener("click", function(){
   post("/api/human_like", {
     enabled: $("chkHumanLike").checked,
+    hand_hover_enabled: $("chkHlHand").checked,
+    minion_hover_enabled: $("chkHlMinion").checked,
     post_delay_min: $("inpHlMin").value,
     post_delay_max: $("inpHlMax").value,
     hover_min: $("inpHlHoverMin").value,
-    hover_max: $("inpHlHoverMax").value
+    hover_max: $("inpHlHoverMax").value,
+    minion_hover_min: $("inpHlMinionMin").value,
+    minion_hover_max: $("inpHlMinionMax").value
   }).then(function(r){
     if (r.ok){
       toast(r.message, "ok");

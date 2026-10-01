@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from constants.constants import *
 from print_info import *
 from get_screen import *
-from config import human_like_settings
+from config import DEFAULT_HUMAN_LIKE, human_like_settings
 
 
 #测试不同分辨率的点击效果，因为屏幕截取未支持不同分辨率，失败了
@@ -114,7 +114,9 @@ def side_point(hearthstone_hwnd=0, preferred=None,
 # 在动作执行成功后经 FSM_action._human_like_post_action_pause() 调用本函数，
 # 用 0.5~3s 的随机“思考”延时代替固定延时，期间把手牌区当普通人类一样随手悬停
 # （每处约 1s），最后仍复位到 MOUSE_RESET_POS。
-# 匹配对手、选卡组、错误弹窗取消这类非推荐动作不会触发。
+# 攻击类动作不经过这里（出手后还看手牌最像脚本，而且攻击常常连着来）：
+# FSM 层会直接返回 False，让流程走正常的固定「操作后延时」去读下一条推荐。
+# 匹配对手、选卡组、错误弹窗取消这类非推荐动作也不会触发。
 # 开关与参数在 Web 控制台的「活人感」卡片里设置（ui_config.json 的 human_like 段）。
 HAND_HOVER_Y = 1000          # 手牌卡面所在高度（与 choose_card 用的 y 一致）
 HAND_HOVER_SIZES = (3, 8)    # 手牌张数未知，按常见张数取卡位
@@ -168,6 +170,48 @@ def human_like_pause(mouse=None, settings=None):
     # 与固定延时一致的收尾标记：让浮窗进度条立刻清空、显示“延时：无”。
     sys_print("[SYS] 延时结束")
     return total
+
+
+OPPO_MINION_HOVER_Y = 400        # 对手随从卡面中心高度（与 choose_opponent_minion 一致）
+OPPO_MINION_HOVER_JITTER = 25    # 落点随机偏移，避免每次都停在同一个像素上
+
+
+def opponent_minion_hover_point(oppo_index, oppo_num, jitter=True):
+    """对手第 oppo_index 个随从卡面上的一点（坐标口径同 choose_opponent_minion）。
+
+    只用于「活人感」移动鼠标、绝不点击，所以落点略有偏差也无害；
+    oppo_index/oppo_num 与 choose_opponent_minion 完全一致（按 zone_pos 排序后的序号）。
+    """
+    x = 960 - (oppo_num - 1) * 70 + oppo_index * 140
+    y = OPPO_MINION_HOVER_Y
+    if jitter:
+        x += random.randint(-OPPO_MINION_HOVER_JITTER, OPPO_MINION_HOVER_JITTER)
+        y += random.randint(-OPPO_MINION_HOVER_JITTER, OPPO_MINION_HOVER_JITTER)
+    return (x, y)
+
+
+def hover_opponent_minion(oppo_index, oppo_num, mouse=None, settings=None,
+                          duration=None):
+    """活人感：把鼠标移到对手新出现的随从上，随机悬停 0.2~1.5s（只移动、不点击）。
+
+    悬停时长取自 ui_config.json 的 human_like.minion_hover_min/max；结束后仍复位到
+    MOUSE_RESET_POS。日志措辞与其他延时一致：≥1s 的行只驱动浮窗底部进度条，
+    <1s 的行留在正文日志里（见 log_overlay._update_delay_from_line）。
+    返回本次悬停时长（秒）。
+    """
+    cfg = settings or human_like_settings()
+    if mouse is None:
+        mouse = Controller()
+    if duration is None:
+        duration = random.uniform(
+            float(cfg.get("minion_hover_min", DEFAULT_HUMAN_LIKE["minion_hover_min"])),
+            float(cfg.get("minion_hover_max", DEFAULT_HUMAN_LIKE["minion_hover_max"])))
+    mouse.position = opponent_minion_hover_point(oppo_index, oppo_num)
+    sys_print(f"[SYS] 活人感 延时 {duration:.1f}s 后（悬停对手新随从）")
+    time.sleep(max(0.0, duration))
+    center_mouse(mouse)
+    sys_print("[SYS] 延时结束")
+    return duration
 
 
 def park_mouse(mouse=None):

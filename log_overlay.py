@@ -300,8 +300,15 @@ def toggle_account_visibility() -> bool:
 def human_like_row(info) -> dict:
     """浮窗“活人感”状态行：{'marker','value','value_color','detail'}。
 
-    info 形如 {"enabled", "post_delay_min", "post_delay_max",
-    "hover_min", "hover_max"}；None / 取不到时显示“—”，表示无法确认。
+    info 形如 {"enabled", "hand_hover_enabled", "minion_hover_enabled",
+    "post_delay_min", "post_delay_max", "hover_min", "hover_max",
+    "minion_hover_min", "minion_hover_max"}；None / 取不到时显示“—”，
+    表示无法确认。detail 只显示当前**真正生效**的参数，避免关掉「看卡牌」
+    之后还挂着 0.5~3s 的随机延时让人以为还在用：
+      * 两个悬停都关 → “两个悬停都已关”；
+      * 只开「看随从」→ “看随从 0.2~1.5s”（没有随机延时）；
+      * 开了「看卡牌」→ 保持原来的 “0.5~3s · 悬停 0.2~1s”（不加长，
+        浮窗只有 263px 宽）。
     """
     if info is None:
         return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
@@ -309,11 +316,20 @@ def human_like_row(info) -> dict:
     if not info.get("enabled"):
         return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
                 "detail": ""}
-    lo, hi = info.get("post_delay_min"), info.get("post_delay_max")
-    h_lo, h_hi = info.get("hover_min"), info.get("hover_max")
-    detail = f"{lo:g}~{hi:g}s" if lo is not None and hi is not None else ""
-    if h_lo is not None and h_hi is not None:
-        detail += (" · " if detail else "") + f"悬停 {h_lo:g}~{h_hi:g}s"
+    hand_on = bool(info.get("hand_hover_enabled", True))
+    minion_on = bool(info.get("minion_hover_enabled", True))
+    if not hand_on and not minion_on:
+        detail = "两个悬停都已关"
+    elif not hand_on:
+        m_lo, m_hi = info.get("minion_hover_min"), info.get("minion_hover_max")
+        detail = (f"看随从 {m_lo:g}~{m_hi:g}s"
+                  if m_lo is not None and m_hi is not None else "仅看随从")
+    else:
+        lo, hi = info.get("post_delay_min"), info.get("post_delay_max")
+        h_lo, h_hi = info.get("hover_min"), info.get("hover_max")
+        detail = f"{lo:g}~{hi:g}s" if lo is not None and hi is not None else ""
+        if h_lo is not None and h_hi is not None:
+            detail += (" · " if detail else "") + f"悬停 {h_lo:g}~{h_hi:g}s"
     return {"marker": MARKER_ON, "value": "开", "value_color": GREEN,
             "detail": detail}
 

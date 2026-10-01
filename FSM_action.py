@@ -87,6 +87,13 @@ _ocr_fail_streak = 0
 # 调试快照写盘节流：日志每次变化都全量序列化整个 log_state 会拖慢主循环，
 # 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。（定义于 config.py）
 _last_snapshot_write = 0.0
+# ---------------------------------------------------------------- 活人感：对手新随从
+# 记录本局已经见过的对手随从 entity_id：对手回合里出现新 id 就把鼠标移上去
+# 随机悬停 0.2~1.5s（只移动不点击）。None = 本局还没取到基线快照（首次只记录、
+# 不悬停，避免一进对局就对着一堆已有随从乱晃）。
+_oppo_minion_ids = None
+# 一次最多悬停几个新随从：对手一口气铺满场（token/亡语）时不至于长时间发呆。
+OPPO_MINION_HOVER_PER_BATCH = 3
 
 
 def _automation_state():
@@ -181,16 +188,31 @@ def initialize_recommendation_automation():
     )
 
 
-def _human_like_post_action_pause() -> bool:
+def _human_like_post_action_pause(action_kind=None) -> bool:
     """「活人感」延时：只在“对局中识别盒子意见并执行完”之后调用。
 
     由 RecommendationFlow / MulliganFlow 在动作执行成功后调用，返回 True 表示
-    本次延时已被接管（随机 0.5~3s + 鼠标在手牌区悬停），流程层不再叠加固定延时。
+    本次延时已被接管（随机 0.5~3s + 鼠标悬停），流程层不再叠加固定延时。
     未开启时返回 False，走原来的固定「操作后延时」。匹配对手、选卡组、错误弹窗
     取消这类非推荐动作不会经过这里。
+
+    action_kind：刚执行完的动作类型（ActionKind，可能为 None）。**攻击类动作不做
+    活人感表演**（出手后还盯着手牌最像脚本，而且攻击常常是连着来的）：直接返回
+    False，让流程走正常的固定「操作后延时」去读下一条推荐。其它动作（出牌/技能/
+    交易/换牌）才看手牌。
+
+    门禁是“总开关 + 看卡牌”：「随机延时」本身就是手牌悬停的那段等待窗口，所以
+    关掉「看卡牌」= 连随机延时一起关掉（回到固定「操作后延时」），不再走到
+    click.human_like_pause()。对手随从悬停是另一个独立开关，互不影响。
     """
     try:
-        if not human_like_settings().get("enabled"):
+        settings = human_like_settings()
+        if not settings.get("enabled"):
+            return False
+        if not settings.get("hand_hover_enabled", True):
+            return False
+        # ActionKind 是 str 枚举，所以字符串 "attack" 也能匹配上。
+        if action_kind == ActionKind.ATTACK:
             return False
         click.human_like_pause()
         return True
@@ -202,6 +224,55 @@ def _human_like_post_action_pause() -> bool:
         return False
 
 
+def _human_like_opponent_minions(snapshot) -> int:
+    """对手场上出现新随从时，鼠标移上去随机悬停 0.2~1.5s（活人感）。
+
+    只在【对手回合】悬停：那时脚本本来就在空转等对手，不会拖慢自己的出牌；
+    我方回合出现的“新随从”只记入基线，不悬停（避免打断自己的操作节奏）。
+    返回本次实际悬停的随从个数；未开启活人感/没有新随从时返回 0。
+    """
+    global _oppo_minion_ids
+    try:
+        minions = list(getattr(snapshot, "oppo_minions", None) or ())
+    except Exception:
+        return 0
+    ids = {mid for mid in (getattr(m, "entity_id", None) for m in minions)
+           if mid is not None}
+    if _oppo_minion_ids is None:
+        # 本局第一份快照：只建立基线，不对已有随从悬停。
+        _oppo_minion_ids = ids
+        return 0
+    new_ids = ids - _oppo_minion_ids
+    _oppo_minion_ids = ids
+    if not new_ids or getattr(snapshot, "is_my_turn", False):
+        return 0
+    try:
+        settings = human_like_settings()
+        if not settings.get("enabled"):
+            return 0
+        if not settings.get("minion_hover_enabled", True):
+            return 0
+    except Exception:
+        return 0
+    total = len(minions)
+    hovered = 0
+    for index, minion in enumerate(minions):
+        if getattr(minion, "entity_id", None) not in new_ids:
+            continue
+        if hovered >= OPPO_MINION_HOVER_PER_BATCH:
+            break
+        try:
+            click.hover_opponent_minion(index, total)
+            hovered += 1
+        except Exception as exc:
+            try:
+                print(f"[SYS] 活人感对手随从悬停失败：{exc}")
+            except Exception:
+                pass
+            break
+    return hovered
+
+
 def reset_game_session():
     """Clear every match-scoped automation state for a newly created game."""
     global active_game_generation, choose_hero_count
@@ -211,6 +282,7 @@ def reset_game_session():
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
     global _name_match_result
+    global _oppo_minion_ids
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -227,6 +299,8 @@ def reset_game_session():
     _concede_last_check = None
     # 新一局重新校验昵称（换号提示按局给一次）。
     _name_match_result = None
+    # 新一局重新建立“对手随从基线”，第一份快照只记录不悬停。
+    _oppo_minion_ids = None
     click.center_mouse()
 
 
@@ -239,6 +313,7 @@ def init():
     global _concede_last_rate, _concede_last_check
     global _name_match_result, _name_match_reported
     global _liveness_alert, _ocr_fail_streak
+    global _oppo_minion_ids
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -259,6 +334,7 @@ def init():
     _name_match_reported = None
     _liveness_alert = None
     _ocr_fail_streak = 0
+    _oppo_minion_ids = None
     # 存活检测按“本轮自动化”重新开始计数：本轮没见过的炉石进程不算“消失”，
     # 否则“启动脚本 → 脚本拉起炉石”的正常流程会被误判成闪退。
     try:
@@ -1009,6 +1085,9 @@ def run_automatic_battle_step():
         # 避免点完认输立刻计数导致“完成对局”时机不准。
         return None
     if not snapshot.is_my_turn:
+        # 活人感：对手回合里出现新随从就移上去悬停（只移动不点击）；
+        # 这里本来就在空转等对手，不会拖慢自己的操作。
+        _human_like_opponent_minions(snapshot)
         _report_automation_diagnostic("opponent_turn", "等待对手操作。")
         # 对方回合清空延迟标记：每次切回我方回合必延时一次，
         # 同回合内多次出牌不再重复延时（不依赖可能失真的回合号）。

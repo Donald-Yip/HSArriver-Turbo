@@ -58,6 +58,46 @@ class HumanLikeLabelTests(unittest.TestCase):
         self.assertEqual("开", row["value"])
         self.assertEqual("", row["detail"])
 
+    def test_missing_switches_keep_the_old_detail(self):
+        """老配置（没有两个开关）保持原来的文案，别让浮窗显示变来变去。"""
+        row = log_overlay.human_like_row({
+            "enabled": True, "post_delay_min": 0.5, "post_delay_max": 3.0,
+            "hover_min": 0.2, "hover_max": 1.0})
+        self.assertIn("0.5~3s", row["detail"])
+        self.assertIn("悬停 0.2~1s", row["detail"])
+
+    def test_hand_hover_off_shows_only_the_minion_range(self):
+        row = log_overlay.human_like_row({
+            "enabled": True, "hand_hover_enabled": False,
+            "minion_hover_enabled": True,
+            "post_delay_min": 0.5, "post_delay_max": 3.0,
+            "hover_min": 0.2, "hover_max": 1.0,
+            "minion_hover_min": 0.2, "minion_hover_max": 1.5})
+
+        self.assertEqual("开", row["value"])
+        self.assertNotIn("0.5~3s", row["detail"])     # 没有随机延时了
+        self.assertIn("看随从 0.2~1.5s", row["detail"])
+
+    def test_both_hovers_off_says_so(self):
+        row = log_overlay.human_like_row({
+            "enabled": True, "hand_hover_enabled": False,
+            "minion_hover_enabled": False,
+            "post_delay_min": 0.5, "post_delay_max": 3.0,
+            "hover_min": 0.2, "hover_max": 1.0})
+
+        self.assertEqual("开", row["value"])
+        self.assertEqual("两个悬停都已关", row["detail"])
+
+    def test_minion_off_keeps_the_hand_detail(self):
+        row = log_overlay.human_like_row({
+            "enabled": True, "hand_hover_enabled": True,
+            "minion_hover_enabled": False,
+            "post_delay_min": 0.5, "post_delay_max": 3.0,
+            "hover_min": 0.2, "hover_max": 1.0})
+
+        self.assertIn("0.5~3s", row["detail"])
+        self.assertIn("悬停 0.2~1s", row["detail"])
+
 
 class ConcedeDetectLabelTests(unittest.TestCase):
     def test_unknown_state(self):

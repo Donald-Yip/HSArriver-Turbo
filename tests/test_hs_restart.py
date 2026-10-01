@@ -47,7 +47,10 @@ class ResolvePathsTests(unittest.TestCase):
 
         self.assertTrue(info["ok"])
         self.assertEqual(self.logs.resolve(), info["log_root"])
-        self.assertEqual(self.install / hs_restart.EXE_NAME, info["exe"])
+        # info 里的路径来自 Path.resolve()，而 tempfile.gettempdir() 可能给的是
+        # 8.3 短名（如 C:\Users\DONALD~1\...），所以期望值也先 resolve 再比。
+        self.assertEqual((self.install / hs_restart.EXE_NAME).resolve(),
+                         info["exe"])
         self.assertTrue(info["exe_found"])
 
     def test_derives_the_battlenet_launcher_from_the_sibling_folder(self):
@@ -57,7 +60,7 @@ class ResolvePathsTests(unittest.TestCase):
         info = hs_restart.resolve_paths(self.logs)
 
         self.assertTrue(info["ok"])
-        self.assertEqual(launcher, info["battlenet_exe"])
+        self.assertEqual(launcher.resolve(), info["battlenet_exe"])
         self.assertTrue(info["battlenet_found"])
 
     def test_missing_exe_is_reported_but_still_ok(self):

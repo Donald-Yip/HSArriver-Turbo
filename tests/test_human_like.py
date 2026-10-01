@@ -1,6 +1,7 @@
 """活人感（可选）：操作后 0.5~3s 随机延时，期间鼠标在手牌区随机悬停（每处 1s）。"""
 
 import json
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 import click as hearthstone_click
 import config
+from src.recommendation_models import ActionKind
 
 
 class RecordingMouse:
@@ -200,6 +202,17 @@ class HumanLikePauseTests(unittest.TestCase):
         for before, after in zip(hovers, hovers[1:]):
             self.assertNotEqual(before, after)
 
+    def test_hover_points_are_always_on_the_hand_row(self):
+        """活人感只玩手牌区：攻击类动作压根不会调用它（见 FSM 挂点测试）。"""
+        with patch.object(hearthstone_click.random, "uniform",
+                          side_effect=[1.0, 0.5, 0.5]):
+            hearthstone_click.human_like_pause(self.mouse, self._settings())
+
+        for point in self.mouse.moves[:-1]:
+            self.assertEqual(hearthstone_click.HAND_HOVER_Y, point[1])
+        self.assertIn("手牌区", self.printed[0])
+        self.assertFalse(hasattr(hearthstone_click, "BOARD_HOVER_Y"))
+
 
 class ParkMouseTests(unittest.TestCase):
     """复位本身永远走“0.1s + 复位到左上角”，活人感不再挂在这里。
@@ -254,37 +267,84 @@ class PostActionPauseHookTests(unittest.TestCase):
     def setUp(self):
         import FSM_action
         self.fsm = FSM_action
+        self.areas = []
+
+    def _pause(self, action_kind=None, **settings):
+        cfg = {"enabled": True, "hand_hover_enabled": True}
+        cfg.update(settings)
+        with (
+            patch.object(self.fsm, "human_like_settings", return_value=cfg),
+            patch.object(self.fsm.click, "human_like_pause",
+                         side_effect=lambda: self.areas.append(1)),
+        ):
+            return self.fsm._human_like_post_action_pause(action_kind)
 
     def test_disabled_returns_false_and_does_not_pause(self):
-        calls = []
-        with (
-            patch.object(self.fsm, "human_like_settings",
-                         return_value={"enabled": False}),
-            patch.object(self.fsm.click, "human_like_pause",
-                         side_effect=lambda: calls.append(1)),
-        ):
-            handled = self.fsm._human_like_post_action_pause()
+        handled = self._pause(enabled=False)
 
         self.assertFalse(handled)
-        self.assertEqual([], calls)
+        self.assertEqual([], self.areas)
 
     def test_enabled_runs_pause_and_takes_over(self):
-        calls = []
+        handled = self._pause()
+
+        self.assertTrue(handled)
+        self.assertEqual([1], self.areas)      # 非攻击动作：看手牌
+
+    def test_hand_hover_off_falls_back_to_the_fixed_delay(self):
+        """「看卡牌」是随机延时 + 手牌悬停的共同开关：关掉后走固定操作后延时。"""
+        handled = self._pause(hand_hover_enabled=False)
+
+        self.assertFalse(handled)
+        self.assertEqual([], self.areas)
+
+    def test_missing_hand_key_defaults_to_on(self):
+        """老配置里没有 hand_hover_enabled 时按“开”处理，行为与升级前一致。"""
         with (
             patch.object(self.fsm, "human_like_settings",
                          return_value={"enabled": True}),
             patch.object(self.fsm.click, "human_like_pause",
-                         side_effect=lambda: calls.append(1)),
+                         side_effect=lambda: self.areas.append(1)),
         ):
             handled = self.fsm._human_like_post_action_pause()
 
         self.assertTrue(handled)
-        self.assertEqual([1], calls)
+        self.assertEqual([1], self.areas)
+
+    def test_attack_skips_the_pause_entirely(self):
+        """盒子推荐是攻击时：不看手牌、也不看场面，直接走固定延时读下一条推荐。"""
+        handled = self._pause(ActionKind.ATTACK)
+
+        self.assertFalse(handled)
+        self.assertEqual([], self.areas)
+
+    def test_non_attack_actions_still_look_at_the_hand(self):
+        for kind in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
+                     ActionKind.TRADE_CARD, ActionKind.USE_LOCATION,
+                     ActionKind.END_TURN, ActionKind.MULLIGAN, None):
+            with self.subTest(kind=kind):
+                self.areas.clear()
+                self.assertTrue(self._pause(kind))
+                self.assertEqual([1], self.areas)
+
+    def test_attack_accepts_a_plain_string_kind(self):
+        """ActionKind 是 str 枚举：日志/适配层传字符串 "attack" 也要认。"""
+        self.assertFalse(self._pause("attack"))
+
+        self.assertEqual([], self.areas)
+
+    def test_pause_can_still_be_called_without_arguments(self):
+        """老调用方式（0 参数）保持可用——MulliganFlow 就是这么调的。"""
+        parameter = inspect.signature(
+            self.fsm._human_like_post_action_pause).parameters["action_kind"]
+        self.assertIsNone(parameter.default)
+        self.assertTrue(self._pause())
 
     def test_failure_falls_back_to_fixed_delay(self):
         with (
             patch.object(self.fsm, "human_like_settings",
-                         return_value={"enabled": True}),
+                         return_value={"enabled": True,
+                                       "hand_hover_enabled": True}),
             patch.object(self.fsm.click, "human_like_pause",
                          side_effect=RuntimeError("鼠标异常")),
         ):
@@ -348,6 +408,73 @@ class WebHumanLikeTests(unittest.TestCase):
         self.assertEqual(1.5, hl["hover_min"])
         self.assertEqual(1.5, hl["hover_max"])        # 悬停上限同样不低于下限
         self.assertNotIn("hover_seconds", hl)         # 旧的固定悬停字段被清掉
+
+    def test_saves_minion_hover_range(self):
+        saved = {}
+
+        with (
+            patch.object(self.web_ui, "load_config", return_value={}),
+            patch.object(self.web_ui, "save_config",
+                         side_effect=lambda cfg: saved.update(cfg)),
+            patch.object(self.web_ui, "_log"),
+            patch.object(self.web_ui.CTRL, "automation_thread", None),
+        ):
+            result = self.web_ui.api_save_human_like({
+                "enabled": True, "minion_hover_min": 1.2,
+                "minion_hover_max": 0.3})
+
+        self.assertTrue(result["ok"])
+        hl = saved["human_like"]
+        self.assertEqual(1.2, hl["minion_hover_min"])
+        self.assertEqual(1.2, hl["minion_hover_max"])   # 上限不低于下限
+
+    def test_saves_the_two_hover_switches(self):
+        """「看卡牌」「看随从」各存各的，互不影响。"""
+        saved = {}
+
+        with (
+            patch.object(self.web_ui, "load_config", return_value={}),
+            patch.object(self.web_ui, "save_config",
+                         side_effect=lambda cfg: saved.update(cfg)),
+            patch.object(self.web_ui, "_log"),
+            patch.object(self.web_ui.CTRL, "automation_thread", None),
+        ):
+            result = self.web_ui.api_save_human_like({
+                "enabled": True, "hand_hover_enabled": False,
+                "minion_hover_enabled": True})
+
+        self.assertTrue(result["ok"])
+        hl = saved["human_like"]
+        self.assertFalse(hl["hand_hover_enabled"])
+        self.assertTrue(hl["minion_hover_enabled"])
+        self.assertTrue(hl["enabled"])
+
+    def test_missing_switch_keys_default_to_on(self):
+        """不传两个开关时按默认开启保存，行为与升级前一致。"""
+        saved = {}
+
+        with (
+            patch.object(self.web_ui, "load_config", return_value={}),
+            patch.object(self.web_ui, "save_config",
+                         side_effect=lambda cfg: saved.update(cfg)),
+            patch.object(self.web_ui, "_log"),
+            patch.object(self.web_ui.CTRL, "automation_thread", None),
+        ):
+            result = self.web_ui.api_save_human_like({"enabled": True})
+
+        self.assertTrue(result["ok"])
+        hl = saved["human_like"]
+        self.assertTrue(hl["hand_hover_enabled"])
+        self.assertTrue(hl["minion_hover_enabled"])
+
+    def test_status_reflects_the_two_switches(self):
+        saved = {"human_like": {"enabled": True, "hand_hover_enabled": False,
+                                "minion_hover_enabled": True}}
+        with patch.object(self.web_ui, "load_config", return_value=saved):
+            snapshot = self.web_ui.status_snapshot()
+
+        self.assertFalse(snapshot["human_like"]["hand_hover_enabled"])
+        self.assertTrue(snapshot["human_like"]["minion_hover_enabled"])
 
     def test_rejects_non_numeric(self):
         with (

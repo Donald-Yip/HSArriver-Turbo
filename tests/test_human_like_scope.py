@@ -122,6 +122,66 @@ class RecommendationPauseTests(unittest.TestCase):
         self.assertEqual(FlowStepStatus.EXECUTED, result.status)
         self.assertIn(0.2, sleeps)               # 异常时回退固定延时
 
+    def test_hook_receives_the_executed_action_kind(self):
+        """新挂点拿到刚执行完的动作类型（据此决定看手牌还是看场面）。"""
+        seen = []
+
+        result, _sleeps = self._run(
+            lambda kind: (seen.append(kind), True)[1])
+
+        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+        self.assertEqual([ActionKind.END_TURN], seen)
+
+    def test_hook_that_accepts_a_keyword_still_gets_a_positional_kind(self):
+        seen = []
+
+        def hook(kind=None):
+            seen.append(kind)
+            return True
+
+        result, _sleeps = self._run(hook)
+
+        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+        self.assertEqual([ActionKind.END_TURN], seen)
+
+    def test_old_zero_argument_hook_keeps_working(self):
+        calls = []
+
+        result, _sleeps = self._run(lambda: (calls.append(1), True)[1])
+
+        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+        self.assertEqual([1], calls)
+
+
+class AcceptsActionKindTests(unittest.TestCase):
+    """挂点签名识别：老挂点 0 参数，新挂点收 action_kind。"""
+
+    def setUp(self):
+        from src.flow.recommendation_flow import _accepts_action_kind
+        self.detect = _accepts_action_kind
+
+    def test_accepts_hooks_with_a_positional_parameter(self):
+        self.assertTrue(self.detect(lambda kind: True))
+        self.assertTrue(self.detect(lambda kind=None: True))
+        self.assertTrue(self.detect(lambda *args: True))
+
+        def named(kind):
+            return True
+
+        self.assertTrue(self.detect(named))
+
+    def test_rejects_zero_argument_hooks(self):
+        self.assertFalse(self.detect(lambda: True))
+
+        def bare():
+            return True
+
+        self.assertFalse(self.detect(bare))
+
+    def test_unknown_signature_is_treated_as_old_style(self):
+        self.assertFalse(self.detect(object()))
+        self.assertFalse(self.detect(None))
+
 
 class _MulliganExecutor:
     def __init__(self):

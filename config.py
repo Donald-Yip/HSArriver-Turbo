@@ -132,18 +132,30 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
 # ---------------------------------------------------------------- 活人感（可选）
-# 开启后：每次操作结束不再是固定的“操作后延时 + 立即复位”，而是
-#   1. 用 post_delay_min ~ post_delay_max 的随机延时（默认 0.5~3.0s）；
-#   2. 延时期间鼠标在手牌区随机悬停，每处停留 hover_min ~ hover_max 秒
-#      （默认 0.2~1.0s，每次悬停单独随机），只移动、不点击；
-#   3. 最后仍然复位到 click.MOUSE_RESET_POS。
+# 三个开关（Web「🎭 活人感」卡片里是三行、三个勾）：
+#   enabled            : 总开关（默认关）。
+#   hand_hover_enabled : 「看卡牌」——开启后每次操作结束不再是固定的“操作后延时”，
+#                        而是用 post_delay_min ~ post_delay_max 的随机延时
+#                        （默认 0.5~3.0s），延时期间鼠标在手牌区随机悬停，
+#                        每处停留 hover_min ~ hover_max 秒（默认 0.2~1.0s，
+#                        每次悬停单独随机），只移动、不点击，最后仍复位到
+#                        click.MOUSE_RESET_POS。关掉它 = 随机延时与手牌悬停
+#                        一起关掉，回到原来的固定「操作后延时」（默认开）。
+#   minion_hover_enabled: 「看随从」——对手场上出现新随从时，鼠标移到该随从上
+#                        随机悬停 minion_hover_min ~ minion_hover_max 秒
+#                        （默认 0.2~1.5s），只移动不点击，只在【对手回合】生效
+#                        （那时脚本本来就在空转等待，不会拖慢自己的出牌）。
 # 真实值保存在 ui_config.json 的 human_like 段；这里提供默认值与读取函数。
 DEFAULT_HUMAN_LIKE = {
     "enabled": False,
+    "hand_hover_enabled": True,
+    "minion_hover_enabled": True,
     "post_delay_min": 0.5,
     "post_delay_max": 3.0,
     "hover_min": 0.2,
     "hover_max": 1.0,
+    "minion_hover_min": 0.2,
+    "minion_hover_max": 1.5,
 }
 
 
@@ -205,12 +217,17 @@ def human_like_settings() -> dict:
                 cfg[key] = data[key]
     try:
         cfg["enabled"] = bool(cfg["enabled"])
+        cfg["hand_hover_enabled"] = bool(cfg["hand_hover_enabled"])
+        cfg["minion_hover_enabled"] = bool(cfg["minion_hover_enabled"])
         lo = max(0.0, float(cfg["post_delay_min"]))
         hi = max(lo, float(cfg["post_delay_max"]))
         h_lo = max(0.05, float(cfg["hover_min"]))
         h_hi = max(h_lo, float(cfg["hover_max"]))
+        m_lo = max(0.05, float(cfg["minion_hover_min"]))
+        m_hi = max(m_lo, float(cfg["minion_hover_max"]))
         cfg["post_delay_min"], cfg["post_delay_max"] = lo, hi
         cfg["hover_min"], cfg["hover_max"] = h_lo, h_hi
+        cfg["minion_hover_min"], cfg["minion_hover_max"] = m_lo, m_hi
     except (TypeError, ValueError):
         return dict(DEFAULT_HUMAN_LIKE)
     return cfg
