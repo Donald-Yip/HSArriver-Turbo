@@ -178,6 +178,17 @@ class HandOrBoardAdaptationTests(unittest.TestCase):
         self.assertEqual("minion", adapted.manual_action.target.kind)
         self.assertEqual("board-3", adapted.manual_action.target.entity_id)
 
+    def test_hand_slot_of_the_played_card_itself_is_not_a_candidate(self):
+        # 号位指的是出牌前的手牌位置，而正在打出去的那张已经不在手牌里了。
+        state = self._state(["残恶梦魇", "法力燃烧", "错误产物"],
+                            ["甲虫", "乙虫", "军情七处特工"])
+
+        adapted = adapt_action(
+            self._proposed(None, target_line="目标是己方1号位"), state)
+
+        self.assertEqual("minion", adapted.manual_action.target.kind)
+        self.assertEqual("board-1", adapted.manual_action.target.entity_id)
+
     def test_board_slot_holding_a_location_is_not_a_candidate(self):
         # 地标占着 3 号位，残恶梦魇又不能指地标 → 只能指手牌。
         state = self._state(["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "乙虫"])
@@ -190,13 +201,26 @@ class HandOrBoardAdaptationTests(unittest.TestCase):
 
         self.assertEqual("hand", adapted.manual_action.target.kind)
 
-    def test_same_name_on_both_sides_is_refused_instead_of_guessed(self):
+    def test_same_name_on_both_sides_falls_back_to_the_board(self):
+        # 真出现这种（名字两边都有、号位两边都成立）就按改动之前的行为打场面，
+        # 不猜手牌也不卡住回合。
         state = self._state(
             ["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "军情七处特工", "错误产物"])
 
-        with self.assertRaisesRegex(
-                RecommendationStateError, "hand_or_board_target_ambiguous"):
-            adapt_action(self._proposed(None), state)
+        adapted = adapt_action(self._proposed(None), state)
+
+        self.assertEqual("minion", adapted.manual_action.target.kind)
+        self.assertEqual("board-3", adapted.manual_action.target.entity_id)
+
+    def test_both_sides_fit_without_a_name_falls_back_to_the_board(self):
+        # 手牌 3 号位是随从、场面 3 号位也是随从，名字又没读到 → 场面。
+        state = self._state(
+            ["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "乙虫", "军情七处特工"])
+
+        adapted = adapt_action(self._proposed(None), state)
+
+        self.assertEqual("minion", adapted.manual_action.target.kind)
+        self.assertEqual("board-3", adapted.manual_action.target.entity_id)
 
     def test_no_candidate_at_all_is_refused(self):
         state = self._state(["残恶梦魇", "法力燃烧"], ["甲虫"])

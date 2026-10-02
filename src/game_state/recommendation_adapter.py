@@ -190,7 +190,8 @@ def _friendly_hand_target_choice(proposed, state, source_index, card):
     两类卡：
       * 只能选自己手牌的（魔眼秘术师…）——号位就是手牌位置，直接用；
       * 手牌和场面都能选的（残恶梦魇）——盒子只给号位，手牌和场面各有一套编号，
-        所以要靠面板上那行目标卡名来定；定不了就报错，绝不猜。
+        先比内容（手牌那张是不是随从、场面那格是不是随从、是不是正在打的自己），
+        再看面板上那行目标卡名；还是分不出就按场面走（改动之前的行为）。
     """
     target = proposed.target
     if (target is None or target.owner != "friendly"
@@ -201,11 +202,11 @@ def _friendly_hand_target_choice(proposed, state, source_index, card):
         return None
     target_index = target.index - 1
     if not hand_only:
-        side = _hand_or_board_side(proposed, state, target.index)
-        if side == "board":
+        # 两可的看内容定不了就按场面走（＝这类卡在这次改动之前的行为）：
+        # 不猜也要保证「能打出去」，不然会一直重试到烧绳。
+        if _hand_or_board_side(proposed, state, target.index, source_index,
+                               ) != "hand":
             return None
-        if side != "hand":
-            raise RecommendationStateError("hand_or_board_target_ambiguous")
     if not 0 <= target_index < len(state.my_hand_cards):
         raise RecommendationStateError("hand_target_out_of_range")
     if target_index == source_index:
@@ -215,11 +216,14 @@ def _friendly_hand_target_choice(proposed, state, source_index, card):
                   getattr(target_card, "entity_id", None))
 
 
-def _hand_card_candidate(state, one_based_index):
-    """手牌里那个号位能不能当随从目标（号位按手牌位置数）。"""
+def _hand_card_candidate(state, one_based_index, source_index):
+    """手牌里那个号位能不能当随从目标（号位按手牌位置数）。
+
+    正在打出去的那张牌不算——它已经不在手牌里了，盒子的号位是出牌前的手牌位置。
+    """
     index = one_based_index - 1
     hand = state.my_hand_cards
-    if not 0 <= index < len(hand):
+    if not 0 <= index < len(hand) or index == source_index:
         return None
     card = hand[index]
     if getattr(card, "cardtype", None) != "MINION":
@@ -236,9 +240,9 @@ def _board_card_candidate(state, one_based_index):
     return entry.entity if entry.kind == "minion" else None
 
 
-def _hand_or_board_side(proposed, state, one_based_index):
-    """「手牌/场面两可」的目标到底在哪边：'hand' / 'board' / None（判不出）。"""
-    hand_card = _hand_card_candidate(state, one_based_index)
+def _hand_or_board_side(proposed, state, one_based_index, source_index):
+    """「手牌/场面两可」的目标在哪边：'hand' / 'board' / None（判不出）。"""
+    hand_card = _hand_card_candidate(state, one_based_index, source_index)
     board_card = _board_card_candidate(state, one_based_index)
     if hand_card is None and board_card is None:
         raise RecommendationStateError("hand_or_board_target_missing")
