@@ -77,6 +77,9 @@ class ProposedAction:
     ocr_confidence: float = 0.0
     semantic_confidence: float = 0.0
     choice_name: Optional[str] = None
+    # 真实面板在目标行后面还会打印一行「目标卡名」（不带前缀，会被
+    # normalize_action_text 过滤掉），单独留一份给「手牌/场面两可」的目标判定用。
+    target_name: Optional[str] = None
 
 
 @dataclass(frozen=True)

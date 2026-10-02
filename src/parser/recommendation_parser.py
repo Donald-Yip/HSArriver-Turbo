@@ -105,6 +105,7 @@ class RecommendationParser:
                          "武器": "WEAPON", "地标": "LOCATION",
                          "英雄": "HERO"}[play.group(2)]
             target = None
+            target_name = None
             if card_type == "SPELL":
                 enemy_board_targets = [
                     match for line in lines
@@ -143,6 +144,9 @@ class RecommendationParser:
                 # battlecries whose friendly slot actually means a hand card.
                 target = self._optional_board_or_hero_target(
                     lines, "unsupported_minion_target")
+                target_name = self._target_name(
+                    self._lines(ocr.normalized_text),
+                    self._target_line(lines))
             else:
                 self._reject_target_lines(lines)
             destinations = [self._destination.fullmatch(line) for line in lines]
@@ -157,6 +161,7 @@ class RecommendationParser:
                 source=SlotRef("hand_slot", "friendly", slot),
                 destination=destination,
                 target=target,
+                target_name=target_name,
                 card_type=card_type)
 
         trade = self._trade.fullmatch(primary)
@@ -259,6 +264,37 @@ class RecommendationParser:
         if match is None:
             return None
         return "undo" if match.group(1) == "回溯" else "keep"
+
+    @staticmethod
+    def _target_line(lines):
+        """推荐里那一行目标（调用前已确认最多一行）。"""
+        target_lines = [line for line in lines if "目标" in line]
+        return target_lines[0] if target_lines else None
+
+    @staticmethod
+    def _target_name(raw_lines, target_line):
+        """取目标行后面那行目标卡名。
+
+        真实面板顺序是：动作行 → 出牌名 → 目标行 → 目标名 → 放置行（对真实运行
+        日志统计过：带目标行的推荐比不带的多正好一行）。卡名行不在
+        normalize_action_text 的保留范围内，只能从原始 OCR 文本里取。
+        """
+        if not target_line:
+            return None
+        parser = RecommendationParser()
+        for index, line in enumerate(raw_lines):
+            if line != target_line or index + 1 >= len(raw_lines):
+                continue
+            candidate = raw_lines[index + 1]
+            if (not candidate or "目标" in candidate
+                    or candidate.startswith("放置于")
+                    or parser._is_action_line(candidate)
+                    or candidate in parser._reference_a_headers
+                    or candidate in parser._reference_b_headers
+                    or "记牌器" in candidate):
+                return None
+            return candidate
+        return None
 
     def _optional_board_or_hero_target(self, lines, unsupported_code):
         target_lines = [line for line in lines if "目标" in line]

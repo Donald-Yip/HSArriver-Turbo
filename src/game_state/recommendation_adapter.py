@@ -1,6 +1,7 @@
 """Map display slots in HSAng instructions to identity-bound manual actions."""
 
 from dataclasses import dataclass, replace
+import re
 
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
@@ -9,7 +10,10 @@ from manual_controller import (
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import choose_one_card_ids
-from src.game_state.hand_target import is_friendly_hand_target_card
+from src.game_state.hand_target import (
+    is_friendly_hand_target_card,
+    is_hand_or_board_target_card,
+)
 from src.game_state.starship import is_starship_card
 
 
@@ -180,6 +184,95 @@ def _with_choose_one(proposed, state, adapted, source):
         adapted.manual_action, choose_one=DiscoverChoiceAction(index, count)))
 
 
+def _friendly_hand_target_choice(proposed, state, source_index, card):
+    """盒子的「目标是我方N号位」是不是指手牌；不是就返回 None（按场面目标走）。
+
+    两类卡：
+      * 只能选自己手牌的（魔眼秘术师…）——号位就是手牌位置，直接用；
+      * 手牌和场面都能选的（残恶梦魇）——盒子只给号位，手牌和场面各有一套编号，
+        所以要靠面板上那行目标卡名来定；定不了就报错，绝不猜。
+    """
+    target = proposed.target
+    if (target is None or target.owner != "friendly"
+            or target.kind not in {"hand_slot", "board_slot"}):
+        return None
+    hand_only = is_friendly_hand_target_card(card.card_id)
+    if not hand_only and not is_hand_or_board_target_card(card.card_id):
+        return None
+    target_index = target.index - 1
+    if not hand_only:
+        side = _hand_or_board_side(proposed, state, target.index)
+        if side == "board":
+            return None
+        if side != "hand":
+            raise RecommendationStateError("hand_or_board_target_ambiguous")
+    if not 0 <= target_index < len(state.my_hand_cards):
+        raise RecommendationStateError("hand_target_out_of_range")
+    if target_index == source_index:
+        raise RecommendationStateError("hand_target_is_source")
+    target_card = state.my_hand_cards[target_index]
+    return Target("friendly", "hand", target_index,
+                  getattr(target_card, "entity_id", None))
+
+
+def _hand_card_candidate(state, one_based_index):
+    """手牌里那个号位能不能当随从目标（号位按手牌位置数）。"""
+    index = one_based_index - 1
+    hand = state.my_hand_cards
+    if not 0 <= index < len(hand):
+        return None
+    card = hand[index]
+    if getattr(card, "cardtype", None) != "MINION":
+        return None
+    return card
+
+
+def _board_card_candidate(state, one_based_index):
+    """场面那个号位能不能当随从目标（号位按站位，含地标占位）。"""
+    try:
+        entry = board_slot(state, "friendly", one_based_index)
+    except RecommendationStateError:
+        return None
+    return entry.entity if entry.kind == "minion" else None
+
+
+def _hand_or_board_side(proposed, state, one_based_index):
+    """「手牌/场面两可」的目标到底在哪边：'hand' / 'board' / None（判不出）。"""
+    hand_card = _hand_card_candidate(state, one_based_index)
+    board_card = _board_card_candidate(state, one_based_index)
+    if hand_card is None and board_card is None:
+        raise RecommendationStateError("hand_or_board_target_missing")
+    name = getattr(proposed, "target_name", None)
+    if name:
+        from_hand = _name_matches(name, getattr(hand_card, "name", None))
+        from_board = _name_matches(name, getattr(board_card, "name", None))
+        if from_hand != from_board:
+            return "hand" if from_hand else "board"
+    if hand_card is not None and board_card is None:
+        return "hand"
+    if board_card is not None and hand_card is None:
+        return "board"
+    return None
+
+
+def _name_matches(ocr_name, card_name):
+    """OCR 出来的卡名和日志里的卡名是否是同一张（容忍标点和少字）。"""
+    if not ocr_name or not card_name:
+        return False
+
+    def normalize(text):
+        return re.sub(
+            r"[\s·・．.，,。！!？?、：:；;（）()\[\]【】「」『』]",
+            "", str(text)).lower()
+
+    left, right = normalize(ocr_name), normalize(card_name)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    return min(len(left), len(right)) >= 3 and (left in right or right in left)
+
+
 def _adapt_play_card(proposed, state):
     index = proposed.source.index - 1
     if not 0 <= index < len(state.my_hand_cards):
@@ -195,18 +288,10 @@ def _adapt_play_card(proposed, state):
         if not 0 <= gap <= board_count:
             raise RecommendationStateError("minion_destination_out_of_range")
     if proposed.target is not None:
-        if (is_friendly_hand_target_card(card.card_id)
-                and proposed.target.owner == "friendly"
-                and proposed.target.kind in {"hand_slot", "board_slot"}):
-            target_index = proposed.target.index - 1
-            if not 0 <= target_index < len(state.my_hand_cards):
-                raise RecommendationStateError("hand_target_out_of_range")
-            if target_index == index:
-                raise RecommendationStateError("hand_target_is_source")
-            target_card = state.my_hand_cards[target_index]
-            target_id = getattr(target_card, "entity_id", None)
-            manual_target = Target(
-                "friendly", "hand", target_index, target_id)
+        hand_target = _friendly_hand_target_choice(proposed, state, index, card)
+        if hand_target is not None:
+            target_id = hand_target.entity_id
+            manual_target = hand_target
         elif proposed.card_type in {"SPELL", "MINION"}:
             target_error = ("spell_target" if proposed.card_type == "SPELL"
                             else "minion_target")

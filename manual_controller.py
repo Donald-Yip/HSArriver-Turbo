@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Callable, Optional, Union
 
-from src.game_state.hand_target import is_friendly_hand_target_card
+from src.game_state.hand_target import allows_hand_target
 
 
 class GlobalHotkeyInput:
@@ -828,7 +828,7 @@ class ManualController:
             is_hand_target = (
                 action.target is not None and action.target.kind == "hand")
             if is_hand_target:
-                if (not is_friendly_hand_target_card(selected.card_id)
+                if (not allows_hand_target(selected.card_id)
                         or action.target.side != "friendly"
                         or action.target.index is None):
                     return self._reject(
