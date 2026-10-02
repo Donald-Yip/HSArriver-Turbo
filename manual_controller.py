@@ -6,8 +6,7 @@ import threading
 import time
 from typing import Callable, Optional, Union
 
-
-FRIENDLY_HAND_TARGET_CARD_IDS = frozenset({"CATA_490", "CATA_563"})
+from src.game_state.hand_target import is_friendly_hand_target_card
 
 
 class GlobalHotkeyInput:
@@ -357,18 +356,23 @@ class ClickExecutor:
         self.click.cancel_click()
 
     def use_location(self, location_screen_index, board_slot_count, target,
-                     my_board_count, oppo_board_count):
+                     my_board_count, oppo_board_count, my_hand_count=0):
         return self._safe_action(lambda: self._use_location(
             location_screen_index, board_slot_count, target,
-            my_board_count, oppo_board_count))
+            my_board_count, oppo_board_count, my_hand_count))
 
     def _use_location(self, location_screen_index, board_slot_count, target,
-                      my_board_count, oppo_board_count):
+                      my_board_count, oppo_board_count, my_hand_count=0):
         self.click.choose_my_board_entity(
             location_screen_index, board_slot_count)
         if target is not None:
             self.sleep(0.3)
-            self._click_target(target, my_board_count, oppo_board_count)
+            if target.side == "friendly" and target.kind == "hand":
+                # 守护巨龙之厅这类地标让你选一张自己的手牌：地标已在场上，
+                # 手牌数量就是当前手牌数（不像出随从那样要先减去自己）。
+                self.click.choose_card(target.index, my_hand_count)
+            else:
+                self._click_target(target, my_board_count, oppo_board_count)
         self.click.cancel_click()
 
     def launch_starship(self, starship_screen_index, board_count):
@@ -824,7 +828,7 @@ class ManualController:
             is_hand_target = (
                 action.target is not None and action.target.kind == "hand")
             if is_hand_target:
-                if (selected.card_id not in FRIENDLY_HAND_TARGET_CARD_IDS
+                if (not is_friendly_hand_target_card(selected.card_id)
                         or action.target.side != "friendly"
                         or action.target.index is None):
                     return self._reject(
@@ -937,6 +941,7 @@ class ManualController:
                 self._target_for_click(action.target, state),
                 my_board_count,
                 oppo_board_count,
+                len(state.my_hand_cards),
             )
             return ActionExecutionResult(True, f"已使用地标：{location.name}")
 

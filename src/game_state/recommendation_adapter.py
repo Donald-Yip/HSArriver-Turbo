@@ -4,11 +4,12 @@ from dataclasses import dataclass, replace
 
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
-    FRIENDLY_HAND_TARGET_CARD_IDS, LaunchStarshipAction, PlayCardAction,
-    Target, TimelineAction, TradeCardAction, UseLocationAction,
+    LaunchStarshipAction, PlayCardAction, Target, TimelineAction,
+    TradeCardAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import choose_one_card_ids
+from src.game_state.hand_target import is_friendly_hand_target_card
 from src.game_state.starship import is_starship_card
 
 
@@ -94,14 +95,28 @@ def adapt_action(proposed, state):
                 target_id = getattr(hero, "entity_id", None)
                 target = Target(side, "hero", None, target_id)
             elif proposed.target.kind == "board_slot":
-                target_entry = board_slot(
-                    state, side, proposed.target.index)
-                if target_entry.kind != "minion":
-                    raise RecommendationStateError("target_not_minion")
-                target_id = getattr(target_entry.entity, "entity_id", None)
-                target = Target(
-                    side, "minion", target_entry.collection_index,
-                    target_id)
+                if (side == "friendly"
+                        and is_friendly_hand_target_card(location.card_id)):
+                    # 守护巨龙之厅这类地标让你选「手牌中的一张随从牌」，
+                    # 盒子同样写成「目标是我方N号位」，指的是手牌不是场面。
+                    target_index = proposed.target.index - 1
+                    if not 0 <= target_index < len(state.my_hand_cards):
+                        raise RecommendationStateError(
+                            "hand_target_out_of_range")
+                    target_card = state.my_hand_cards[target_index]
+                    target_id = getattr(target_card, "entity_id", None)
+                    target = Target(
+                        "friendly", "hand", target_index, target_id)
+                else:
+                    target_entry = board_slot(
+                        state, side, proposed.target.index)
+                    if target_entry.kind != "minion":
+                        raise RecommendationStateError("target_not_minion")
+                    target_id = getattr(
+                        target_entry.entity, "entity_id", None)
+                    target = Target(
+                        side, "minion", target_entry.collection_index,
+                        target_id)
             else:
                 raise RecommendationStateError(
                     "location_target_unsupported")
@@ -180,7 +195,7 @@ def _adapt_play_card(proposed, state):
         if not 0 <= gap <= board_count:
             raise RecommendationStateError("minion_destination_out_of_range")
     if proposed.target is not None:
-        if (card.card_id in FRIENDLY_HAND_TARGET_CARD_IDS
+        if (is_friendly_hand_target_card(card.card_id)
                 and proposed.target.owner == "friendly"
                 and proposed.target.kind in {"hand_slot", "board_slot"}):
             target_index = proposed.target.index - 1

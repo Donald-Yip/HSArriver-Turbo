@@ -29,6 +29,9 @@ class RecordingClickModule:
     def choose_oppo_hero(self):
         self.events.append(("choose_oppo_hero",))
 
+    def choose_card(self, index, count):
+        self.events.append(("choose_card", index, count))
+
     def cancel_click(self):
         self.events.append(("cancel_click",))
 
@@ -243,6 +246,107 @@ class TargetedLocationTests(unittest.TestCase):
         self.assertEqual("enemy", proposed.target.owner)
         self.assertEqual("board_slot", proposed.target.kind)
         self.assertEqual(1, proposed.target.index)
+
+
+class HandTargetLocationTests(unittest.TestCase):
+    """守护巨龙之厅：地标让你选一张自己的手牌，盒子也写成「目标是我方N号位」。"""
+
+    @staticmethod
+    def _state():
+        location = SimpleNamespace(
+            card_id="CATA_477",
+            entity_id="location-1",
+            zone_pos=1,
+            name="守护巨龙之厅",
+        )
+        hand = [
+            SimpleNamespace(
+                card_id=f"HAND_{index}", entity_id=f"hand-{index}",
+                name=f"手牌{index}")
+            for index in (1, 2, 3)
+        ]
+        return SimpleNamespace(
+            game_num_turns_in_play=3,
+            is_my_turn=True,
+            my_hand_cards=hand,
+            my_minions=[],
+            my_locations=[location],
+            my_board_slot_num=1,
+            oppo_minions=[],
+            oppo_locations=[],
+            oppo_board_slot_num=0,
+        )
+
+    @staticmethod
+    def _proposed(target_line="目标是我方3号位", source_slot=1):
+        ocr = SimpleNamespace(
+            frame_id="frame-1",
+            normalized_text="\n".join(
+                ("打法参考A", f"操作{source_slot}号位地标", target_line)),
+            confidence=0.99,
+        )
+        return RecommendationParser().parse(
+            ocr, turn_number=3, log_revision=7)
+
+    @staticmethod
+    def _controller(clicks, sleeps):
+        return ManualController(
+            output_func=lambda _message: None,
+            executor=ClickExecutor(
+                click_module=clicks,
+                sleep_func=sleeps.append,
+                action_context=nullcontext,
+            ),
+        )
+
+    def test_hand_target_is_clicked_in_the_hand_fan(self):
+        state = self._state()
+        adapted = adapt_action(self._proposed(), state)
+        clicks = RecordingClickModule()
+        sleeps = []
+
+        result = self._controller(clicks, sleeps).execute(
+            adapted.manual_action, state)
+
+        self.assertTrue(result.executed, result.message)
+        self.assertEqual("friendly", adapted.manual_action.target.side)
+        self.assertEqual("hand", adapted.manual_action.target.kind)
+        self.assertEqual(2, adapted.manual_action.target.index)
+        self.assertEqual("hand-3", adapted.target_entity_id)
+        self.assertEqual([0.3], sleeps)
+        self.assertEqual([
+            ("choose_my_board_entity", 0, 1),
+            ("choose_card", 2, 3),
+            ("cancel_click",),
+        ], clicks.events)
+
+    def test_hand_target_out_of_range_is_refused(self):
+        with self.assertRaisesRegex(
+                RecommendationStateError, "hand_target_out_of_range"):
+            adapt_action(self._proposed("目标是我方4号位"), self._state())
+
+    def test_replaced_hand_target_is_rejected_before_any_click(self):
+        state = self._state()
+        adapted = adapt_action(self._proposed(), state)
+        state.my_hand_cards[2] = SimpleNamespace(
+            card_id="HAND_NEW", entity_id="hand-new", name="替换手牌")
+        clicks = RecordingClickModule()
+        sleeps = []
+
+        result = self._controller(clicks, sleeps).execute(
+            adapted.manual_action, state)
+
+        self.assertFalse(result.executed)
+        self.assertEqual([], clicks.events)
+        self.assertEqual([], sleeps)
+
+    def test_other_locations_still_target_the_board(self):
+        """名单外的地标（罪碑坟场）保持原行为：目标在场面。"""
+        state = TargetedLocationTests._state()
+        adapted = adapt_action(
+            TargetedLocationTests._proposed("目标是己方1号位"), state)
+
+        self.assertEqual("minion", adapted.manual_action.target.kind)
 
 
 if __name__ == "__main__":
