@@ -26,6 +26,9 @@ class RecommendationParser:
     _enemy_hero_targets = {"目标是对方英雄", "目标是敌方英雄"}
     _friendly_hero_targets = {"目标是己方英雄", "目标是我方英雄"}
     _location = re.compile(r"^操作([1-9]\d*)号位地标$")
+    # 星舰发射：盒子的明确写法是「发射1号位星舰」，也可能写成「操作1号位星舰」
+    # 或「发射我方1号位星舰」（我方前缀可选）。
+    _starship = re.compile(r"^(?:发射|操作)(?:我方)?([1-9]\d*)号位星舰$")
     _discover = re.compile(
         r"^(?:选择我方([1-4])号位卡牌|选(?:择)?第([1-4])个选项)$")
     # HSAng 时间线提示字：按钮文案可能是纯「回溯/维持」，也可能是带标题的
@@ -86,6 +89,14 @@ class RecommendationParser:
         if len(action_lines) != 1:
             raise RecommendationParseError("ambiguous_actions")
         primary = action_lines[0]
+
+        starship = self._starship.fullmatch(primary)
+        if starship:
+            self._reject_target_lines(lines)
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.LAUNCH_STARSHIP,
+                source=SlotRef("board_slot", "friendly",
+                               int(starship.group(1))))
 
         play = self._play.fullmatch(primary)
         if play:
@@ -239,6 +250,7 @@ class RecommendationParser:
                     or self._minion_attack.fullmatch(line)
                     or self._hero_attack.fullmatch(line)
                     or self._location.fullmatch(line)
+                    or self._starship.fullmatch(line)
                     or self._discover.fullmatch(line)
                     or line in {self._keep_all, "使用英雄技能", "结束回合"})
 

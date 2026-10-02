@@ -469,10 +469,31 @@ def click_timeline_keep():
     left_click(x, y)
 
 
+# 星舰「发射」按钮：展开的组件面板右侧（Cancel 旁边）。参考截图是 1920x1080
+# 客户区，按钮中心 ≈ (1070, 920)；这里按客户区尺寸等比换算再交给 ClientToScreen
+# 加上窗口位置偏移，避免窗口边框/标题栏让落点整体偏掉。
+STARSHIP_LAUNCH_REF_POS = (1070, 920)
+STARSHIP_LAUNCH_REF_SIZE = (1920, 1080)
+
+
 def click_launch_starship():
-    """Click the starship launch button at 1920x1080."""
+    """点开组件面板里的「发射」按钮。
+
+    找不到炉石窗口或客户区无效时直接报错，不做盲目点击。
+    """
+    hwnd = get_HS_hwnd()
+    if not hwnd:
+        raise ValueError("Hearthstone window unavailable")
+    left, top, right, bottom = win32gui.GetClientRect(hwnd)
+    if right <= left or bottom <= top:
+        raise ValueError("Hearthstone client area unavailable")
+    ref_x, ref_y = STARSHIP_LAUNCH_REF_POS
+    ref_w, ref_h = STARSHIP_LAUNCH_REF_SIZE
+    x, y = win32gui.ClientToScreen(hwnd, (
+        left + round((right - left) * ref_x / ref_w),
+        top + round((bottom - top) * ref_y / ref_h)))
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1080, 920)
+    left_click(x, y)
 
 
 def drag_card_to_deck():

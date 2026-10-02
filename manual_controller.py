@@ -378,6 +378,9 @@ class ClickExecutor:
     def _launch_starship(self, starship_screen_index, board_count):
         self.click.choose_my_board_entity(
             starship_screen_index, board_count)
+        # 第一次点击只是把组件面板展开，面板里的「发射」按钮要等它画完，
+        # 立刻点会点空（实测约 0.8s 才稳定）。
+        self.sleep(0.8)
         self.click.click_launch_starship()
 
     def play_weapon(self, hand_index, hand_count):

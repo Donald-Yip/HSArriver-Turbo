@@ -198,8 +198,9 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
 
     action_kind：刚执行完的动作类型（ActionKind，可能为 None）。**攻击类动作不做
     活人感表演**（出手后还盯着手牌最像脚本，而且攻击常常是连着来的）：直接返回
-    False，让流程走正常的固定「操作后延时」去读下一条推荐。其它动作（出牌/技能/
-    交易/换牌）才看手牌。
+    False，让流程走正常的固定「操作后延时」去读下一条推荐。星舰发射同理——它也是
+    场面上的动作（点场上星舰 → 点发射按钮），不看手牌。其它动作（出牌/技能/交易/
+    换牌）才看手牌。
 
     门禁是“总开关 + 看卡牌”：「随机延时」本身就是手牌悬停的那段等待窗口，所以
     关掉「看卡牌」= 连随机延时一起关掉（回到固定「操作后延时」），不再走到
@@ -212,7 +213,7 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
         if not settings.get("hand_hover_enabled", True):
             return False
         # ActionKind 是 str 枚举，所以字符串 "attack" 也能匹配上。
-        if action_kind == ActionKind.ATTACK:
+        if action_kind in (ActionKind.ATTACK, ActionKind.LAUNCH_STARSHIP):
             return False
         click.human_like_pause()
         return True

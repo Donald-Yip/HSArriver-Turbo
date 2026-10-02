@@ -12,6 +12,7 @@ class ActionKind(str, Enum):
     USE_HERO_POWER = "use_hero_power"
     ATTACK = "attack"
     USE_LOCATION = "use_location"
+    LAUNCH_STARSHIP = "launch_starship"
     CHOOSE_DISCOVER = "choose_discover"
     END_TURN = "end_turn"
     TIMELINE_UNDO = "timeline_undo"

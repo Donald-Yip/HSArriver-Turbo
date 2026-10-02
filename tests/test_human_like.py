@@ -318,6 +318,14 @@ class PostActionPauseHookTests(unittest.TestCase):
         self.assertFalse(handled)
         self.assertEqual([], self.areas)
 
+    def test_starship_launch_skips_the_pause_too(self):
+        """星舰发射也是场面动作（点场上星舰 + 点发射按钮），操作完不看手牌。"""
+        for kind in (ActionKind.LAUNCH_STARSHIP, "launch_starship"):
+            with self.subTest(kind=kind):
+                self.areas.clear()
+                self.assertFalse(self._pause(kind))
+                self.assertEqual([], self.areas)
+
     def test_non_attack_actions_still_look_at_the_hand(self):
         for kind in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
                      ActionKind.TRADE_CARD, ActionKind.USE_LOCATION,

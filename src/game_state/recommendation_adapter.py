@@ -9,6 +9,7 @@ from manual_controller import (
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import choose_one_card_ids
+from src.game_state.starship import is_starship_card
 
 
 class RecommendationStateError(ValueError):
@@ -68,6 +69,9 @@ def adapt_action(proposed, state):
             proposed, state, adapted, getattr(state, "my_hero_power", None))
     if proposed.action == ActionKind.ATTACK:
         return _adapt_attack(proposed, state)
+    if proposed.action == ActionKind.LAUNCH_STARSHIP:
+        return _adapt_starship(
+            board_slot(state, "friendly", proposed.source.index))
     if proposed.action == ActionKind.USE_LOCATION:
         entry = board_slot(state, "friendly", proposed.source.index)
         if entry.kind != "location":
@@ -267,6 +271,18 @@ def _adapt_hero_power(proposed, state):
         "hero_power_changed")
 
 
+def _adapt_starship(source):
+    """明确发射指令（「发射N号位星舰」）：只认带 STARSHIP 机制的卡。"""
+    if source.kind != "minion" or not is_starship_card(
+            getattr(source.entity, "card_id", None)):
+        raise RecommendationStateError("source_not_starship")
+    source_id = getattr(source.entity, "entity_id", None)
+    return AdaptedAction(
+        LaunchStarshipAction(
+            source.collection_index, source.entity.card_id, source_id),
+        source_id, None, "starship_launched")
+
+
 def _adapt_attack(proposed, state):
     if proposed.source.kind == "hero":
         hero = getattr(state, "my_hero", None)
@@ -280,7 +296,11 @@ def _adapt_attack(proposed, state):
         if source.kind != "minion":
             raise RecommendationStateError("source_not_minion")
         source_id = getattr(source.entity, "entity_id", None)
-        if source.entity.card_id == "SC_999t":
+        if (proposed.target is None
+                and is_starship_card(getattr(source.entity, "card_id", None))):
+            # 星舰在场时盒子写的是「操作N号位随从攻击」，但这张卡没有攻击目标
+            # 可选——它其实是要发射。带目标的星舰攻击仍按普通攻击处理，
+            # 避免把已发射星舰的攻击误当成再次发射。
             manual = LaunchStarshipAction(
                 source.collection_index,
                 source.entity.card_id,
