@@ -71,6 +71,8 @@ class LogState:
         self.general_choice_id = None
         self.general_choice_player = None
         self.general_choice_indexes = set()
+        # 选项下标 -> 卡牌 ID：时间线选择（回溯/维持）只能靠卡牌 ID 认出来。
+        self.general_choice_cards = {}
         self.general_choice_ready = False
         self.power_options = {}
         self.current_power_option_id = None
@@ -176,6 +178,7 @@ class LogState:
         self.general_choice_id = None
         self.general_choice_player = None
         self.general_choice_indexes = set()
+        self.general_choice_cards = {}
         self.general_choice_ready = False
 
     def flush(self):
@@ -410,6 +413,9 @@ def update_state(state, line_info_container):
                 state.general_choice_player = player
                 state.general_choice_indexes.add(
                     line_info_container.info_dict["index"])
+                state.general_choice_cards[
+                    line_info_container.info_dict["index"]] = (
+                        line_info_container.info_dict.get("card_id"))
             else:
                 state.clear_general_choice()
 

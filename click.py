@@ -450,23 +450,44 @@ def end_turn():
 
 
 # HSAng 左下「时间线」提示按钮中心（1920x1080 实测，见用户截图）：
-#   回溯(撤销) ≈ (351, 805)   维持(保留) ≈ (582, 805)
-TIMELINE_UNDO_POS = (351, 805)
-TIMELINE_KEEP_POS = (582, 805)
+#   回溯(撤销) ≈ (350, 805)   维持(保留) ≈ (585, 805)
+TIMELINE_UNDO_POS = (350, 805)
+TIMELINE_KEEP_POS = (585, 805)
+
+# 时间线的两个选项就是这两张「卡」：盒子的推荐可能只写「选择我方N号位卡牌」，
+# 没有回溯/维持文字，所以按 Power.log 里的 cardId 认按钮。
+TIMELINE_OPTION_POS = {
+    "TIME_000tb": TIMELINE_UNDO_POS,   # 回溯
+    "TIME_000ta": TIMELINE_KEEP_POS,   # 维持
+}
+
+
+def choose_timeline(card_id):
+    """客户端区坐标换算后点时间线按钮（回溯 TIME_000tb / 维持 TIME_000ta）。"""
+    if card_id not in TIMELINE_OPTION_POS:
+        raise ValueError("Unknown timeline option")
+    hwnd = get_HS_hwnd()
+    if not hwnd:
+        raise ValueError("Hearthstone window unavailable")
+    left, top, right, bottom = win32gui.GetClientRect(hwnd)
+    if right <= left or bottom <= top:
+        raise ValueError("Hearthstone client area unavailable")
+    px, py = TIMELINE_OPTION_POS[card_id]
+    x, y = win32gui.ClientToScreen(hwnd, (
+        left + round((right - left) * px / 1920),
+        top + round((bottom - top) * py / 1080)))
+    rand_sleep(OPERATE_INTERVAL)
+    left_click(x, y)
 
 
 def click_timeline_undo():
     """点 HSAng 左下「回溯」：撤销时间线里上一步操作。"""
-    rand_sleep(OPERATE_INTERVAL)
-    x, y = TIMELINE_UNDO_POS
-    left_click(x, y)
+    choose_timeline("TIME_000tb")
 
 
 def click_timeline_keep():
     """点 HSAng 左下「维持」：保留当前操作、关掉时间线提示。"""
-    rand_sleep(OPERATE_INTERVAL)
-    x, y = TIMELINE_KEEP_POS
-    left_click(x, y)
+    choose_timeline("TIME_000ta")
 
 
 # 星舰「发射」按钮：展开的组件面板右侧（Cancel 旁边）。参考截图是 1920x1080

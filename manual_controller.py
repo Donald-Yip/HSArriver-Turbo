@@ -161,6 +161,8 @@ class DiscoverChoiceAction:
     choice_index: int
     choice_count: int
     turn_number: Optional[int] = None
+    # 时间线选项（回溯/维持）才有：日志里那个选项的卡牌 ID，执行前要再核对一次。
+    timeline_card_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -458,6 +460,9 @@ class ClickExecutor:
 
     def timeline_click(self, choice):
         return self._safe_action(lambda: self._timeline_click(choice))
+
+    def choose_timeline(self, card_id):
+        return self._safe_action(lambda: self.click.choose_timeline(card_id))
 
     def _timeline_click(self, choice):
         if choice == "undo":
@@ -907,6 +912,18 @@ class ManualController:
             return ActionExecutionResult(True, "已使用英雄技能。")
 
         if isinstance(action, DiscoverChoiceAction):
+            if action.timeline_card_id is not None:
+                # 时间线选择：盒子的推荐可能只写「选择我方N号位卡牌」，得靠
+                # 日志里的选项卡牌 ID 确认这确实是回溯/维持，且位置没变。
+                choices = getattr(state, "general_choice_cards", {})
+                if (getattr(state, "discover_choice_count", None) != 2
+                        or set(choices) != {0, 1}
+                        or set(choices.values()) != {"TIME_000ta", "TIME_000tb"}
+                        or choices.get(action.choice_index)
+                        != action.timeline_card_id):
+                    return self._reject("时间线选项已变化，未执行操作。")
+                self.executor.choose_timeline(action.timeline_card_id)
+                return ActionExecutionResult(True, "已选择时间线按钮。")
             if (action.choice_count not in (1, 2, 3, 4)
                     or not 0 <= action.choice_index < action.choice_count):
                 return self._reject("发现选项位置已经失效，未执行操作。")

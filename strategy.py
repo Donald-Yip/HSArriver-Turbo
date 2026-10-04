@@ -29,6 +29,10 @@ class StrategyState:
         self.oppo_weapon = None
         self.oppo_hand_card_num = 0
         self.discover_choice_count = log_state.discover_choice_count
+        # 选择项下标 -> 卡牌 ID：复制一份，执行阶段要用它认回溯/维持
+        # （日志状态在选择结束后会清空，快照得留着自己的）。
+        self.general_choice_cards = dict(
+            getattr(log_state, "general_choice_cards", {}))
         self.my_player_id = log_state.my_player_id
         self.power_options = deepcopy(log_state.power_options)
         self.hand_entry_count = log_state.hand_entry_count

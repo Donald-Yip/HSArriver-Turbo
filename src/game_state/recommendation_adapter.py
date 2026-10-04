@@ -138,21 +138,49 @@ def adapt_action(proposed, state):
                 or proposed.source.owner != "friendly"
                 or not 1 <= proposed.source.index <= choice_count):
             raise RecommendationStateError("discover_slot_out_of_range")
+        # 盒子只写「选择我方1/2号位卡牌」时，光看编号分不出这是发现还是时间线，
+        # 得看日志里的选项卡牌 ID：正好是回溯/维持那两张就走时间线按钮。
+        choices = getattr(state, "general_choice_cards", {})
+        timeline_card_id = None
+        if (choice_count == 2 and set(choices) == {0, 1}
+                and set(choices.values()) == {"TIME_000ta", "TIME_000tb"}):
+            timeline_card_id = choices[proposed.source.index - 1]
         return AdaptedAction(
             DiscoverChoiceAction(
-                proposed.source.index - 1, choice_count),
+                proposed.source.index - 1, choice_count,
+                timeline_card_id=timeline_card_id),
             None, None, "choice_resolved")
     if proposed.action == ActionKind.END_TURN:
         return AdaptedAction(EndTurnAction(), None, None, "turn_changed")
     if proposed.action == ActionKind.TIMELINE_UNDO:
+        # 日志能确认是时间线选择时优先走这条（点的是选项卡，不是文字按钮）。
+        timeline = _logged_timeline(state, "TIME_000tb")
+        if timeline is not None:
+            return timeline
         # 回溯：撤销 HSAng 时间线里上一步操作，纯 HSAng 侧 UI，不动 Power.log。
         return AdaptedAction(
             TimelineAction("undo"), None, None, "timeline_clicked")
     if proposed.action == ActionKind.TIMELINE_KEEP:
+        timeline = _logged_timeline(state, "TIME_000ta")
+        if timeline is not None:
+            return timeline
         # 维持：保留当前操作、关掉 HSAng 的撤销提示，同样不改 Power.log。
         return AdaptedAction(
             TimelineAction("keep"), None, None, "timeline_clicked")
     raise RecommendationStateError("unsupported_action")
+
+
+def _logged_timeline(state, card_id):
+    """日志里的选择项正好是回溯/维持时，返回绑定该选项卡的动作。"""
+    choices = getattr(state, "general_choice_cards", {})
+    if (getattr(state, "discover_choice_count", None) != 2
+            or set(choices) != {0, 1}
+            or set(choices.values()) != {"TIME_000ta", "TIME_000tb"}):
+        return None
+    index = next(i for i, value in choices.items() if value == card_id)
+    return AdaptedAction(
+        DiscoverChoiceAction(index, 2, timeline_card_id=card_id),
+        None, None, "choice_resolved")
 
 
 def _with_choose_one(proposed, state, adapted, source):
