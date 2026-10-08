@@ -114,6 +114,17 @@ class ScanTests(unittest.TestCase):
 
         self.assertEqual(0, result["files"])
 
+    def test_same_second_logs_fall_back_to_the_file_name(self):
+        """同一秒里连着点两次「保存日志」：mtime 一样，得按文件名取最新。"""
+        same = 1_700_000_000
+        _write(self.logs / "对战日志_20261008_120000.txt", "a" * 10, same)
+        _write(self.logs / "对战日志_20261008_120001.txt", "b" * 10, same)
+
+        result = script_logs.scan(self.logs, self.runtime)
+
+        self.assertEqual("对战日志_20261008_120001.txt",
+                         Path(result["newest"]).name)
+
     def test_stat_failure_skips_that_entry(self):
         _write(self.logs / "对战日志_20261008_120000.txt", "a" * 10)
 
