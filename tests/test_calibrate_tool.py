@@ -253,5 +253,161 @@ class RenderTests(unittest.TestCase):
         self.assertEqual((95, 0, 300, 60), config.ai_win_rate_wide_roi)
 
 
+class CardButtonTests(unittest.TestCase):
+    """目标条底部两个按钮：「保存全部区域 (S)」+「退出 (Esc)」。
+
+    按下和抬起要落在同一个按钮上才算点中（和普通按钮一致）。
+    """
+
+    WIDTH, HEIGHT = 1920, 1080
+
+    def setUp(self):
+        self.session = make_session()
+
+    @staticmethod
+    def _center(rect):
+        return ((rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2)
+
+    def test_hit_test_finds_both_buttons(self):
+        save = self.session._save_rect(self.WIDTH, self.HEIGHT)
+        exit_ = self.session._exit_rect(self.WIDTH, self.HEIGHT)
+
+        self.assertEqual(("save", None),
+                         self.session._hit_test(*self._center(save),
+                                                self.WIDTH, self.HEIGHT))
+        self.assertEqual(("exit", None),
+                         self.session._hit_test(*self._center(exit_),
+                                                self.WIDTH, self.HEIGHT))
+
+    def test_buttons_do_not_overlap_and_stay_inside_the_card(self):
+        save = self.session._save_rect(self.WIDTH, self.HEIGHT)
+        exit_ = self.session._exit_rect(self.WIDTH, self.HEIGHT)
+        left, top, right, bottom = self.session._card_rect(self.WIDTH,
+                                                           self.HEIGHT)
+
+        self.assertLess(save[2], exit_[0])          # 保存按钮在退出按钮左边
+        for rect in (save, exit_):
+            self.assertGreaterEqual(rect[0], left)
+            self.assertLessEqual(rect[2], right)
+            self.assertGreaterEqual(rect[1], top)
+            self.assertLessEqual(rect[3], bottom)
+
+    def test_clicking_the_exit_button_closes_the_window(self):
+        exit_ = self.session._exit_rect(self.WIDTH, self.HEIGHT)
+        x, y = self._center(exit_)
+
+        self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+        self.session._on_mouse_up(x, y, self.WIDTH, self.HEIGHT)
+
+        self.assertFalse(self.session.running)
+
+    def test_pressing_save_and_releasing_on_it_saves(self):
+        x, y = self._center(self.session._save_rect(self.WIDTH, self.HEIGHT))
+
+        with patch.object(calibrate_roi.CalibrationSession, "save") as save_call:
+            self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+            self.session._on_mouse_up(x, y, self.WIDTH, self.HEIGHT)
+
+        save_call.assert_called_once_with(flash=True)
+
+    def test_press_and_release_must_match(self):
+        """按在保存上、松在退出上（或反过来）都不触发任何动作。"""
+        save = self._center(self.session._save_rect(self.WIDTH, self.HEIGHT))
+        exit_ = self._center(self.session._exit_rect(self.WIDTH, self.HEIGHT))
+
+        with patch.object(calibrate_roi.CalibrationSession, "save") as save_call:
+            self.session._on_mouse_down(*save, self.WIDTH, self.HEIGHT)
+            self.session._on_mouse_up(*exit_, self.WIDTH, self.HEIGHT)
+            save_call.assert_not_called()
+        self.assertTrue(self.session.running)
+
+        self.session._on_mouse_down(*exit_, self.WIDTH, self.HEIGHT)
+        self.session._on_mouse_up(*save, self.WIDTH, self.HEIGHT)
+        self.assertTrue(self.session.running)
+
+    def test_hover_tracks_the_button_for_highlighting(self):
+        exit_ = self._center(self.session._exit_rect(self.WIDTH, self.HEIGHT))
+        self.session.dirty = False
+
+        self.session._on_mouse_move(*exit_, self.WIDTH, self.HEIGHT)
+
+        self.assertEqual(("exit", None), self.session.hover)
+        self.assertTrue(self.session.dirty)
+
+    def test_both_buttons_are_painted(self):
+        layer = self.session.render(self.WIDTH, self.HEIGHT)
+
+        for rect in (self.session._save_rect(self.WIDTH, self.HEIGHT),
+                     self.session._exit_rect(self.WIDTH, self.HEIGHT)):
+            self.assertGreater(layer.getpixel(self._center(rect))[3], 0)
+
+
+class HintWrapTests(unittest.TestCase):
+    """说明自动换行：每行都在卡片内宽之内，超出行数才截断加省略号。"""
+
+    class _Font:
+        """假字体：每个字符 10px（不依赖 PIL / 字体文件）。"""
+
+        @staticmethod
+        def getlength(text):
+            return 10 * len(str(text))
+
+    def test_short_text_stays_on_one_line(self):
+        self.assertEqual(["一二三"],
+                         calibrate_roi.wrap_text("一二三", self._Font, 100))
+
+    def test_empty_text_is_one_empty_line(self):
+        self.assertEqual([""], calibrate_roi.wrap_text("", self._Font, 100))
+
+    def test_long_text_wraps_within_the_width(self):
+        lines = calibrate_roi.wrap_text("一二三四五六七八九十", self._Font, 45)
+
+        self.assertGreater(len(lines), 1)
+        self.assertEqual("一二三四五六七八九十", "".join(lines))
+        for line in lines:
+            self.assertLessEqual(self._Font.getlength(line), 45)
+
+    def test_too_many_lines_are_truncated_with_an_ellipsis(self):
+        lines = calibrate_roi.wrap_text("一" * 30, self._Font, 30, max_lines=2)
+
+        self.assertEqual(2, len(lines))
+        self.assertTrue(lines[-1].endswith("…"))
+        for line in lines:
+            self.assertLessEqual(self._Font.getlength(line), 30)
+
+    def test_every_real_hint_fits_the_card(self):
+        """四个目标的说明（真实字体）每一行都不许超出卡片内宽。"""
+        font = calibrate_roi.label_font(calibrate_roi.HINT_FONT_SIZE)
+        inner = calibrate_roi.CARD_W - 2 * calibrate_roi.CARD_PAD
+        session = make_session()
+
+        for target in session.targets:
+            with self.subTest(target=target["key"]):
+                lines = calibrate_roi.wrap_text(target["hint"], font, inner)
+
+                self.assertLessEqual(len(lines),
+                                     calibrate_roi.HINT_MAX_LINES)
+                for line in lines:
+                    self.assertNotEqual("", line)
+                    self.assertLessEqual(font.getlength(line), inner + 1)
+
+    def test_card_grows_only_for_the_wrapped_hint(self):
+        session = make_session()
+        session.active_index = 0
+        self.assertEqual(calibrate_roi.CARD_H, session._card_height())
+
+        # 最后那个目标的说明最长（会换行），卡片相应加高一行。
+        session.active_index = len(session.targets) - 1
+        self.assertGreater(session._card_height(), calibrate_roi.CARD_H)
+
+    def test_hint_parts_split_the_highlighted_head(self):
+        self.assertEqual(("框住按钮：", "检测它是否出现"),
+                         calibrate_roi._hint_parts("框住按钮：检测它是否出现"))
+        self.assertEqual(("框住按钮:", "检测它是否出现"),
+                         calibrate_roi._hint_parts("框住按钮:检测它是否出现"))
+        self.assertEqual(("", "没有冒号的说明"),
+                         calibrate_roi._hint_parts("没有冒号的说明"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,7 +19,11 @@
 
 操作：
   * 拖框的边框可整体移动，拖右下角手柄可调整大小；
-  * **S** 或点 [保存] 把四个区域一起写回 `ui_config.json`；**Esc** 退出；
+  * 目标条里列出四个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
+  * 目标条底部两个按钮：**左「保存全部区域 (S)」、右「退出 (Esc)」**，
+    都有悬停高亮；键盘 **S** 保存、**Esc** 退出同样有效；
+  * 说明文字在卡片内自动换行（金色标题段 = 做什么，暗淡说明段 = 怎么做），
+    永远不会穿出卡片；卡片高度跟着换行行数长高；
   * 画面空白处的鼠标是**穿透**的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到
     炉石上，所以可以边看游戏画面边调；
   * 顶部提示条每 1.5s 重判一次「绿框里有没有盒子面板」，对齐成功会变绿。
@@ -81,12 +85,17 @@ CARD_BG = (24, 28, 36, 238)
 CARD_BORDER = (232, 185, 59, 245)
 CARD_ROW_BG = (44, 50, 62, 235)
 CARD_ROW_ACTIVE = (92, 74, 30, 245)
+CARD_ROW_HOVER = (56, 63, 78, 235)
 TEXT_MAIN = (240, 240, 240, 255)
 TEXT_DIM = (166, 172, 182, 255)
 TEXT_OK = (99, 199, 111, 255)
 TEXT_WARN = (226, 168, 78, 255)
 TEXT_BAD = (240, 120, 110, 255)
 BUTTON_BG = (196, 132, 40, 250)
+BUTTON_HOVER_BG = (222, 156, 56, 250)
+# 「退出」用中性灰：它不是危险操作（关掉的只是校准窗口），别和金色「保存」混淆。
+BUTTON_EXIT_BG = (74, 83, 100, 250)
+BUTTON_EXIT_HOVER_BG = (94, 105, 124, 250)
 BUTTON_TEXT = (255, 255, 255, 255)
 PANEL_BG = (18, 21, 27, 238)
 PANEL_BORDER = (118, 124, 132, 245)
@@ -99,17 +108,74 @@ CARD_W = 356
 CARD_PAD = 12
 ROW_H = 32
 SAVE_BTN_H = 36
+# 底部两个按钮（保存 / 退出）平分一行，中间留 10px。
+BTN_GAP = 10
+# 说明文字的行高 / 最多几行（超出截断加省略号）。
+HINT_FONT_SIZE = 13
+HINT_LINE_H = 17
+HINT_MAX_LINES = 3
+INFO_LINE_H = 18
+# 基础高度：标题 + 目标行 + 4 行信息（当前目标 / 说明 / 坐标 / 保存状态）
+# + 按钮行。说明换行后会由 CalibrationSession._card_height() 按实际行数加高。
 CARD_H = (CARD_PAD + 20 + 8          # 标题
           + len(CALIBRATION_TARGETS) * ROW_H + 6   # 目标行
-          + 3 * 18 + 8               # 当前目标提示 / 坐标 / 保存状态
+          + 4 * INFO_LINE_H + 8      # 当前目标 / 说明 / 坐标 / 保存状态
           + SAVE_BTN_H + CARD_PAD)
 
 
-def card_rect(width: int, height: int) -> tuple[int, int, int, int]:
+def _hint_parts(hint: str) -> tuple[str, str]:
+    """把说明拆成「高亮标题段」+「说明段」（按第一个冒号）。
+
+    目标 4 的说明是「框住……按钮：检测它是否出现，并用框中心点击」：冒号前是
+    一句"做什么"，冒号后才是解释。前段用金色高亮，后段暗淡换行。
+    """
+    text = str(hint or "").strip()
+    for sep in ("：", ":"):
+        if sep in text:
+            head, _sep, tail = text.partition(sep)
+            return f"{head}{sep}", tail.strip()
+    return "", text
+
+
+def wrap_text(text, font, max_width: float,
+              max_lines: int = HINT_MAX_LINES) -> list[str]:
+    """按字符贪心换行（中文没空格，只能逐字量宽），返回每一行的文字。
+
+    超过 max_lines 时把多余内容丢掉并在最后一行加省略号——说明必须留在
+    卡片里（用户反馈过说明文字"穿出卡片"）。font 只要有 getlength() 即可，
+    测试里可以传一个按字符数算宽度的假字体。
+    """
+    text = str(text or "").strip()
+    if not text:
+        return [""]
+
+    def _width(value: str) -> float:
+        try:
+            return float(font.getlength(value))
+        except Exception:
+            return float(len(value) * 8)
+
+    lines = [""]
+    for char in text:
+        if lines[-1] and _width(lines[-1] + char) > max_width:
+            lines.append("")
+        lines[-1] += char
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        last = lines[-1]
+        while last and _width(last + "…") > max_width:
+            last = last[:-1]
+        lines[-1] = f"{last}…"
+    return lines
+
+
+def card_rect(width: int, height: int,
+              card_h: int | None = None) -> tuple[int, int, int, int]:
     """目标条的矩形：屏幕正中央（屏幕比卡片还小时贴左上角）。"""
+    card_h = CARD_H if card_h is None else int(card_h)
     left = max(8, (int(width) - CARD_W) // 2)
-    top = max(8, (int(height) - CARD_H) // 2)
-    return (left, top, left + CARD_W, top + CARD_H)
+    top = max(8, (int(height) - card_h) // 2)
+    return (left, top, left + CARD_W, top + card_h)
 
 # ---------------------------------------------------------------- 预览面板
 PREVIEW_W, PREVIEW_H = 360, 430
@@ -162,13 +228,19 @@ class CalibrationSession:
 
         self.panel_state = None
         self.drag = None              # None | ("move", dx, dy) | ("resize",)
-        self.save_pending = False
+        # 鼠标在哪个按钮/目标行上（只为高亮，不影响其它逻辑）。
+        self.hover = None             # None | ("save", None) | ("exit", None)
+                                      #        | ("target", index)
+        # 按下时落在哪个按钮上：抬起也在同一按钮才触发（保存/退出都一样）。
+        self.press_target = None      # None | ("save", None) | ("exit", None)
         self.saved_flash_until = 0.0
         self.dirty = True
         self._es_held = False
         self._s_held = False
         self._tab_held = False
         self._msg = MSG()
+        # 目标条高度按"当前目标说明的换行行数"算：说明绝不能穿出卡片。
+        self._card_h_cache: dict[str, int] = {}
 
         # OCR 预览
         self.last_crop = None
@@ -192,8 +264,22 @@ class CalibrationSession:
         self.select((self.active_index + step) % len(self.targets))
 
     # ------------------------------------------------------------ 布局/命中
+    def _card_height(self) -> int:
+        """目标条高度：说明按实际换行行数加高（每个目标算一次后缓存）。"""
+        key = self.active["key"]
+        cached = self._card_h_cache.get(key)
+        if cached is None:
+            lines = wrap_text(self.active["hint"], label_font(HINT_FONT_SIZE),
+                              CARD_W - 2 * CARD_PAD)
+            cached = CARD_H + (max(1, len(lines)) - 1) * HINT_LINE_H
+            self._card_h_cache[key] = cached
+        return cached
+
+    def _card_rect(self, width: int, height: int):
+        return card_rect(width, height, self._card_height())
+
     def _chip_rects(self, width: int, height: int):
-        left, top = card_rect(width, height)[:2]
+        left, top = self._card_rect(width, height)[:2]
         rects = []
         row_top = top + CARD_PAD + 20 + 8
         for index in range(len(self.targets)):
@@ -202,12 +288,24 @@ class CalibrationSession:
             row_top += ROW_H
         return rects
 
-    @staticmethod
-    def _save_rect(width: int, height: int) -> tuple[int, int, int, int]:
-        left, top = card_rect(width, height)[:2]
-        bottom = top + CARD_H - CARD_PAD
-        return (left + CARD_PAD, bottom - SAVE_BTN_H,
-                left + CARD_W - CARD_PAD, bottom)
+    def _button_rects(self, width: int, height: int):
+        """底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」。"""
+        left, top = self._card_rect(width, height)[:2]
+        bottom = top + self._card_height() - CARD_PAD
+        inner_left = left + CARD_PAD
+        inner_right = left + CARD_W - CARD_PAD
+        button_w = (inner_right - inner_left - BTN_GAP) // 2
+        save = (inner_left, bottom - SAVE_BTN_H,
+                inner_left + button_w, bottom)
+        exit_ = (inner_left + button_w + BTN_GAP, bottom - SAVE_BTN_H,
+                 inner_right, bottom)
+        return save, exit_
+
+    def _save_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
+        return self._button_rects(width, height)[0]
+
+    def _exit_rect(self, width: int, height: int) -> tuple[int, int, int, int]:
+        return self._button_rects(width, height)[1]
 
     @staticmethod
     def _preview_rect(width: int) -> tuple[int, int, int, int]:
@@ -219,9 +317,10 @@ class CalibrationSession:
         for rect, index in self._chip_rects(width, height):
             if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
                 return ("target", index)
-        rect = self._save_rect(width, height)
-        if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
-            return ("save", None)
+        for name, rect in (("save", self._save_rect(width, height)),
+                           ("exit", self._exit_rect(width, height))):
+            if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
+                return (name, None)
         left, top, right, bottom = self.active["box"]
         if (right + 2 <= sx <= right + 2 + HANDLE
                 and bottom + 2 <= sy <= bottom + 2 + HANDLE):
@@ -254,8 +353,9 @@ class CalibrationSession:
         name, index = kind
         if name == "target":
             self.select(index)
-        elif name == "save":
-            self.save_pending = True
+        elif name in ("save", "exit"):
+            # 按下时先记住，抬起时还在同一个按钮上才算点中（和普通按钮一致）。
+            self.press_target = (name, None)
         elif name == "corner":
             self.drag = ("resize",)
         elif name == "edge":
@@ -266,16 +366,26 @@ class CalibrationSession:
             USER32.SetCapture(self.window.hwnd)
 
     def _on_mouse_up(self, sx: int, sy: int, width: int, height: int) -> None:
-        if self.save_pending:
-            self.save_pending = False
-            if self._hit_test(sx, sy, width, height) == ("save", None):
-                self.save(flash=True)
+        pressed, self.press_target = self.press_target, None
+        if pressed is not None:
+            if self._hit_test(sx, sy, width, height) == pressed:
+                if pressed[0] == "save":
+                    self.save(flash=True)
+                else:
+                    # 「退出」= 和 Esc 一样：关掉校准窗口（只关这个窗口）。
+                    print("[校准] 已退出校准窗口。")
+                    self.running = False
         self.drag = None
         USER32.ReleaseCapture()
         self.dirty = True
 
     def _on_mouse_move(self, sx: int, sy: int, width: int, height: int) -> None:
         if self.drag is None:
+            # 不在拖框：记一下光标悬停在哪个按钮/目标行上，用于高亮。
+            hover = self._hit_test(sx, sy, width, height)
+            if hover != self.hover:
+                self.hover = hover
+                self.dirty = True
             return
         left, top, right, bottom = self.active["box"]
         if self.drag[0] == "move":
@@ -465,7 +575,16 @@ class CalibrationSession:
                 draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
 
     def _draw_card(self, draw, width: int, height: int) -> None:
-        card_left, card_top, card_right, card_bottom = card_rect(width, height)
+        """目标条：目标列表 + 当前目标高亮 + 说明（自动换行）+ 保存/退出按钮。
+
+        说明文字以前是整句一行画出去，句子一长就穿出卡片（用户反馈）。现在：
+          * 说明按「：」拆成金色标题段 + 暗淡说明段；
+          * 说明段按卡片内宽换行（最多 3 行），卡片高度跟着行数加高；
+          * 「当前目标」「坐标」「保存状态」分行排版，当前目标用目标自己的颜色高亮；
+          * 底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」，悬停会提亮。
+        """
+        card_left, card_top, card_right, card_bottom = self._card_rect(width,
+                                                                      height)
         draw.rectangle((card_left, card_top, card_right, card_bottom),
                        fill=CARD_BG, outline=CARD_BORDER, width=2)
         self._draw_text(draw, (card_left + CARD_PAD, card_top + CARD_PAD),
@@ -473,35 +592,78 @@ class CalibrationSession:
         for rect, index in self._chip_rects(width, height):
             target = self.targets[index]
             active = index == self.active_index
-            draw.rectangle(rect, fill=CARD_ROW_ACTIVE if active else CARD_ROW_BG)
+            hovered = self.hover == ("target", index)
+            fill = (CARD_ROW_ACTIVE if active
+                    else (CARD_ROW_HOVER if hovered else CARD_ROW_BG))
+            draw.rectangle(rect, fill=fill)
             swatch = (rect[0] + 6, rect[1] + 7, rect[0] + 22, rect[1] + 21)
             draw.rectangle(swatch, fill=_rgba(target["color"]))
+            if active:
+                # 当前行再加一条左侧竖条，扫一眼就知道在拖哪个目标。
+                draw.rectangle((rect[0], rect[1], rect[0] + 3, rect[3]),
+                               fill=_rgba(target["color"]))
             text = f"{index + 1}. {target['label']}"
             self._draw_text(draw, (rect[0] + 30, rect[1] + 6), text, 15,
                             TEXT_MAIN if active else TEXT_DIM)
             box = target["box"]
             size_text = f"{box[2] - box[0]}×{box[3] - box[1]}"
             self._draw_text(draw, (rect[2] - 74, rect[1] + 7), size_text, 13,
-                            TEXT_DIM)
-        # 当前目标：说明 + 实时坐标 + 保存状态
+                            _rgba(target["color"]) if active else TEXT_DIM)
+
+        # ---- 当前目标 / 说明 / 坐标 / 保存状态 --------------------------
+        inner_w = CARD_W - 2 * CARD_PAD
         line_y = card_top + CARD_PAD + 20 + 8 + len(self.targets) * ROW_H + 4
+        target = self.active
         self._draw_text(draw, (card_left + CARD_PAD, line_y),
-                        self.active["hint"], 13, TEXT_DIM)
-        box = self.active["box"]
-        self._draw_text(draw, (card_left + CARD_PAD, line_y + 18),
+                        f"当前目标：{target['label']}", 13,
+                        _rgba(target["color"]))
+        line_y += INFO_LINE_H
+
+        head, _body = _hint_parts(target["hint"])
+        hint_font = _FONT_CACHE.get(HINT_FONT_SIZE)
+        if hint_font is None:
+            hint_font = label_font(HINT_FONT_SIZE)
+            _FONT_CACHE[HINT_FONT_SIZE] = hint_font
+        hint_lines = wrap_text(target["hint"], hint_font, inner_w)
+        take_head = min(len(hint_lines[0]), len(head)) if head else 0
+        for index, line in enumerate(hint_lines):
+            x = card_left + CARD_PAD
+            if index == 0 and take_head:
+                self._draw_text(draw, (x, line_y), line[:take_head],
+                                HINT_FONT_SIZE, CARD_BORDER)
+                if hint_font is not None:
+                    x += int(hint_font.getlength(line[:take_head]))
+                self._draw_text(draw, (x, line_y), line[take_head:],
+                                HINT_FONT_SIZE, TEXT_DIM)
+            else:
+                self._draw_text(draw, (x, line_y), line, HINT_FONT_SIZE,
+                                TEXT_DIM)
+            line_y += HINT_LINE_H
+        # 说明行数不足 3 行时把底部信息顶到固定位置（卡片高度已经算过换行数）。
+        line_y = (card_bottom - CARD_PAD - SAVE_BTN_H - 8
+                  - 2 * INFO_LINE_H)
+
+        box = target["box"]
+        self._draw_text(draw, (card_left + CARD_PAD, line_y),
                         f"当前：{box[0]},{box[1]} → {box[2]},{box[3]}"
                         f"（{box[2] - box[0]}×{box[3] - box[1]}）", 13, TEXT_MAIN)
         if time.time() < self.saved_flash_until:
-            self._draw_text(draw, (card_left + CARD_PAD, line_y + 36),
+            self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
                             "已保存，重开对局生效", 13, TEXT_OK)
         else:
-            self._draw_text(draw, (card_left + CARD_PAD, line_y + 36),
+            self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
                             "S 保存 · Esc 退出 · 空白处鼠标可穿透", 13, TEXT_DIM)
-        # 保存按钮
-        rect = self._save_rect(width, height)
-        draw.rectangle(rect, fill=BUTTON_BG)
-        self._draw_text(draw, (rect[0] + 12, rect[1] + 8),
-                        "保存全部区域 (S)", 15, BUTTON_TEXT)
+
+        # ---- 底部两个按钮：保存（金） / 退出（灰） ----------------------
+        for name, text, base, hover in (
+                ("save", "保存全部区域 (S)", BUTTON_BG, BUTTON_HOVER_BG),
+                ("exit", "退出 (Esc)", BUTTON_EXIT_BG, BUTTON_EXIT_HOVER_BG)):
+            rect = (self._save_rect(width, height) if name == "save"
+                    else self._exit_rect(width, height))
+            bg = hover if self.hover == (name, None) else base
+            draw.rectangle(rect, fill=bg, outline=CARD_BORDER, width=1)
+            self._draw_text(draw, (rect[0] + 12, rect[1] + 8), text, 15,
+                            BUTTON_TEXT)
 
     def _draw_preview(self, draw, width: int, layer) -> None:
         left, top, right, bottom = self._preview_rect(width)
