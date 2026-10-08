@@ -11,15 +11,18 @@ start() 返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING，调用方（web_ui�
 再静默失败**（见 mark_closing / _defer_open / _stop_generation）。
 
 Buttons:
-  * ▶ 开始对战            — start automation
-  * ⏹ 中止 / ▶ 恢复       — toggle stop/resume (state-aware)
-  * ⏸ 本局结束后停止        — toggle; cancel anytime before the match ends
+  * 开始对战              — start automation
+  * 中止 / 恢复           — toggle stop/resume (state-aware)
+  * 本局结束后停止         — toggle; cancel anytime before the match ends
   * 校准                  — open/close the on-screen calibration window
-  * 💾 保存日志            — dump the battle log to a file
-  * ♻ 重启炉石            — confirm, then kill Hearthstone + wipe logs + relaunch
-  * ✖ 退出浮窗            — close only this window (script keeps running)
-  * 🚪 退出脚本            — stop automation and exit the whole process
-  * ▁ 最小化 / ▣ 展开      — collapse to a title bar / restore (标题行右侧)
+  * 保存日志              — dump the battle log to a file
+  * 打开日志 / 清理日志    — open the log files in Explorer / delete them
+  * 重启炉石              — confirm, then kill Hearthstone + wipe logs + relaunch
+  * 退出浮窗              — close only this window (script keeps running)
+  * 退出脚本              — stop automation and exit the whole process
+  * 最小化 / 展开          — collapse to a title bar / restore (标题行右侧)
+Button labels are **plain text on purpose**: the old ▶/⏹/⏸/💾/♻/🚪/📊 glyphs
+have no glyphs in Microsoft YaHei / Segoe UI and rendered as tofu boxes.
 Every button hands the foreground back to Hearthstone afterwards.
 """
 from __future__ import annotations
@@ -31,6 +34,10 @@ import re
 import threading
 import time
 from collections import deque
+
+# 脚本日志（对战日志 / 运行日志）的体积、命名与清理都在 script_logs.py 里；
+# 浮窗只用它的 format_size 与 new_battle_log_path，避免两份实现打架。
+import script_logs
 
 _LOCK = threading.Lock()
 _LINES: deque = deque(maxlen=2000)
@@ -103,9 +110,11 @@ BTN_LAYOUT = {
     "stop_after": (1, 0),
     "calibrate": (2, 0),
     "save": (2, 1),
-    "restart": (3, 0),
-    "exit_overlay": (3, 1),
-    "exit": (4, 0),
+    "open_logs": (3, 0),
+    "clear_logs": (3, 1),
+    "restart": (4, 0),
+    "exit_overlay": (4, 1),
+    "exit": (5, 0),
 }
 # 需要横跨整行的按钮（单独一行）。
 BTN_SPAN = {"stop_after": 2, "exit": 2}
@@ -116,12 +125,13 @@ BTN_SPAN = {"stop_after": 2, "exit": 2}
 # 宽度保持用户要求的收窄值（292 → 263）：状态行说明放不下时靠 wraplength
 # **换行**，而不是把窗口加宽（加宽过一次，用户反馈"整个浮窗又变宽了"）。
 WINDOW_WIDTH = 263
-# 654 → 637：删掉「炉石传说 · 自动对战」副标题那一行，省下的高度全给日志区。
-WINDOW_HEIGHT = 637
+# 654 - 17（删掉副标题）→ 637；再 +56 给新增的「日志」状态行与「打开日志 /
+# 清理日志」按钮行，日志正文仍保持 9 行左右。
+WINDOW_HEIGHT = 693
 # 最小化（折叠成标题条）：浮窗是 WS_EX_TOOLWINDOW，没有任务栏条目，
 # 真 iconify() 之后用户没有任何入口还原，所以折叠成标题条 + 「展开」按钮。
 MINIMIZED_HEIGHT = 34
-# 标题行右侧的小按钮：只用文字（之前的「▁」字形看着像多了一个下划线）。
+# 标题行右侧的小按钮：只用文字（拿块状字形当图标会像多了一个下划线）。
 MINIMIZE_TEXT = "最小化"
 RESTORE_TEXT = "展开"
 
@@ -136,6 +146,12 @@ _EYE_W, _EYE_PAD = 24, (2, 8)   # 眼睛按钮与它的内边距（只有「账�
 _DETAIL_MIN_PX = 60
 # 说明最多占几行：超过就截断加省略号，避免极端长文把日志区挤没。
 _DETAIL_MAX_LINES = 3
+
+# 「日志」状态行：清理完成后这 10 秒内，说明列显示"已清理 X"。
+LOG_CLEAR_FLASH_SECONDS = 10.0
+# 体积阈值（与 web_ui.LOG_WARN_BYTES / LOG_DANGER_BYTES 一致，兜底用）。
+LOG_WARN_BYTES = 100 * 1024 * 1024
+LOG_DANGER_BYTES = 500 * 1024 * 1024
 
 # 浮窗顶部品牌行：本项目大名（放在“自动化日志”标题之前）。
 # 副标题「炉石传说 · 自动对战」已按用户要求删除。
@@ -154,6 +170,49 @@ def detail_wrap_px(width: int, used_px: int,
     "至少留 min_px" 这条规则单独拎出来，方便脱离 Tk 测试。
     """
     return max(int(min_px), int(width) - int(used_px))
+
+
+def logs_row(info, now=None) -> dict:
+    """浮窗「日志」状态行：{'marker', 'value', 'value_color', 'detail'}。
+
+    info 来自 web_ui._overlay_logs()（script_logs.scan() 的快照）：
+        bytes / files / battle_bytes / runtime_bytes / warn_bytes /
+        danger_bytes / cleared_at / cleared_bytes
+    体积越大圆点越"热"：<100MB 绿、<500MB 黄、≥500MB 红（阈值由 web_ui 传进来，
+    这里只兜底）。刚清理完的 10 秒内，说明列显示"已清理 X"，让用户看到结果。
+    """
+    if info is None:
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    try:
+        total = int(info.get("bytes") or 0)
+        files = int(info.get("files") or 0)
+    except (TypeError, ValueError):
+        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
+                "detail": ""}
+    try:
+        warn = int(info.get("warn_bytes") or LOG_WARN_BYTES)
+        danger = int(info.get("danger_bytes") or LOG_DANGER_BYTES)
+    except (TypeError, ValueError):
+        warn, danger = LOG_WARN_BYTES, LOG_DANGER_BYTES
+    if total >= danger:
+        color = DANGER
+    elif total >= warn:
+        color = WARN
+    else:
+        color = GREEN
+    try:
+        cleared_at = float(info.get("cleared_at") or 0.0)
+        cleared_bytes = int(info.get("cleared_bytes") or 0)
+    except (TypeError, ValueError):
+        cleared_at, cleared_bytes = 0.0, 0
+    current = time.time() if now is None else float(now)
+    if cleared_at and current - cleared_at < LOG_CLEAR_FLASH_SECONDS:
+        detail = f"已清理 {script_logs.format_size(cleared_bytes)}"
+    else:
+        detail = f"{files} 个文件"
+    return {"marker": color, "value": script_logs.format_size(total),
+            "value_color": color, "detail": detail}
 
 
 def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
@@ -357,12 +416,13 @@ def push(line: str, _level: str = "INFO") -> None:
 
 
 def _save_log() -> str:
-    """把当前对战日志写入 logs/ 子目录，返回保存路径。"""
-    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    root = os.path.dirname(os.path.abspath(__file__))
-    log_dir = os.path.join(root, "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    path = os.path.join(log_dir, f"对战日志_{ts}.txt")
+    """把当前对战日志写入 logs/ 子目录，返回保存路径。
+
+    目录与命名统一由 script_logs 提供（浮窗的「日志」体积行、「清理日志」按钮
+    认的就是同一批文件名，不能各写一份）。
+    """
+    path = script_logs.new_battle_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
         lines = list(_FULL_LINES)
     with open(path, "w", encoding="utf-8") as f:
@@ -370,7 +430,7 @@ def _save_log() -> str:
         f.write("\n".join(lines))
         if lines:
             f.write("\n")
-    return path
+    return str(path)
 
 
 _STOP = threading.Event()
@@ -398,6 +458,11 @@ _ON_CALIBRATE_CLOSE = None
 # 「重启炉石」按钮：中止进程 → 清空日志目录 → 重新拉起（web_ui 传入）。
 # 确认弹窗在浮窗里完成，确认后才调这个回调。
 _ON_RESTART = None
+# 「日志」状态行：脚本日志的体积/个数（web_ui 传入，带缓存）。
+_LOGS = None
+# 「打开日志」/「清理日志」按钮（web_ui 传入；清理前浮窗先弹确认）。
+_ON_OPEN_LOGS = None
+_ON_CLEAR_LOGS = None
 # 「退出浮窗」按钮：只关这个窗口，脚本继续跑（web_ui 传入，用来写一行网页日志）。
 _ON_EXIT_OVERLAY = None
 
@@ -655,6 +720,7 @@ def start(on_start=None, on_halt=None, is_running=None,
           liveness_callback=None, account_callback=None,
           account_visible_setting=None, on_toggle_account=None,
           on_calibrate=None, on_calibrate_close=None, on_restart=None,
+          logs_callback=None, on_open_logs=None, on_clear_logs=None,
           on_exit_overlay=None) -> str:
     """开（或重开）浮窗，返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING。
 
@@ -666,6 +732,7 @@ def start(on_start=None, on_halt=None, is_running=None,
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
+    global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS
     # 排队重开时要原样复用这一轮的绑定（start() 会重写全部回调，不能只重开窗口）。
     args = {
         "on_start": on_start, "on_halt": on_halt, "is_running": is_running,
@@ -679,7 +746,11 @@ def start(on_start=None, on_halt=None, is_running=None,
         "on_toggle_account": on_toggle_account,
         "on_calibrate": on_calibrate,
         "on_calibrate_close": on_calibrate_close,
-        "on_restart": on_restart, "on_exit_overlay": on_exit_overlay,
+        "on_restart": on_restart,
+        "logs_callback": logs_callback,
+        "on_open_logs": on_open_logs,
+        "on_clear_logs": on_clear_logs,
+        "on_exit_overlay": on_exit_overlay,
     }
     with _START_LOCK:
         if _STARTED[0] and not _STOP.is_set() and not _CLOSING.is_set():
@@ -710,6 +781,9 @@ def start(on_start=None, on_halt=None, is_running=None,
         _ON_CALIBRATE = on_calibrate
         _ON_CALIBRATE_CLOSE = on_calibrate_close
         _ON_RESTART = on_restart
+        _LOGS = logs_callback
+        _ON_OPEN_LOGS = on_open_logs
+        _ON_CLEAR_LOGS = on_clear_logs
         _ON_EXIT_OVERLAY = on_exit_overlay
         if account_visible_setting is not None:
             _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
@@ -836,11 +910,31 @@ def _disable_overlay_activation(root) -> None:
         pass
 
 
-def _confirm_restart(root) -> bool:
-    """「重启炉石」的确认小窗：确认返回 True。
+# 确认弹窗的文案（抽成常量：一是方便测试锁住关键信息，二是两个危险操作共用
+# 同一套弹窗实现，别各写一份）。
+CONFIRM_RESTART_TITLE = "⚠  中止炉石并清空日志？"
+CONFIRM_RESTART_DETAIL = (
+    "将依次执行：停止自动化 → 强制结束 Hearthstone.exe → "
+    "清空日志目录内容（保留 Log.config）→ 重新启动炉石。\n"
+    "对局进行中会直接判负；重启后需再点「开始对战」。")
+CONFIRM_RESTART_OK = "确认执行"
+CONFIRM_CLEAR_TITLE = "清空脚本日志？"
+CONFIRM_CLEAR_OK = "确认清空"
+
+
+def confirm_clear_detail(files, battle_size, runtime_size, total_size) -> str:
+    """「清理日志」确认弹窗的正文（体积/数量都由浮窗实时算出来）。"""
+    return (f"将删除 logs 里的 {int(files)} 个对战日志（{battle_size}）"
+            f"和运行日志 ui_log_last.txt（{runtime_size}），共 {total_size}。\n"
+            "日志是排查问题的依据，删除后无法恢复；对局与设置不受影响。")
+
+
+def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
+                    confirm_bg=DANGER) -> bool:
+    """浮窗样式的确认小窗：确认返回 True，取消/Esc/关闭返回 False。
 
     故意不用 tkinter.messagebox：炉石全屏独占时系统对话框可能被压在游戏后面，
-    这里用与浮窗完全相同的 -topmost 机制，一定看得见。
+    这里用与浮窗完全相同的 -topmost + overrideredirect 机制，一定看得见。
     """
     try:
         import tkinter as tk
@@ -863,13 +957,10 @@ def _confirm_restart(root) -> bool:
         y = max(8, min(y, root.winfo_screenheight() - height - 8))
         dialog.geometry(f"{width}x{height}+{x}+{y}")
 
-        tk.Frame(dialog, bg=DANGER, height=3).pack(fill="x")
-        tk.Label(dialog, text="⚠  中止炉石并清空日志？", bg=BG, fg=DANGER,
+        tk.Frame(dialog, bg=confirm_bg, height=3).pack(fill="x")
+        tk.Label(dialog, text=title, bg=BG, fg=confirm_bg,
                  font=("Microsoft YaHei", 11, "bold"),
                  anchor="w").pack(fill="x", padx=12, pady=(10, 4))
-        detail = ("将依次执行：停止自动化 → 强制结束 Hearthstone.exe → "
-                  "清空日志目录内容（保留 Log.config）→ 重新启动炉石。\n"
-                  "对局进行中会直接判负；重启后需再点「开始对战」。")
         tk.Label(dialog, text=detail, bg=BG, fg=TEXT, justify="left",
                  font=("Microsoft YaHei", 9),
                  wraplength=width - 28).pack(fill="x", padx=12)
@@ -889,8 +980,8 @@ def _confirm_restart(root) -> bool:
         row.pack(fill="x", padx=12, pady=(12, 12), side="bottom")
         row.columnconfigure(0, weight=1)
         row.columnconfigure(1, weight=1)
-        tk.Button(row, text="确认执行", bg=DANGER, fg="#ffffff",
-                  activebackground=DANGER, activeforeground="#ffffff", bd=0,
+        tk.Button(row, text=confirm_text, bg=confirm_bg, fg="#ffffff",
+                  activebackground=confirm_bg, activeforeground="#ffffff", bd=0,
                   font=("Microsoft YaHei", 10, "bold"), cursor="hand2",
                   command=lambda: _close(True)
                   ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=6)
@@ -914,6 +1005,25 @@ def _confirm_restart(root) -> bool:
     return bool(outcome["ok"])
 
 
+def _confirm_restart(root) -> bool:
+    """「重启炉石」的确认小窗：确认返回 True。"""
+    return _confirm_dialog(root, CONFIRM_RESTART_TITLE, CONFIRM_RESTART_DETAIL,
+                           CONFIRM_RESTART_OK)
+
+
+def _confirm_clear_logs(root, info) -> bool:
+    """「清理日志」的确认小窗：把要删的体积/数量摆出来，确认返回 True。"""
+    info = info or {}
+    files = int(info.get("battle_files") or 0)
+    detail = confirm_clear_detail(
+        files,
+        script_logs.format_size(info.get("battle_bytes")),
+        script_logs.format_size(info.get("runtime_bytes")),
+        script_logs.format_size(info.get("bytes")))
+    return _confirm_dialog(root, CONFIRM_CLEAR_TITLE, detail,
+                           CONFIRM_CLEAR_OK, confirm_bg=WARN)
+
+
 def _run() -> None:
     try:
         import tkinter as tk
@@ -930,8 +1040,8 @@ def _run() -> None:
         root.attributes("-alpha", ALPHA)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        # 高度：品牌行 + 状态面板（4 行）+ 五行按钮都要放得下，日志区还要有
-        # 9 行左右。删掉副标题后比原来（654）矮 17px，省下的留给日志区。
+        # 高度：品牌行 + 状态面板（5 行）+ 六行按钮都要放得下，日志区还要有
+        # 9 行左右（删掉副标题、加日志行/按钮行后的尺寸见 WINDOW_HEIGHT 注释）。
         W, H = WINDOW_WIDTH, WINDOW_HEIGHT
         x = sw - W - 12
         y = 12
@@ -1038,7 +1148,7 @@ def _run() -> None:
                          font=("Microsoft YaHei", 10, "bold"))
         title.pack(side="left", pady=8)
         # 标题行右侧的「最小化」：折叠成标题条，再点标题条上的「展开」还原。
-        # 做成一枚小小的面板按钮（悬停提亮），别再出现像下划线一样的 ▁ 字形。
+        # 做成一枚小小的面板按钮（悬停提亮），只用文字，不再拿块状字形当图标。
         mini_btn = tk.Label(head, text=MINIMIZE_TEXT, bg=PANEL, fg=DIM,
                             font=("Microsoft YaHei", 8), cursor="hand2",
                             padx=8, pady=2)
@@ -1051,7 +1161,7 @@ def _run() -> None:
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- 战绩行 -------------------------------------------------
-        score_label = tk.Label(content, text="📊 战绩： —", bg=TITLE_BG, fg=DIM,
+        score_label = tk.Label(content, text="战绩： —", bg=TITLE_BG, fg=DIM,
                                font=("Microsoft YaHei", 9), anchor="w")
         score_label.pack(fill="x", padx=8, pady=(6, 0))
         # ---- 状态面板：活人感 / 投降检测 / 炉石 / 账号 ----------------
@@ -1118,6 +1228,7 @@ def _run() -> None:
         lv_marker, lv_value, lv_detail, _, lv_used = _status_row("炉石")
         ac_marker, ac_value, ac_detail, eye_box, ac_used = _status_row(
             "账号", with_eye=True)
+        lg_marker, lg_value, lg_detail, _, lg_used = _status_row("日志")
 
         # 图标只有一个 👁，状态靠颜色区分：绿色 = 显示中，白色 = 已隐藏。
         initial_visible = account_visible()
@@ -1166,7 +1277,7 @@ def _run() -> None:
             finally:
                 _raise_hearthstone()
 
-        start_btn = _make_btn(btn_frame, "▶  开始对战", ACCENT, _call_start)
+        start_btn = _make_btn(btn_frame, "开始对战", ACCENT, _call_start)
         _place(start_btn, "start")
 
         def _call_halt():
@@ -1176,18 +1287,18 @@ def _run() -> None:
             finally:
                 _raise_hearthstone()
 
-        halt_btn = _make_btn(btn_frame, "⏹  中止", DANGER, _call_halt)
+        halt_btn = _make_btn(btn_frame, "中止", DANGER, _call_halt)
         _place(halt_btn, "halt")
 
         def _set_stop_after_state():
             active = bool(_IS_STOP_AFTER() if _IS_STOP_AFTER is not None else False)
             if active:
                 _set(stop_after_btn,
-                     text="✓  本局结束后停止（点击取消）",
+                     text="本局结束后停止（点击取消）",
                      bg=OK, activebackground=OK)
             else:
                 _set(stop_after_btn,
-                     text="⏸  本局结束后停止", bg=WARN, activebackground=WARN)
+                     text="本局结束后停止", bg=WARN, activebackground=WARN)
 
         def _call_stop_after():
             try:
@@ -1197,7 +1308,7 @@ def _run() -> None:
                 _raise_hearthstone()
                 _set_stop_after_state()
 
-        stop_after_btn = _make_btn(btn_frame, "⏸  本局结束后停止", WARN,
+        stop_after_btn = _make_btn(btn_frame, "本局结束后停止", WARN,
                                    _call_stop_after)
         _place(stop_after_btn, "stop_after")
 
@@ -1205,18 +1316,18 @@ def _run() -> None:
             try:
                 path = _save_log()
                 push(f"[SYS] 对战日志已保存：{path}")
-                save_btn.config(text="✓  已保存", bg=OK)
+                save_btn.config(text="已保存", bg=OK)
                 root.after(2000, lambda: save_btn.config(
-                    text="💾  保存日志", bg=OK))
+                    text="保存日志", bg=OK))
             except Exception as exc:
                 push(f"[SYS] 保存对战日志失败：{exc}")
-                save_btn.config(text="✗  保存失败", bg=DANGER)
+                save_btn.config(text="保存失败", bg=DANGER)
                 root.after(2000, lambda: save_btn.config(
-                    text="💾  保存日志", bg=OK))
+                    text="保存日志", bg=OK))
             finally:
                 _raise_hearthstone()
 
-        save_btn = _make_btn(btn_frame, "💾  保存日志", OK, _call_save)
+        save_btn = _make_btn(btn_frame, "保存日志", OK, _call_save)
         _place(save_btn, "save")
 
         def _call_calibrate():
@@ -1241,6 +1352,51 @@ def _run() -> None:
         calibrate_btn = _make_btn(btn_frame, "校准", ACCENT, _call_calibrate)
         _place(calibrate_btn, "calibrate")
 
+        def _call_open_logs():
+            """打开日志位置：Explorer 里选中最新一份对战日志（没有就打开目录）。"""
+            try:
+                if _ON_OPEN_LOGS is not None:
+                    _ON_OPEN_LOGS()
+            finally:
+                _raise_hearthstone()
+
+        open_logs_btn = _make_btn(btn_frame, "打开日志", NEUTRAL,
+                                  _call_open_logs)
+        _place(open_logs_btn, "open_logs")
+
+        def _call_clear_logs():
+            """清理脚本日志：先确认（把体积/数量摆清楚），确认后交给 web_ui 后台删。
+
+            只清脚本自己写的日志（logs 里的对战日志 + 运行日志），不碰炉石自己的
+            Logs 目录——那是「重启炉石」的事。
+            """
+            info = None
+            try:
+                if _LOGS is not None:
+                    info = _LOGS()
+            except Exception:
+                info = None
+            if not (info or {}).get("files"):
+                push("[SYS] 已无可清理的脚本日志。")
+                _raise_hearthstone()
+                return
+            if not _confirm_clear_logs(root, info):
+                push("[SYS] 已取消清理脚本日志。")
+                _raise_hearthstone()
+                return
+            try:
+                if _ON_CLEAR_LOGS is not None:
+                    _ON_CLEAR_LOGS()
+            except Exception as exc:
+                push(f"[SYS] 清理脚本日志失败：{exc}")
+                return
+            finally:
+                _raise_hearthstone()
+
+        clear_logs_btn = _make_btn(btn_frame, "清理日志", WARN,
+                                   _call_clear_logs)
+        _place(clear_logs_btn, "clear_logs")
+
         def _call_restart():
             """重启炉石：先弹确认，确认后交给 web_ui 后台跑（不阻塞浮窗）。
 
@@ -1260,7 +1416,7 @@ def _run() -> None:
             finally:
                 _raise_hearthstone()
 
-        restart_btn = _make_btn(btn_frame, "♻  重启炉石", WARN, _call_restart)
+        restart_btn = _make_btn(btn_frame, "重启炉石", WARN, _call_restart)
         _place(restart_btn, "restart")
 
         # 这一代窗口的编号：延迟收尾只能关掉自己（见 _stop_generation）。
@@ -1283,7 +1439,7 @@ def _run() -> None:
             # 留一拍，让上面那行“已退出浮窗”先画出来再关窗；而且只关自己这一代。
             root.after(150, lambda: _stop_generation(generation))
 
-        exit_overlay_btn = _make_btn(btn_frame, "✖  退出浮窗", NEUTRAL,
+        exit_overlay_btn = _make_btn(btn_frame, "退出浮窗", NEUTRAL,
                                      _call_exit_overlay)
         _place(exit_overlay_btn, "exit_overlay")
 
@@ -1297,7 +1453,7 @@ def _run() -> None:
             # 没有绑定退出回调时，关闭浮窗本身（兜底）。
             stop()
 
-        exit_btn = _make_btn(btn_frame, "🚪  退出脚本", DANGER, _call_exit)
+        exit_btn = _make_btn(btn_frame, "退出脚本", DANGER, _call_exit)
         _place(exit_btn, "exit")
 
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
@@ -1377,16 +1533,16 @@ def _run() -> None:
                 shown[0] = fp
             if _IS_RUNNING is not None:
                 if _IS_RUNNING():
-                    _set(halt_btn, text="⏹  中止", bg=DANGER,
+                    _set(halt_btn, text="中止", bg=DANGER,
                          activebackground=DANGER)
                 else:
-                    _set(halt_btn, text="▶  恢复", bg=OK, activebackground=OK)
+                    _set(halt_btn, text="恢复", bg=OK, activebackground=OK)
             if _IS_IN_GAME is not None and _IS_IN_GAME():
-                _set(start_btn, state="disabled", text="⏳  对局进行中",
+                _set(start_btn, state="disabled", text="对局进行中",
                      bg=DISABLED, activebackground=DISABLED,
                      disabledforeground=DIM, cursor="arrow")
             else:
-                _set(start_btn, state="normal", text="▶  开始对战",
+                _set(start_btn, state="normal", text="开始对战",
                      bg=ACCENT, activebackground=ACCENT,
                      disabledforeground=DIM, cursor="hand2")
             if _SCORE is not None:
@@ -1405,10 +1561,10 @@ def _run() -> None:
                     rate_txt = f"{rate:.1f}%" if games else "--"
                     concede_txt = f" · 认输 {concedes}" if concedes else ""
                     _set(score_label,
-                         text=f"📊 战绩： 胜 {wins} · 负 {losses} · "
+                         text=f"战绩： 胜 {wins} · 负 {losses} · "
                               f"胜率 {rate_txt}{concede_txt}", fg=TEXT)
                 else:
-                    _set(score_label, text="📊 战绩： —", fg=DIM)
+                    _set(score_label, text="战绩： —", fg=DIM)
             if _HUMAN_LIKE is not None:
                 try:
                     hl_info = _HUMAN_LIKE()
@@ -1449,6 +1605,15 @@ def _run() -> None:
                 _set_detail(ac_detail, ac_used, row["value"], row["detail"],
                             fg=TEXT if hidden else DIM)
                 _refresh_eye()
+            if _LOGS is not None:
+                try:
+                    lg_info = _LOGS()
+                except Exception:
+                    lg_info = None
+                row = logs_row(lg_info)
+                _set(lg_marker, fg=row["marker"])
+                _set(lg_value, text=row["value"], fg=row["value_color"])
+                _set_detail(lg_detail, lg_used, row["value"], row["detail"])
             with _LOCK:
                 delay = dict(_DELAY) if _DELAY is not None else None
             if delay is not None:
@@ -1467,7 +1632,7 @@ def _run() -> None:
                         delay_bar[0] = None
                 else:
                     _set(delay_label,
-                         text=f"⏳ {delay['desc']}（{remaining:.0f}/{total:.0f}s）",
+                         text=f"{delay['desc']}（{remaining:.0f}/{total:.0f}s）",
                          fg=TEXT)
                     # 进度条每 350ms 重画一次会明显闪烁：进度变化小于 2% 时不重画。
                     if delay_bar[0] is None or abs(frac - delay_bar[0]) >= 0.02:

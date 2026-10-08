@@ -237,9 +237,10 @@ class ButtonLayoutTests(unittest.TestCase):
         for key, (row, column) in log_overlay.BTN_LAYOUT.items():
             rows.setdefault(row, []).append(column)
 
-        # 5 行：开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
-        # 退出脚本（横跨整行）。
-        self.assertEqual({0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0]}, rows)
+        # 6 行：开始/中止、本局结束后停止、校准/保存日志、打开日志/清理日志、
+        # 重启炉石/退出浮窗、退出脚本（横跨整行）。
+        self.assertEqual({0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0, 1],
+                          5: [0]}, rows)
         for columns in rows.values():
             self.assertLessEqual(len(columns), 2)
 
@@ -247,21 +248,24 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertEqual(log_overlay.BTN_LAYOUT["save"], (2, 1))
         self.assertEqual(log_overlay.BTN_LAYOUT["calibrate"], (2, 0))
         self.assertNotIn("calibrate", log_overlay.BTN_SPAN)
-        self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (3, 0))
-        self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (3, 1))
+        # 新增的日志行插在「校准/保存日志」与「重启炉石/退出浮窗」之间。
+        self.assertEqual(log_overlay.BTN_LAYOUT["open_logs"], (3, 0))
+        self.assertEqual(log_overlay.BTN_LAYOUT["clear_logs"], (3, 1))
+        self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (4, 0))
+        self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (4, 1))
         self.assertNotIn("restart", log_overlay.BTN_SPAN)
         self.assertNotIn("exit_overlay", log_overlay.BTN_SPAN)
         slots = list(log_overlay.BTN_LAYOUT.values())
         self.assertEqual(len(slots), len(set(slots)))
 
     def test_destructive_buttons_guard_themselves(self):
-        """退出浮窗 ≠ 退出脚本；重启炉石必须先确认，取消时不调回调。"""
+        """退出浮窗 ≠ 退出脚本；重启炉石/清理日志都必须先确认。"""
         self.assertNotEqual(log_overlay.BTN_LAYOUT["exit_overlay"],
                             log_overlay.BTN_LAYOUT["exit"])
         source = inspect.getsource(log_overlay._run)
-        self.assertIn('_make_btn(btn_frame, "✖  退出浮窗", NEUTRAL', source)
-        self.assertIn('_make_btn(btn_frame, "🚪  退出脚本", DANGER', source)
-        self.assertIn('_make_btn(btn_frame, "♻  重启炉石", WARN', source)
+        self.assertIn('_make_btn(btn_frame, "退出浮窗", NEUTRAL', source)
+        self.assertIn('_make_btn(btn_frame, "退出脚本", DANGER', source)
+        self.assertIn('_make_btn(btn_frame, "重启炉石", WARN', source)
 
         body = source.split("def _call_exit_overlay", 1)[1]
         body = body.split("exit_overlay_btn = ", 1)[0]
@@ -275,10 +279,29 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertIn("_ON_RESTART", restart)
         self.assertIn("已取消重启炉石", restart)
 
-        confirm = inspect.getsource(log_overlay._confirm_restart)
+        # 确认小窗的实现（浮窗置顶，不用 messagebox），两个危险操作共用。
+        confirm = inspect.getsource(log_overlay._confirm_dialog)
         self.assertIn('attributes("-topmost", True)', confirm)
-        self.assertIn("Hearthstone.exe", confirm)
-        self.assertIn("Log.config", confirm)
+        self.assertIn("Hearthstone.exe", log_overlay.CONFIRM_RESTART_DETAIL)
+        self.assertIn("Log.config", log_overlay.CONFIRM_RESTART_DETAIL)
+        self.assertEqual("⚠  中止炉石并清空日志？",
+                         log_overlay.CONFIRM_RESTART_TITLE)
+
+        clear = source.split("def _call_clear_logs", 1)[1]
+        clear = clear.split("clear_logs_btn = ", 1)[0]
+        self.assertIn("_confirm_clear_logs(root, info)", clear)
+        self.assertIn("_ON_CLEAR_LOGS", clear)
+        self.assertIn("已取消清理脚本日志", clear)
+
+    def test_button_labels_have_no_tofu_glyphs(self):
+        """▶/⏹/⏸/💾/♻/🚪/✖/📊 这些字形在雅黑里没有，实机是方框（用户截图）。
+
+        「排版美观」的一部分：按钮/标题/延时行一律纯文字，别再放这些图标。
+        """
+        source = inspect.getsource(log_overlay._run)
+        for glyph in ("▶", "⏹", "⏸", "💾", "♻", "🚪", "✖", "📊", "⏳", "▁",
+                      "▣", "✓", "✗"):
+            self.assertNotIn(glyph, source)
 
     def test_spanning_rows(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
@@ -301,8 +324,9 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
         self.assertLessEqual(log_overlay.WINDOW_WIDTH,
                              int(292 * 0.9) + 1)
-        # 654 - 17：删掉「炉石传说 · 自动对战」副标题那一行。
-        self.assertEqual(637, log_overlay.WINDOW_HEIGHT)
+        # 654 - 17（删副标题）→ 637；再 +56 给「日志」状态行与「打开日志/
+        # 清理日志」按钮行，日志正文仍是 9 行左右。
+        self.assertEqual(693, log_overlay.WINDOW_HEIGHT)
 
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)
