@@ -235,6 +235,88 @@ class OverlayPageTests(unittest.TestCase):
         self.assertIn("未就绪", self.html)
 
 
+class OverlayVerificationTests(unittest.TestCase):
+    """浮窗没真的起来时必须如实报错：以前 start() 静默失败，网页却报"已就绪"。"""
+
+    def setUp(self):
+        self._saved = (web_ui.CTRL.prepared, web_ui.CTRL.automation_thread,
+                       web_ui.CTRL.starting)
+
+    def tearDown(self):
+        (web_ui.CTRL.prepared, web_ui.CTRL.automation_thread,
+         web_ui.CTRL.starting) = self._saved
+
+    def test_pending_status_tells_the_user_to_wait(self):
+        """上一轮还在收尾：文案说清楚"稍等"，不是点了没反应。"""
+        logged = []
+        overlay = types.SimpleNamespace(is_running=lambda: False,
+                                        start=lambda **kwargs: "pending")
+
+        with (
+            patch.object(web_ui, "log_overlay", overlay),
+            patch.object(web_ui, "_verify_overlay_opened_async"),
+            patch.object(web_ui, "_bring_hearthstone_foreground"),
+            patch.object(web_ui.threading, "Thread", _SyncThread),
+            patch.object(web_ui, "_log",
+                         side_effect=lambda level, msg: logged.append((level, msg))),
+        ):
+            web_ui.CTRL.automation_thread = None
+            web_ui.CTRL.starting = False
+            result = web_ui.api_prepare({})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["prepared"])
+        self.assertIn("重新打开", result["message"])
+        self.assertTrue(any("重新打开" in msg for _level, msg in logged))
+
+    def test_bind_overlay_reports_the_status_to_the_caller(self):
+        overlay = types.SimpleNamespace(is_running=lambda: False,
+                                        start=lambda **kwargs: "started")
+
+        with (
+            patch.object(web_ui, "log_overlay", overlay),
+            patch.object(web_ui, "_verify_overlay_opened_async") as verify,
+        ):
+            status = web_ui._bind_overlay()
+
+        self.assertEqual("started", status)
+        verify.assert_called_once_with("started")
+
+    def test_overlay_that_never_shows_up_resets_prepared_and_warns(self):
+        logged = []
+        overlay = types.SimpleNamespace(is_running=lambda: False)
+
+        with (
+            patch.object(web_ui, "log_overlay", overlay),
+            patch.object(web_ui, "_log",
+                         side_effect=lambda level, msg: logged.append((level, msg))),
+        ):
+            web_ui.CTRL.prepared = True
+            shown = web_ui._verify_overlay_opened("started", timeout=0.0)
+
+        self.assertFalse(shown)
+        self.assertFalse(web_ui.CTRL.prepared)
+        self.assertTrue(any(level == "WARN" and "没能打开" in msg
+                            for level, msg in logged), logged)
+
+    def test_overlay_that_really_runs_keeps_prepared(self):
+        overlay = types.SimpleNamespace(is_running=lambda: True)
+
+        with patch.object(web_ui, "log_overlay", overlay):
+            web_ui.CTRL.prepared = True
+            shown = web_ui._verify_overlay_opened("started", timeout=0.0)
+
+        self.assertTrue(shown)
+        self.assertTrue(web_ui.CTRL.prepared)
+
+    def test_verification_skips_unknown_statuses(self):
+        """测试里的假浮窗 start() 返回 None：不参与校验（也不起线程）。"""
+        with patch.object(web_ui.threading, "Thread") as thread_cls:
+            web_ui._verify_overlay_opened_async(None)
+
+        thread_cls.assert_not_called()
+
+
 class StartAfterPrepareTests(unittest.TestCase):
     """就绪之后再点「开始对战」仍然走原本的启动逻辑（不清零开关不变）。"""
 

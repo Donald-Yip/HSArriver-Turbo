@@ -36,6 +36,25 @@ _REFRESH_MS = 350
 _THREAD = None
 # 等上一轮结束时最多等多久（秒）。窗口销毁后线程只剩回收动作，正常远小于这个值。
 _SHUTDOWN_TIMEOUT = 3.0
+# 上一轮收尾超时后，排队等它结束的兜底上限（秒）。超过就如实报错，不再重试。
+OPEN_WAIT_SECONDS = 10.0
+# start() 的三种结果：已经开着 / 新窗口线程已起 / 排队等上一轮收尾后再开。
+OPEN_ALREADY = "already"
+OPEN_STARTED = "started"
+OPEN_PENDING = "pending"
+# 「退出浮窗」按下后**立刻**置位：网页在这之后的任何时刻点「开始运行」都要
+# 重新把浮窗开出来，而不是被当成"浮窗还开着"（见 mark_closing 的注释）。
+_CLOSING = threading.Event()
+# start() 的检查与建线程必须成一个原子动作：网页的 /api/prepare 是并发处理的，
+# 双击按钮时两个请求同时进来不能各建一个 Tk 解释器。
+_START_LOCK = threading.Lock()
+# 已经有一轮"等上一轮收尾再开窗"在排队，避免重复排队。
+_OPEN_PENDING = threading.Event()
+# 浮窗内部异常的日志回调（web_ui 注册后，"日志浮窗禁用: XXX" 会进网页日志）。
+_REPORTER = None
+# 每一代窗口一个编号：旧窗口延迟执行的收尾（root.after(150, stop)）只能关掉
+# 它自己那一代，绝不能把刚被网页重开出来的新窗口一起关掉。
+_GENERATION = [0]
 
 # ---- flat dark palette ---------------------------------------------------
 BG = "#171b24"
@@ -104,6 +123,31 @@ MARKER_UNKNOWN = DIM
 
 def _turn_start(line: str) -> bool:
     return ("回合" in line and "延时" in line) or ("轮到己方" in line)
+
+
+# ---- 内部异常上报 ------------------------------------------------------
+# 浮窗自己开不出来时（tkinter 不可用、Tk 初始化异常……）必须留下痕迹：
+# 以前只 print 到控制台，用户看不到就以为"点了没反应"。web_ui 会用
+# set_logger() 把这里的文字接进网页日志（ui_log_last.txt）。
+def set_logger(callback) -> None:
+    """注册浮窗内部异常的日志回调（传 None 可取消）。"""
+    global _REPORTER
+    _REPORTER = callback
+
+
+def _report(text: str) -> None:
+    """浮窗内部异常：打控制台 + 交给上层日志（没注册回调时只打控制台）。"""
+    try:
+        print(f"[overlay] {text}")
+    except Exception:
+        pass
+    callback = _REPORTER
+    if callback is None:
+        return
+    try:
+        callback(str(text))
+    except Exception:
+        pass
 
 
 # 需要“醒目”显示在浮窗里的日志行：存活检测/昵称不匹配等必须马上被看见的告警。
@@ -472,6 +516,64 @@ def _join_previous_thread(timeout: float = _SHUTDOWN_TIMEOUT) -> None:
         _THREAD = None
 
 
+def _stop_generation(generation) -> None:
+    """旧窗口的延迟收尾：只有"这一代"窗口还在时才真的收尾。
+
+    「退出浮窗」点下后会 root.after(150, stop)：如果这期间网页已经把浮窗重新
+    开出来了（新的 generation），这个迟到 150ms 的 stop 绝不能把新窗口关掉。
+    """
+    if generation != _GENERATION[0]:
+        return
+    stop()
+
+
+def mark_closing() -> None:
+    """「退出浮窗」按钮按下时立刻置位，不等 root.after(150, stop)。
+
+    那 150ms 是留给"已退出浮窗"这行日志先画出来的，但**状态**必须立刻变：
+    否则这段时间里网页点「开始运行（准备）」时 is_running() 还是 True，
+    api_prepare 会当成"浮窗已经开着"而跳过重开 —— 用户反馈的
+    「退出浮窗后再点开始就再也弹不出浮窗」就是这么来的。
+    """
+    _CLOSING.set()
+
+
+def _defer_open(args: dict) -> bool:
+    """上一轮浮窗线程还没收尾：排队等它结束后自动开窗（返回是否新排队）。
+
+    start() 的老实现遇到这种情况是**静默 return**：网页以为浮窗开了，其实
+    什么都没发生，而且之后每一次点击都会继续被吞掉。现在改成排队 + 超时
+    如实报错，至少用户知道发生了什么、该重试。
+    """
+    if _OPEN_PENDING.is_set():
+        return False
+    _OPEN_PENDING.set()
+    try:
+        threading.Thread(target=_deferred_open_worker, args=(dict(args),),
+                         name="hs-overlay-open", daemon=True).start()
+    except Exception as exc:
+        _OPEN_PENDING.clear()
+        _report(f"浮窗重开排队失败：{type(exc).__name__}: {exc}")
+        return False
+    return True
+
+
+def _deferred_open_worker(args: dict, timeout: float = OPEN_WAIT_SECONDS,
+                          interval: float = 0.1) -> None:
+    """等上一轮浮窗线程收尾，再把它重新开出来。"""
+    try:
+        deadline = time.time() + float(timeout)
+        while _STARTED[0] and time.time() < deadline:
+            time.sleep(interval)
+        if _STARTED[0]:
+            _report(f"上一轮浮窗线程超过 {float(timeout):.0f}s 还没结束，"
+                    "这次没能把浮窗开回来；请稍后再点「🪟 日志浮窗」重试。")
+            return
+        start(**args)
+    finally:
+        _OPEN_PENDING.clear()
+
+
 def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
           is_in_game=None, score_callback=None, on_exit=None,
@@ -479,48 +581,80 @@ def start(on_start=None, on_halt=None, is_running=None,
           liveness_callback=None, account_callback=None,
           account_visible_setting=None, on_toggle_account=None,
           on_calibrate=None, on_calibrate_close=None, on_restart=None,
-          on_exit_overlay=None) -> None:
+          on_exit_overlay=None) -> str:
+    """开（或重开）浮窗，返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING。
+
+    三种结果都要让调用方**知道**：以前 start() 遇到"已经开着"或"上一轮还没
+    收尾"就静默 return，网页却照样报"已就绪"，于是浮窗没出来用户也得不到
+    任何提示（用户反馈："退出浮窗以后，再从 web 点开始就不会弹出浮窗了"）。
+    """
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
     global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
-    if _STARTED[0] and not _STOP.is_set():
-        return                      # 已经开着，且不是在退出中
-    _join_previous_thread()
-    if _STARTED[0]:
-        # 收尾超时：宁可不重复开窗，也不要同时存在两个 Tk 解释器。
-        return
-    _ON_START = on_start
-    _ON_HALT = on_halt
-    _IS_RUNNING = is_running
-    _ON_STOP_AFTER = on_stop_after
-    _IS_STOP_AFTER = is_stop_after
-    _IS_IN_GAME = is_in_game
-    _SCORE = score_callback
-    _ON_EXIT = on_exit
-    _HUMAN_LIKE = human_like_callback
-    _CONCEDE_DETECT = concede_callback
-    _LIVENESS = liveness_callback
-    _ACCOUNT = account_callback
-    _ON_TOGGLE_ACCOUNT = on_toggle_account
-    _ON_CALIBRATE = on_calibrate
-    _ON_CALIBRATE_CLOSE = on_calibrate_close
-    _ON_RESTART = on_restart
-    _ON_EXIT_OVERLAY = on_exit_overlay
-    if account_visible_setting is not None:
-        _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
-    _STOP.clear()
-    _STARTED[0] = True
-    # 线程入口是 _run_overlay_thread（它包住 _run，好在帧释放后回收 Tk 对象）；
-    # 单独提出来是为了让测试仍能 patch _run 而不真的开窗。
-    thread = threading.Thread(target=_run_overlay_thread,
-                              name="hs-log-overlay", daemon=True)
-    _THREAD = thread
-    thread.start()
+    # 排队重开时要原样复用这一轮的绑定（start() 会重写全部回调，不能只重开窗口）。
+    args = {
+        "on_start": on_start, "on_halt": on_halt, "is_running": is_running,
+        "on_stop_after": on_stop_after, "is_stop_after": is_stop_after,
+        "is_in_game": is_in_game, "score_callback": score_callback,
+        "on_exit": on_exit, "human_like_callback": human_like_callback,
+        "concede_callback": concede_callback,
+        "liveness_callback": liveness_callback,
+        "account_callback": account_callback,
+        "account_visible_setting": account_visible_setting,
+        "on_toggle_account": on_toggle_account,
+        "on_calibrate": on_calibrate,
+        "on_calibrate_close": on_calibrate_close,
+        "on_restart": on_restart, "on_exit_overlay": on_exit_overlay,
+    }
+    with _START_LOCK:
+        if _STARTED[0] and not _STOP.is_set() and not _CLOSING.is_set():
+            return OPEN_ALREADY         # 真的开着：不重开
+        if _STARTED[0] and not _STOP.is_set():
+            # 「退出浮窗」按下了，但它的 root.after(150, stop) 还没到：
+            # 立刻收尾再来，别把这次请求当成"浮窗还开着"吞掉。
+            stop()
+        _join_previous_thread()
+        if _STARTED[0]:
+            # 收尾超时：宁可排队等，也不要同时存在两个 Tk 解释器，更不能静默丢弃。
+            _defer_open(args)
+            return OPEN_PENDING
+        _CLOSING.clear()
+        _ON_START = on_start
+        _ON_HALT = on_halt
+        _IS_RUNNING = is_running
+        _ON_STOP_AFTER = on_stop_after
+        _IS_STOP_AFTER = is_stop_after
+        _IS_IN_GAME = is_in_game
+        _SCORE = score_callback
+        _ON_EXIT = on_exit
+        _HUMAN_LIKE = human_like_callback
+        _CONCEDE_DETECT = concede_callback
+        _LIVENESS = liveness_callback
+        _ACCOUNT = account_callback
+        _ON_TOGGLE_ACCOUNT = on_toggle_account
+        _ON_CALIBRATE = on_calibrate
+        _ON_CALIBRATE_CLOSE = on_calibrate_close
+        _ON_RESTART = on_restart
+        _ON_EXIT_OVERLAY = on_exit_overlay
+        if account_visible_setting is not None:
+            _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
+        _STOP.clear()
+        _STARTED[0] = True
+        # 新的一代窗口：旧窗口里排队/延迟的动作（见 _stop_generation）从此失效。
+        _GENERATION[0] += 1
+        # 线程入口是 _run_overlay_thread（它包住 _run，好在帧释放后回收 Tk 对象）；
+        # 单独提出来是为了让测试仍能 patch _run 而不真的开窗。
+        thread = threading.Thread(target=_run_overlay_thread,
+                                  name="hs-log-overlay", daemon=True)
+        _THREAD = thread
+        thread.start()
+    return OPEN_STARTED
 
 
 def stop() -> None:
     """Signal the overlay thread to close its window."""
+    _CLOSING.set()
     _STOP.set()
     # 屏幕上还叠着「校准」区域框时一并收掉，别让框留在桌面上。
     try:
@@ -539,11 +673,14 @@ def stop() -> None:
 def is_running() -> bool:
     """浮窗是否真的在显示。
 
-    「已经在退出中」（_STOP 已置位、窗口还没销毁）算**没在跑**：这样网页点一下
-    「关闭浮窗」再点「开启浮窗」能立刻重开，而不是被当成“还开着”而无反应。
-    重开时 start() 会先等上一轮线程收尾，不会出现两个 Tk 解释器交叠。
+    「已经在退出中」（_STOP/_CLOSING 已置位、窗口还没销毁）算**没在跑**：
+    这样网页点「开始运行」能立刻重开，而不是被当成"还开着"而无反应。
+    重开时 start() 会先等上一轮线程收尾（必要时排队），不会出现两个 Tk
+    解释器交叠，也不会静默失败。
     """
-    return bool(_STARTED[0]) and not _STOP.is_set()
+    return (bool(_STARTED[0]) and not _STOP.is_set()
+            and not _CLOSING.is_set())
+
 
 
 def _raise_hearthstone() -> None:
@@ -707,7 +844,7 @@ def _run() -> None:
     try:
         import tkinter as tk
     except Exception as exc:
-        print(f"[overlay] tkinter 不可用: {type(exc).__name__}: {exc}")
+        _report(f"tkinter 不可用: {type(exc).__name__}: {exc}")
         _STARTED[0] = False
         return
 
@@ -973,6 +1110,9 @@ def _run() -> None:
         restart_btn = _make_btn(btn_frame, "♻  重启炉石", WARN, _call_restart)
         _place(restart_btn, "restart")
 
+        # 这一代窗口的编号：延迟收尾只能关掉自己（见 _stop_generation）。
+        generation = _GENERATION[0]
+
         def _call_exit_overlay():
             """退出浮窗：只关这个窗口，脚本/自动化/日志照常跑。
 
@@ -984,8 +1124,11 @@ def _run() -> None:
                     _ON_EXIT_OVERLAY()
             except Exception:
                 pass
-            # 留一拍，让上面那行“已退出浮窗”先画出来再关窗。
-            root.after(150, stop)
+            # 先声明"正在收尾"（is_running() 立刻变 False）：这 150ms 里网页
+            # 点「开始运行」就不会被当成"浮窗还开着"而静默跳过重开。
+            mark_closing()
+            # 留一拍，让上面那行“已退出浮窗”先画出来再关窗；而且只关自己这一代。
+            root.after(150, lambda: _stop_generation(generation))
 
         exit_overlay_btn = _make_btn(btn_frame, "✖  退出浮窗", NEUTRAL,
                                      _call_exit_overlay)
@@ -1198,7 +1341,7 @@ def _run() -> None:
         _update()
         root.mainloop()
     except Exception as exc:
-        print(f"[overlay] 日志浮窗禁用: {type(exc).__name__}: {exc}")
+        _report(f"日志浮窗禁用（窗口没能打开）: {type(exc).__name__}: {exc}")
         try:
             root.destroy()
         except Exception:
@@ -1225,3 +1368,5 @@ def _run_overlay_thread() -> None:
         except Exception:
             pass
         _STARTED[0] = False
+        # 窗口没了就不再是"收尾中"：否则下次 start() 会以为要等旧线程而排队。
+        _CLOSING.clear()

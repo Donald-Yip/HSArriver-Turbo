@@ -22,6 +22,13 @@ try:
 except Exception as exc:
     print(f"[overlay] 导入日志浮窗失败(已禁用): {type(exc).__name__}: {exc}")
     log_overlay = None
+if log_overlay is not None:
+    # 浮窗内部异常（tkinter 不可用、Tk 初始化失败……）也写进网页日志：
+    # 否则"点了没反应"，用户和反馈都看不到原因。
+    try:
+        log_overlay.set_logger(lambda text: _log("WARN", text))
+    except Exception:
+        pass
 import json
 import os
 import subprocess
@@ -900,18 +907,38 @@ def api_prepare(body=None):
 
     真正的对战由「开始对战」按钮（本接口返回 prepared=True 后按钮会变成它）
     或浮窗的 ▶ 开始对战 触发，避免点一下就开始打牌。
+
+    浮窗"正在收尾"时 start() 会排队等上一轮结束再自动开出来（返回 pending）：
+    这时文案说清楚"稍等 1–2 秒"，不再是"点了没反应"（用户反馈过：点「退出浮窗」
+    后从网页点开始，浮窗再也弹不出来）。
     """
     with CTRL.lock:
         if CTRL.automation_thread is not None or CTRL.starting:
             return {"ok": False, "error": "自动化已经在运行中。"}
         CTRL.prepared = True
+    status = None
     if log_overlay is not None and not log_overlay.is_running():
         try:
-            _bind_overlay()
+            status = _bind_overlay()
         except Exception as exc:
             _log("WARN", f"开启日志浮窗失败：{exc}")
     threading.Thread(target=_bring_hearthstone_foreground,
                      name="hs-prepare", daemon=True).start()
+    # 浮窗可能刚被判定"没起来"（校验线程同步返回时）：按真实状态回话，别谎报就绪。
+    with CTRL.lock:
+        prepared = bool(CTRL.prepared)
+    if not prepared:
+        _log("WARN", "浮窗还没能打开：请再点一次「🪟 日志浮窗」或"
+                     "「🪄 开始运行（准备）」重试。")
+        return {"ok": True, "prepared": False,
+                "message": "浮窗还没能打开：请再点一次「🪟 日志浮窗」或"
+                           "「🪄 开始运行（准备）」重试。"}
+    if status == "pending":
+        _log("SYS", "日志浮窗正在重新打开（上一轮还在收尾），稍等 1–2 秒；"
+                    "同时正在把炉石切到前台。")
+        return {"ok": True, "prepared": True,
+                "message": "浮窗正在重新打开（上一轮在收尾，稍等 1–2 秒就会出现），"
+                           "同时正在把炉石切到前台；再点一次「开始对战」才会真正开打。"}
     _log("SYS", "已就绪：日志浮窗已开启、正在把炉石切到前台；未开始对战，"
                 "确认无误后再点「开始对战」。")
     return {"ok": True, "prepared": True,
@@ -1338,10 +1365,12 @@ def _bind_overlay():
     """绑定日志浮窗回调（开始/中止/本局结束后停止 + 状态查询）。
 
     供自动化线程第一次启动与网页“开启浮窗”共用，避免重复。
+    返回 log_overlay.start() 的结果（already / started / pending），调用方
+    据此判断"浮窗到底开没开"——以前 start() 静默失败，网页却照样报"已就绪"。
     """
     if log_overlay is None:
-        return
-    log_overlay.start(
+        return None
+    status = log_overlay.start(
         on_start=lambda: api_start({}),
         on_halt=_overlay_halt,
         is_running=_overlay_is_running,
@@ -1365,6 +1394,48 @@ def _bind_overlay():
         on_exit_overlay=_overlay_exit_overlay,
         on_exit=_overlay_exit,
     )
+    _verify_overlay_opened_async(status)
+    return status
+
+
+# 浮窗"说过已开"之后，最多等这么久确认它真的在跑（秒）。
+OVERLAY_VERIFY_TIMEOUT = 3.0
+
+
+def _verify_overlay_opened_async(status) -> None:
+    """确认浮窗真的起来了：没起来就写 WARN 并退回"未就绪"（不谎报）。
+
+    只对 log_overlay 明确的返回值（started / pending）做校验：测试里的假
+    浮窗对象返回 None，不参与校验。
+    """
+    if log_overlay is None or status not in ("started", "pending"):
+        return
+    threading.Thread(target=_verify_overlay_opened, args=(status,),
+                     name="hs-overlay-verify", daemon=True).start()
+
+
+def _verify_overlay_opened(status, timeout: float = OVERLAY_VERIFY_TIMEOUT) -> bool:
+    """等浮窗真正在显示；超时就如实报错并把页面退回「开始运行（准备）」。
+
+    至少检查一次（timeout=0 也要先看一眼当前状态）。
+    """
+    deadline = time.time() + float(timeout)
+    while True:
+        try:
+            if log_overlay is not None and log_overlay.is_running():
+                return True
+        except Exception:
+            break
+        if time.time() >= deadline:
+            break
+        time.sleep(0.1)
+    with CTRL.lock:
+        CTRL.prepared = False
+    _log("WARN", "日志浮窗没能打开（上一轮浮窗可能还在收尾）："
+                 f"请再点一次「🪟 日志浮窗」或「🪄 开始运行（准备）」重试"
+                 f"（等了 {float(timeout):.0f} 秒还没看到浮窗）。")
+    return False
+
 
 
 def _overlay_toggle_calibrate():
@@ -1549,9 +1620,12 @@ def api_toggle_overlay(body=None):
             CTRL.prepared = False
         return {"ok": True, "enabled": False,
                 "message": "日志浮窗已关闭（已回到未就绪；点「开始运行」重新准备）"}
-    _bind_overlay()
+    status = _bind_overlay()
     with CTRL.lock:
         CTRL.prepared = True
+    if status == "pending":
+        return {"ok": True, "enabled": True,
+                "message": "浮窗正在重新打开（上一轮在收尾，稍等 1–2 秒就会出现）"}
     return {"ok": True, "enabled": True,
             "message": "日志浮窗已开启（已就绪；点「开始对战」或浮窗的 ▶ 开始）"}
 
