@@ -43,7 +43,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+# 脚本自己的日志文件：统计体积 / 打开位置 / 一键清理（纯函数在 script_logs.py）。
+import script_logs
+
 ROOT = Path(__file__).resolve().parent
+# 对战日志目录与运行日志路径（日志浮窗的「日志」行、「打开日志/清理日志」都用它）。
+LOG_DIR = script_logs.LOG_DIR
+RUNTIME_LOG = script_logs.RUNTIME_LOG
 WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
@@ -102,6 +108,49 @@ _log_seq = 0
 _log_buffer = deque(maxlen=LOG_BUFFER_SIZE)
 _log_lock = threading.Lock()
 
+# 运行日志的自动裁剪：文件超过 LOG_TRIM_BYTES 就只留最后 LOG_TRIM_KEEP_LINES 行。
+# 老实现是"每次写日志都判断、超了就整文件读一遍再重写"——文件一旦涨到几十 MB，
+# 每次 _log 都要读 50MB+，而且多线程并发重写还会互相打断，结果是**只涨不裁**
+# （本机实测：ui_log_last.txt 涨到 56MB）。现在：热路径只比一次时间戳，最多
+# 每 LOG_TRIM_MIN_INTERVAL 秒才真裁一次，并且只读文件尾部 + 原子替换。
+LOG_TRIM_BYTES = 2 * 1024 * 1024
+LOG_TRIM_KEEP_LINES = 800
+LOG_TRIM_MIN_INTERVAL = 60.0
+LOG_TRIM_KEEP_BYTES = 512 * 1024        # 只读尾部这么多字节，足够 800 行
+_log_trim_lock = threading.Lock()
+_log_trim_at = [0.0]
+
+
+def _trim_runtime_log(path, now: float) -> bool:
+    """把运行日志裁到最后 LOG_TRIM_KEEP_LINES 行（原子替换，返回是否裁了）。
+
+    调用前必须确认已经过了节流间隔；失败一律静默（日志写不进去不该影响主流程）。
+    """
+    try:
+        if path.stat().st_size <= LOG_TRIM_BYTES:
+            return False
+    except OSError:
+        return False
+    with _log_trim_lock:
+        try:
+            size = path.stat().st_size
+            if size <= LOG_TRIM_BYTES:
+                return False
+            with open(path, "rb") as f:
+                if size > LOG_TRIM_KEEP_BYTES:
+                    f.seek(-LOG_TRIM_KEEP_BYTES, os.SEEK_END)
+                tail = f.read()
+            lines = tail.decode("utf-8", errors="replace").splitlines(
+                keepends=True)[-LOG_TRIM_KEEP_LINES:]
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("".join(lines))
+            os.replace(tmp, path)          # 原子替换：读者不会看到半个文件
+            _log_trim_at[0] = now
+            return True
+        except OSError:
+            return False
+
 
 def _log(level: str, msg: str):
     global _log_seq
@@ -122,13 +171,13 @@ def _log(level: str, msg: str):
             pass
     # 同时落盘：程序关闭/异常退出后仍可离线查看（诊断不依赖人工复制）。
     try:
-        path = ROOT / "ui_log_last.txt"
+        path = RUNTIME_LOG
         with open(path, "a", encoding="utf-8") as f:
             f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
                     f"[{level}] {msg}\n")
-        if path.stat().st_size > 2 * 1024 * 1024:  # 只保留最近日志
-            lines = path.read_text(encoding="utf-8").splitlines()[-800:]
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        now = time.time()
+        if now - _log_trim_at[0] >= LOG_TRIM_MIN_INTERVAL:
+            _trim_runtime_log(path, now)
     except Exception:
         pass
 
@@ -139,6 +188,8 @@ def _overlay_key(line: str) -> bool:
             "本局结束", "失败", "立即停止",
             # 上分停止条件（每局结束读段位）也要能看到检测结果
             "段位", "上分",
+            # 浮窗上的「打开日志 / 清理日志」结果要能看见
+            "日志",
             # 存活检测 / 昵称校验的告警必须进浮窗（issue 反馈看不到就白做）
             "炉石", "昵称", "用户 ID")
     return ("[OCR]" not in line) and any(k in line for k in keys)
@@ -1390,12 +1441,102 @@ def _bind_overlay():
         on_calibrate_close=_overlay_close_calibrate,
         # 「重启炉石」：中止进程 + 清空日志目录 + 重新拉起（确认弹窗在浮窗里）。
         on_restart=_overlay_restart_hearthstone,
+        # 「日志」状态行 + 「打开日志 / 清理日志」两个按钮。
+        logs_callback=_overlay_logs,
+        on_open_logs=_overlay_open_logs,
+        on_clear_logs=_overlay_clear_logs,
         # 「退出浮窗」：只关窗口，脚本继续跑，网页可以再打开。
         on_exit_overlay=_overlay_exit_overlay,
         on_exit=_overlay_exit,
     )
     _verify_overlay_opened_async(status)
     return status
+
+
+# ---------------------------------------------------------------- 脚本日志（浮窗）
+# 扫描结果缓存：浮窗每 350ms 取一次状态，不能每次都去扫 200 个文件。
+LOG_SCAN_TTL = 5.0
+# 体积阈值：决定浮窗「日志」行圆点/数值的颜色（绿 → 黄 → 红）。
+LOG_WARN_BYTES = 100 * 1024 * 1024
+LOG_DANGER_BYTES = 500 * 1024 * 1024
+# 清理完成后，说明列显示"已清理 X"的时间（秒）。
+LOG_CLEAR_FLASH_SECONDS = 10.0
+
+_log_scan_cache = {"at": 0.0, "data": None}
+_log_clear_state = {"at": 0.0, "bytes": 0}
+
+
+def _script_logs_snapshot(force: bool = False) -> dict:
+    """脚本日志快照（带 TTL 缓存）：体积、个数、上次清理结果、颜色阈值。"""
+    now = time.time()
+    cached = _log_scan_cache["data"]
+    if (force or cached is None
+            or now - _log_scan_cache["at"] >= LOG_SCAN_TTL):
+        data = script_logs.scan(LOG_DIR, RUNTIME_LOG)
+        _log_scan_cache["data"] = data
+        _log_scan_cache["at"] = now
+        cached = data
+    snapshot = dict(cached)
+    snapshot["cleared_at"] = _log_clear_state["at"]
+    snapshot["cleared_bytes"] = _log_clear_state["bytes"]
+    snapshot["warn_bytes"] = LOG_WARN_BYTES
+    snapshot["danger_bytes"] = LOG_DANGER_BYTES
+    return snapshot
+
+
+def _script_logs_invalidate() -> None:
+    """清理后让缓存立刻失效，浮窗下一拍就显示新体积。"""
+    _log_scan_cache["at"] = 0.0
+    _log_scan_cache["data"] = None
+
+
+def _overlay_logs():
+    """浮窗「日志」状态行数据（出异常返回 None，浮窗显示"—"）。"""
+    try:
+        return _script_logs_snapshot()
+    except Exception:
+        return None
+
+
+def _overlay_open_logs():
+    """浮窗「打开日志」：Explorer 打开对战日志目录并选中最新一份。"""
+    result = script_logs.open_location(LOG_DIR)
+    paths = f"对战日志目录 {LOG_DIR}；运行日志 {RUNTIME_LOG}"
+    if result.get("ok"):
+        what = "最新一份对战日志" if result.get("opened") == "file" else "日志目录"
+        _log("SYS", f"已打开{what}：{result.get('target')}（{paths}）")
+    else:
+        _log("WARN", f"打开日志位置失败：{result.get('error')}（{paths}）")
+    return bool(result.get("ok"))
+
+
+def _overlay_clear_logs():
+    """浮窗「清理日志」（已确认）：后台删掉脚本自己写的日志，立刻返回不卡浮窗。"""
+    threading.Thread(target=_clear_script_logs_worker,
+                     name="hs-clear-logs", daemon=True).start()
+    return True
+
+
+def _clear_script_logs_worker() -> None:
+    """删除 logs\\对战日志_*.txt + ui_log_last.txt，并把结果写进日志。"""
+    before = _script_logs_snapshot(force=True)
+    if not before.get("bytes") and not before.get("files"):
+        _log("SYS", "已无可清理的脚本日志。")
+        return
+    result = script_logs.clear(LOG_DIR, RUNTIME_LOG,
+                               logger=lambda text: _log("SYS", text))
+    _script_logs_invalidate()
+    _log_clear_state["at"] = time.time()
+    _log_clear_state["bytes"] = int(result.get("freed_bytes") or 0)
+    _log("SYS", "已清理脚本日志：删除 "
+                f"{result.get('removed', 0)} 个文件，释放 "
+                f"{script_logs.format_size(result.get('freed_bytes'))}"
+                f"（清理前 {script_logs.format_size(before.get('bytes'))}）。")
+    if result.get("failed"):
+        names = "、".join(result["failed"][:5])
+        _log("WARN", f"有 {len(result['failed'])} 个日志文件删不掉"
+                     f"（可能正被其它程序打开）：{names}")
+    _script_logs_invalidate()
 
 
 # 浮窗"说过已开"之后，最多等这么久确认它真的在跑（秒）。
