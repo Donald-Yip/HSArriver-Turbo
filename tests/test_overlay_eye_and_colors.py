@@ -296,8 +296,11 @@ class ButtonLayoutTests(unittest.TestCase):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
         self.assertLessEqual(log_overlay.BTN_PADY, 4)
-        # 宽度 263 → 300：状态行右侧说明列必须放得下（用户反馈显示不全）。
-        self.assertEqual(300, log_overlay.WINDOW_WIDTH)
+        # 用户要求收窄 10%（292 → 263）：说明放不下靠换行，不许再靠加宽窗口
+        # （加宽到 300 被用户打回："整个浮窗又变宽了"）。
+        self.assertEqual(263, log_overlay.WINDOW_WIDTH)
+        self.assertLessEqual(log_overlay.WINDOW_WIDTH,
+                             int(292 * 0.9) + 1)
         # 654 - 17：删掉「炉石传说 · 自动对战」副标题那一行。
         self.assertEqual(637, log_overlay.WINDOW_HEIGHT)
 
@@ -306,15 +309,32 @@ class ButtonLayoutTests(unittest.TestCase):
         for key in log_overlay.BTN_LAYOUT:
             self.assertIn(f'_place({key}_btn, "{key}")', source)
 
+    def test_status_rows_put_name_and_value_next_to_each_other(self):
+        """说明列绝不能右对齐：名称和数值之间不能空出一大块。"""
+        source = inspect.getsource(log_overlay._run)
+        self.assertIn('marker.pack(side="left", padx=_MARKER_PAD', source)
+        self.assertIn('name.pack(side="left"', source)
+        self.assertIn('value.pack(side="left"', source)
+        self.assertIn('detail.pack(side="left", fill="x", expand=True',
+                      source)
+        self.assertNotIn('detail.pack(side="right"', source)
+        self.assertNotIn("justify=\"right\"", source)
+
     def test_status_rows_wrap_instead_of_being_clipped(self):
         """说明列按 wraplength 换行：绝不再被窗口右边缘切掉。"""
-        self.assertGreater(log_overlay._DETAIL_WRAP_PX, 100)
-        self.assertLess(log_overlay._DETAIL_WRAP_PX_EYE,
-                        log_overlay._DETAIL_WRAP_PX)
         self.assertGreaterEqual(log_overlay._DETAIL_MAX_LINES, 2)
         source = inspect.getsource(log_overlay._run)
         self.assertIn("wraplength=wrap_px", source)
-        self.assertIn("_DETAIL_WRAP_PX_EYE", source)
+        self.assertIn("detail_wrap_px(", source)
+
+    def test_detail_wrap_budget_never_goes_below_the_minimum(self):
+        # 263 宽、圆点 25 + 名称 50 + 间距/内边距 22、数值 39 → 127
+        self.assertEqual(127, log_overlay.detail_wrap_px(263, 136))
+        # 空间被挤光时也不能变成 0（否则换行会碎成一列单字）
+        self.assertEqual(log_overlay._DETAIL_MIN_PX,
+                         log_overlay.detail_wrap_px(263, 400))
+        self.assertEqual(log_overlay._DETAIL_MIN_PX,
+                         log_overlay.detail_wrap_px(10, 0))
 
     def test_overlay_can_be_minimized_to_a_title_bar(self):
         """最小化 = 折叠成标题条（浮窗是 TOOLWINDOW，iconify 之后无法还原）。"""
@@ -336,6 +356,14 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertIn("RESTORE_TEXT", source)
         self.assertIn("content.pack_forget()", source)
         self.assertIn("mini_bar.pack(fill=\"x\")", source)
+
+    def test_minimize_button_is_plain_text_not_a_stray_glyph(self):
+        """用户反馈「▁ 最小化」太丑：别再拿块状字形当按钮。"""
+        self.assertEqual("最小化", log_overlay.MINIMIZE_TEXT)
+        self.assertEqual("展开", log_overlay.RESTORE_TEXT)
+        for text in (log_overlay.MINIMIZE_TEXT, log_overlay.RESTORE_TEXT):
+            self.assertNotIn("▁", text)
+            self.assertNotIn("▣", text)
 
     def test_details_are_fitted_by_real_font_width(self):
         """fit_text：放得下原样返回，放不下按字符截断加省略号。"""
