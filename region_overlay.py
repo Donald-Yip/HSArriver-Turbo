@@ -293,12 +293,19 @@ def hint_lines(panel_state: Optional[bool] = None) -> list[dict]:
 
 
 def paint_layer(width: int, height: int, panel_state: Optional[bool] = None,
-                config=None):
-    """画出一整屏的叠加层（RGBA，背景全透明）——纯函数，方便离线检查。"""
+                config=None, skip_labels=(), skip_keys=()):
+    """画出一整屏的叠加层（RGBA，背景全透明）——纯函数，方便离线检查。
+
+    skip_keys  ：这些 key 的区域不在这层里画（校准窗口让当前目标由它自己的
+                 高亮那张单独画，避免同一个框叠两次）。
+    skip_labels：这些 key 的区域只画框、不画标签（标签底紧贴框边时会被看成
+                 第二个框）。
+    """
     from PIL import Image, ImageDraw
 
     canvas = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
-    draw_region_boxes(canvas, config)
+    draw_region_boxes(canvas, config, skip_labels=skip_labels,
+                      skip_keys=skip_keys)
     draw_state_probe_points(canvas)
 
     draw = ImageDraw.Draw(canvas)

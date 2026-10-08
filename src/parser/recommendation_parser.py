@@ -181,11 +181,15 @@ class RecommendationParser:
 
         discover = self._discover.fullmatch(primary)
         if discover:
-            self._reject_target_lines(lines)
+            # 发现/选项菜单有时候自己还要再点一个目标（酒馆老板鲍勃「招募随从」：
+            # 选完这一项游戏会让你点一个对方随从），所以这里不再拒绝目标行。
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_discover_target")
             return self._build(
                 ocr, turn_number, log_revision, ActionKind.CHOOSE_DISCOVER,
                 source=SlotRef("discover_slot", "friendly",
-                               int(discover.group(1) or discover.group(2))))
+                               int(discover.group(1) or discover.group(2))),
+                target=target)
 
         attack = self._minion_attack.fullmatch(primary)
         hero_attack = self._hero_attack.fullmatch(primary)
@@ -329,7 +333,9 @@ class RecommendationParser:
         lines = action_text.splitlines()
         markers = [i for i, line in enumerate(lines) if line == "选择卡牌"]
         choice_name = None
-        if markers and action in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER):
+        if markers and action in (ActionKind.PLAY_CARD,
+                                  ActionKind.USE_HERO_POWER,
+                                  ActionKind.CHOOSE_DISCOVER):
             if len(markers) != 1 or markers[0] + 1 >= len(lines):
                 raise RecommendationParseError("choose_one_name_required")
             choice_name = lines[markers[0] + 1]
@@ -339,7 +345,10 @@ class RecommendationParser:
         return ProposedAction(
             action_id=f"action-{uuid.uuid4()}", frame_id=ocr.frame_id,
             created_at=time.time(), turn_number=turn_number,
-            log_revision=log_revision, raw_instruction=action_text,
+            log_revision=log_revision,
+            # 原始 OCR 文本（不是过滤后的动作行）：卡死排查时最需要看到的就是
+            # 「盒子到底写了什么」，[推荐] 那行日志直接打印这个字段。
+            raw_instruction=str(ocr.normalized_text or ""),
             normalized_instruction=action_text, action=action,
             ocr_confidence=ocr.confidence, semantic_confidence=1.0,
             choice_name=choice_name,

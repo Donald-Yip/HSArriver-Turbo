@@ -77,11 +77,11 @@ body{
 .field-hint{display:block;font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5}
 .field-hint.ok{color:var(--green)}
 .field-hint.bad{color:var(--red)}
-input[type=text],input[type=datetime-local]{width:100%;background:#0f0b07;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px;transition:border-color .15s,box-shadow .15s}
-input:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(232,185,59,.14)}
-input:disabled{opacity:.45;cursor:not-allowed}
+input[type=text],input[type=datetime-local],input[type=number],select{width:100%;background:#0f0b07;border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px;transition:border-color .15s,box-shadow .15s}
+input:focus,select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px rgba(232,185,59,.14)}
+input:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 .input-row{display:flex;gap:8px}
-.input-row input{flex:1}
+.input-row input,.input-row select{flex:1}
 .hint-line{margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6}
 /* ---------- 按钮 ---------- */
 .btn{border-radius:10px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s;color:var(--text);background:transparent}
@@ -305,6 +305,32 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
     </section>
 
     <section class="card wide">
+      <h2 class="card-title">🏁 上分停止条件（可选）</h2>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:150px">
+          <span class="field-label">启用</span>
+          <input id="chkRankStop" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">停止方式</span>
+          <select id="inpRankMode">
+            <option value="legend">上传说就停</option>
+            <option value="legend_number">上到传说某个名次就停</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">传说名次（越大越靠后）</span>
+          <input id="inpRankNumber" type="number" min="1" max="100000" step="1">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveRankStop" class="btn btn-warn" type="button">💾 保存上分停止条件</button>
+      </div>
+      <div class="hint-line">检测点（读到数字＝已上传说）：<b>①</b> 打完一局、结算界面出现「开始」时<b>先读一次</b>——命中就<b>连「开始」都不点</b>，直接停；<b>②</b> 收尾点掉「开始」后再读一次兜底；<b>③</b> 排队点「开始匹配」之前（选择套牌界面）再读一次，命中就不排队。<br>未上传说时该处是空白的。命中条件就让自动化在本局结束后停止，不会中断正在进行的一局。<br>选「上到传说某个名次」时按「<b>该名次或更好</b>」判定（例如填 <b>1000</b>：名次 ≤ 1000 就停）。默认关闭；自动化运行中不可修改。</div>
+      <div class="hint-line" id="rankStopStatus" style="margin-top:4px;color:var(--text)">上分停止：等待自动化运行…</div>
+    </section>
+
+    <section class="card wide">
       <h2 class="card-title">🎭 活人感（可选）</h2>
       <div class="input-row">
         <label class="field" style="flex:none;min-width:90px">
@@ -391,6 +417,11 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
           <span class="field-label">抽牌额外延时（秒/张）</span>
           <input id="inpDrawDelay" type="number" min="0" max="20" step="0.5">
           <span class="field-hint">回合内抽到牌时每张额外等待；回合开始那 1 张常规抽牌不算</span>
+        </label>
+        <label class="field">
+          <span class="field-label">抉择/发现选目标延时（秒）</span>
+          <input id="inpChoiceTargetDelay" type="number" min="0" max="5" step="0.1">
+          <span class="field-hint">选完选项到点它自带的目标之间的等待（鲍勃「招募随从」这类牌）</span>
         </label>
         <label class="field">
           <span class="field-label">OCR 缩放</span>
@@ -484,6 +515,7 @@ var dirtyConcede = false;
 var dirtyDelays = false;
 var dirtyHumanLike = false;
 var dirtyLiveness = false;
+var dirtyRankStop = false;
 
 var PHASE_INFO = {
   idle:     {label:"空闲",            cls:"idle"},
@@ -529,7 +561,14 @@ function renderBanners(s){
   }
   if (s.phase === "finished" && s.last_summary){
     var sm = s.last_summary;
-    html += '<div class="banner banner-ok"><span>✅</span><div>定时任务完成：本局对战结束后已自动停止。<b>共完成 ' + sm.games + ' 场对战，赢 ' + sm.wins + ' 场</b>。可再次开始对战或设置新的定时任务。</div></div>';
+    var sumTxt = "共完成 <b>" + sm.games + " 场对战，赢 " + sm.wins + " 场</b>。";
+    if (sm.stopped_by === "rank_reached"){
+      html += '<div class="banner banner-ok"><span>🏁</span><div>上分目标已达成，自动化已停止（'
+           + esc((s.rank_stop && s.rank_stop.stop_reason) || "已达到设定的段位目标") + '）<br>'
+           + sumTxt + '可修改「上分停止条件」后再次开始对战。</div></div>';
+    } else {
+      html += '<div class="banner banner-ok"><span>✅</span><div>定时任务完成：本局对战结束后已自动停止。' + sumTxt + '可再次开始对战或设置新的定时任务。</div></div>';
+    }
   }
   box.innerHTML = html;
 }
@@ -619,6 +658,46 @@ function render(s){
     $("concedeDetect").textContent = det;
   }
 
+  /* 上分停止条件（每局结束读一次段位，方便确认“到底在不在检测”） */
+  $("chkRankStop").disabled = busy;
+  $("inpRankMode").disabled = busy;
+  $("inpRankNumber").disabled = busy;
+  $("btnSaveRankStop").disabled = busy;
+  if (s.rank_stop && !dirtyRankStop){
+    $("chkRankStop").checked = !!s.rank_stop.enabled;
+    $("inpRankMode").value = s.rank_stop.mode || "legend";
+    $("inpRankNumber").value = s.rank_stop.legend_number;
+  }
+  var rs = s.rank_stop;
+  if (rs){
+    var rsTxt;
+    if (!rs.enabled){
+      rsTxt = "上分停止：已关闭（打到手动停止/定时结束为止）";
+    } else {
+      var goal = (rs.mode === "legend_number")
+        ? ("上到传说第 " + rs.legend_number + " 名或更好")
+        : "上传说";
+      var condTxt = "条件：" + goal;
+      var where = rs.last_phase ? ("（" + rs.last_phase + "）") : "";
+      var readTxt;
+      if (rs.last_raw){
+        readTxt = "最近一次读数" + where + "："
+          + (rs.last_legend ? "传说 " : "段位 ")
+          + (rs.last_number !== null && rs.last_number !== undefined
+             ? rs.last_number : rs.last_raw);
+      } else if (rs.last_empty){
+        readTxt = "最近一次检测" + where + "：这一段还没有名次（空白，未上传说）";
+      } else {
+        readTxt = "最近一次检测" + where + "：没读到数字"
+          + (rs.last_phase ? "" : "（打完一局、进结算界面后才检测）");
+      }
+      rsTxt = rs.triggered
+        ? ("上分停止：🏁 已达成目标，本局结束后停止——" + (rs.stop_reason || ""))
+        : ("上分停止：监控中 · " + condTxt + " · " + readTxt);
+    }
+    $("rankStopStatus").textContent = rsTxt;
+  }
+
   /* 存活检测 */
   $("chkLiveness").disabled = busy;
   $("inpLvWarn").disabled = busy;
@@ -681,6 +760,7 @@ function render(s){
     $("inpPreDelay").value = s.delays.pre_action_delay_seconds;
     $("inpPostDelay").value = s.delays.post_action_delay_seconds;
     $("inpDrawDelay").value = s.delays.draw_extra_delay_per_card_seconds;
+    $("inpChoiceTargetDelay").value = s.delays.discover_target_delay_seconds;
     $("inpOcrScale").value = s.delays.ocr_preprocess_scale;
   }
 
@@ -695,6 +775,7 @@ function render(s){
       "回合前 " + d.pre_action_delay_seconds + "s / " +
       "操作后 " + d.post_action_delay_seconds + "s / " +
       "抽牌每张 " + d.draw_extra_delay_per_card_seconds + "s / " +
+      "抉择选目标 " + d.discover_target_delay_seconds + "s / " +
       "OCR " + d.ocr_preprocess_scale + "。" +
       "写入 ui_config.json 的 delays 段即时生效（下次开局/下回合读取）；自动化运行中不可修改。";
   }
@@ -783,7 +864,7 @@ $("inpLog").addEventListener("input", function(){ dirty.log = true; });
 $("chkConcede").addEventListener("change", function(){ dirtyConcede = true; });
 $("inpConcedeThreshold").addEventListener("input", function(){ dirtyConcede = true; });
 $("inpConcedeRounds").addEventListener("input", function(){ dirtyConcede = true; });
-["inpReadyDelay","inpPostOcrDelay","inpRetryDelay","inpFirstTurnPerCard","inpPreDelay","inpPostDelay","inpDrawDelay","inpOcrScale"]
+["inpReadyDelay","inpPostOcrDelay","inpRetryDelay","inpFirstTurnPerCard","inpPreDelay","inpPostDelay","inpDrawDelay","inpChoiceTargetDelay","inpOcrScale"]
   .forEach(function(id){ $(id).addEventListener("input", function(){ dirtyDelays = true; }); });
 
 function saveConfig(){
@@ -1000,6 +1081,26 @@ $("btnSaveConcede").addEventListener("click", function(){
   });
 });
 
+/* ---------- 上分停止条件 ---------- */
+$("chkRankStop").addEventListener("change", function(){ dirtyRankStop = true; });
+$("inpRankMode").addEventListener("change", function(){ dirtyRankStop = true; });
+$("inpRankNumber").addEventListener("input", function(){ dirtyRankStop = true; });
+
+$("btnSaveRankStop").addEventListener("click", function(){
+  post("/api/rank_stop", {
+    enabled: $("chkRankStop").checked,
+    mode: $("inpRankMode").value,
+    legend_number: $("inpRankNumber").value
+  }).then(function(r){
+    if (r.ok){
+      toast(r.message, "ok");
+      dirtyRankStop = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
+});
+
 /* ---------- 活人感 ---------- */
 ["chkHumanLike","chkHlHand","chkHlMinion"].forEach(function(id){
   $(id).addEventListener("change", function(){ dirtyHumanLike = true; });
@@ -1060,6 +1161,7 @@ $("btnSaveDelays").addEventListener("click", function(){
     pre_action_delay_seconds: $("inpPreDelay").value,
     post_action_delay_seconds: $("inpPostDelay").value,
     draw_extra_delay_per_card_seconds: $("inpDrawDelay").value,
+    discover_target_delay_seconds: $("inpChoiceTargetDelay").value,
     ocr_preprocess_scale: $("inpOcrScale").value
   }).then(function(r){
     if (r.ok){

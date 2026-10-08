@@ -6,7 +6,9 @@ import threading
 import time
 from typing import Callable, Optional, Union
 
-from src.game_state.hand_target import allows_hand_target
+from src.game_state.hand_target import (
+    allows_hand_target, hand_target_cardtype_mismatch,
+)
 
 
 class GlobalHotkeyInput:
@@ -163,6 +165,14 @@ class DiscoverChoiceAction:
     turn_number: Optional[int] = None
     # 时间线选项（回溯/维持）才有：日志里那个选项的卡牌 ID，执行前要再核对一次。
     timeline_card_id: Optional[str] = None
+    # 选中选项的实体 id（日志里那个 subOption 的 id）：执行前再核对一次，
+    # 选项位置/内容变了就拒绝，避免点错选项。
+    choice_entity_id: Optional[str] = None
+    # 这个选项属于哪个父实体（抉择牌 = 手牌实体 id）：有它才能精确复核
+    # "选项还是原来那批"，不会被日志里同号位的其它残留实体影响。
+    choice_parent_entity_id: Optional[str] = None
+    # 选项本身还要再点一个目标（鲍勃「招募随从」→ 对方随从）。None = 点完选项就结束。
+    target: Optional[Target] = None
 
 
 @dataclass(frozen=True)
@@ -274,6 +284,23 @@ class ClickExecutor:
         else:
             self.click.choose_opponent_minion(target.index, oppo_count)
 
+    def select_hand_card(self, hand_target_index: int, hand_count: int,
+                         played_hand_index: Optional[int] = None):
+        """点手牌扇形区里的第 hand_target_index 张（0 基）。
+
+        所有「目标是自己的手牌」的卡都走这一个入口：战吼/法术打完牌之后手牌会
+        少一张，所以牌面位置要减 1（played_hand_index 是打出去那张的位置）；
+        地标本来就在场上，手牌数量不变，不传 played_hand_index。
+        目标是手牌时 UI 出现得比普通随从目标晚，这里统一等 0.9s 再点。
+        """
+        self.sleep(0.9)
+        screen_index = (hand_target_index - 1
+                        if played_hand_index is not None
+                        and played_hand_index < hand_target_index
+                        else hand_target_index)
+        self.click.choose_card(screen_index, hand_count)
+        return screen_index
+
     def play_minion(self, hand_index, hand_count, gap_index, minion_count,
                     oppo_minion_count, target, choose_one=None):
         return self._safe_action(lambda: self._play_minion(
@@ -295,14 +322,15 @@ class ClickExecutor:
             # minion targets, so wait for that UI to settle.
             is_friendly_hand_target = (
                 target.side == "friendly" and target.kind == "hand")
-            self.sleep(0.9 if is_friendly_hand_target else 0.4)
+            if not is_friendly_hand_target:
+                self.sleep(0.4)
         if target is not None:
             adjusted = target
             if target.side == "friendly" and target.kind == "hand":
-                adjusted_index = (target.index - 1
-                                  if hand_index < target.index
-                                  else target.index)
-                self.click.choose_card(adjusted_index, hand_count - 1)
+                # 手牌目标：打出这张牌后手牌少了一张，所以牌面位置要按「打出后」
+                # 的数量算（手牌目标统一走 select_hand_card）。
+                self.select_hand_card(target.index, hand_count - 1,
+                                      played_hand_index=hand_index)
             elif (target.side == "friendly" and target.kind == "minion"
                   and target.index >= gap_index):
                 adjusted = Target(
@@ -372,7 +400,7 @@ class ClickExecutor:
             if target.side == "friendly" and target.kind == "hand":
                 # 守护巨龙之厅这类地标让你选一张自己的手牌：地标已在场上，
                 # 手牌数量就是当前手牌数（不像出随从那样要先减去自己）。
-                self.click.choose_card(target.index, my_hand_count)
+                self.select_hand_card(target.index, my_hand_count)
             else:
                 self._click_target(target, my_board_count, oppo_board_count)
         self.click.cancel_click()
@@ -431,10 +459,29 @@ class ClickExecutor:
             self.sleep(0.3)
             self.click.choose_discover_card(choice.choice_index, choice.choice_count)
 
-    def choose_discover_card(self, choice_index, choice_count):
-        return self._safe_action(
-            lambda: self.click.choose_discover_card(
-                choice_index, choice_count))
+    def choose_discover_card(self, choice_index, choice_count, target=None,
+                             my_count=0, oppo_count=0, choice_delay=None):
+        """点选项；带 target 时接着把目标也点掉（一个完整手势）。
+
+        只传前两个参数时行为与改动前完全一致（只点选项）。带 target 时：
+        点选项 → 等 choice_delay（选项 UI 收起、目标高亮出现）→ 点目标 → 右键取消。
+        少了这一步，像鲍勃「招募随从」那样"选完选项还要点一个对方随从"的牌会
+        停在半途：游戏在等你点，脚本却以为做完了。
+        """
+        return self._safe_action(lambda: self._choose_discover_card(
+            choice_index, choice_count, target, my_count, oppo_count,
+            choice_delay))
+
+    def _choose_discover_card(self, choice_index, choice_count, target,
+                              my_count, oppo_count, choice_delay):
+        self.click.choose_discover_card(choice_index, choice_count)
+        if target is None:
+            return
+        delay = (0.3 if choice_delay is None else float(choice_delay))
+        if delay > 0:
+            self.sleep(delay)
+        self._click_target(target, my_count, oppo_count)
+        self.click.cancel_click()
 
     def attack(self, attacker, target, my_count, oppo_count):
         return self._safe_action(
@@ -785,6 +832,49 @@ class ManualController:
         return replace(
             action, turn_number=state.game_num_turns_in_play)
 
+    @staticmethod
+    def _choice_entity_ok(action, state) -> bool:
+        """抉择/发现选项的实体 id 还在原位吗（位置变了就别点）。
+
+        只认绑定的那个父实体；父实体不在当前日志里（过期条目）时退回
+        任意父实体的同号位，只在"确实查过且有冲突"时才拒绝。
+        """
+        wanted = action.choice_entity_id
+        if wanted is None:
+            return True
+        parent_id = action.choice_parent_entity_id
+        if parent_id is not None:
+            parent = (getattr(state, "power_options", {}) or {}).get(parent_id)
+            if parent is not None:
+                choice = (parent.get("choices") or {}).get(action.choice_index)
+                return choice is None or choice.get("entity_id") == wanted
+        for option in (getattr(state, "power_options", {}) or {}).values():
+            choice = (option.get("choices") or {}).get(action.choice_index)
+            if choice is not None and choice.get("entity_id") != wanted:
+                return False
+        # 发现/选择一项菜单（通用选择）走的是另一份映射。
+        general = getattr(state, "general_choice_entity_ids", {}) or {}
+        if action.choice_index in general and general[action.choice_index] != wanted:
+            return False
+        return True
+
+    @staticmethod
+    def _target_label(target) -> str:
+        side = "己方" if target.side == "friendly" else "对方"
+        if target.kind == "hero":
+            return f"目标：{side}英雄"
+        position = (target.index + 1) if target.index is not None else "?"
+        return f"目标：{side}{position}号位"
+
+    @staticmethod
+    def _choice_target_delay() -> float:
+        """点完选项到点目标之间的等待（秒）：选项 UI 收起、目标高亮出现。"""
+        try:
+            from src.recommendation_config import RecommendationConfig
+            return float(RecommendationConfig().discover_target_delay_seconds)
+        except Exception:
+            return 0.3
+
     def execute(self, action: ManualAction, state) -> ActionExecutionResult:
         try:
             return self._execute(action, state)
@@ -832,6 +922,7 @@ class ManualController:
                 return self._reject("手牌对象已经变化，未执行操作。")
             is_hand_target = (
                 action.target is not None and action.target.kind == "hand")
+            hand_target_label = None
             if is_hand_target:
                 if (not allows_hand_target(selected.card_id)
                         or action.target.side != "friendly"
@@ -842,6 +933,15 @@ class ManualController:
                         or not self._target_exists(action.target, state)):
                     return self._reject(
                         "手牌目标已经失效，未执行操作。")
+                # 卡面要求具体类型（「一张法术牌」…）时，号位那张牌必须对得上，
+                # 否则这一次点击会点错牌，宁可拒绝重试。
+                target_card = state.my_hand_cards[action.target.index]
+                if hand_target_cardtype_mismatch(selected.card_id, target_card):
+                    return self._reject(
+                        "手牌目标类型不符合该卡要求，未执行操作。")
+                hand_target_label = (
+                    f"选手中第 {action.target.index + 1} 号位"
+                    f"（{getattr(target_card, 'name', '?')}）")
             elif not self._target_exists(action.target, state):
                 return self._reject("目标已经不存在，未执行操作。")
 
@@ -892,7 +992,10 @@ class ManualController:
                 )
             else:
                 return self._reject(f"不支持卡牌类型：{action.cardtype}")
-            return ActionExecutionResult(True, f"已执行手牌：{selected.name}")
+            detail = f"已执行手牌：{selected.name}"
+            if hand_target_label:
+                detail += f"，{hand_target_label}"
+            return ActionExecutionResult(True, detail)
 
         if isinstance(action, HeroPowerAction):
             choice_args = ({"choose_one": action.choose_one}
@@ -927,6 +1030,26 @@ class ManualController:
             if (action.choice_count not in (1, 2, 3, 4)
                     or not 0 <= action.choice_index < action.choice_count):
                 return self._reject("发现选项位置已经失效，未执行操作。")
+            if action.choice_entity_id is not None and not self._choice_entity_ok(
+                    action, state):
+                return self._reject("发现选项已经变化，未执行操作。")
+            if (action.target is not None
+                    and not self._target_exists(action.target, state)):
+                # 目标已经没了：连选项都别点，点了这只手就停在半途（游戏等你点
+                # 目标、脚本以为做完了），会一直烧到回合结束。
+                return self._reject("发现选项的目标已经不存在，未执行操作。")
+            if action.target is not None:
+                label = self._target_label(action.target)
+                self.executor.choose_discover_card(
+                    action.choice_index, action.choice_count,
+                    self._target_for_click(action.target, state),
+                    self._board_slot_count(state, "friendly"),
+                    self._board_slot_count(state, "enemy"),
+                    self._choice_target_delay())
+                return ActionExecutionResult(
+                    True,
+                    f"已选择发现选项：{action.choice_index + 1}号位"
+                    f"，{label}")
             self.executor.choose_discover_card(
                 action.choice_index, action.choice_count)
             return ActionExecutionResult(
@@ -945,6 +1068,18 @@ class ManualController:
                 return self._reject("地标对象已经变化，未执行操作。")
             if not self._target_exists(action.target, state):
                 return self._reject("地标目标已经不存在，未执行操作。")
+            location_detail = f"已使用地标：{location.name}"
+            if action.target is not None and action.target.kind == "hand":
+                # 地标让你选一张自己的手牌（守护巨龙之厅、维希度斯的窟穴…）：
+                # 同样按卡面要求的类型校验一次，日志里记清楚点的是哪张。
+                target_card = state.my_hand_cards[action.target.index]
+                if hand_target_cardtype_mismatch(location.card_id,
+                                                 target_card):
+                    return self._reject(
+                        "手牌目标类型不符合该卡要求，未执行操作。")
+                location_detail += (
+                    f"，选手中第 {action.target.index + 1} 号位"
+                    f"（{getattr(target_card, 'name', '?')}）")
             zone_pos = getattr(location, "zone_pos", 0)
             if zone_pos <= 0:
                 return self._reject("地标战场位置未知，未执行操作。")
@@ -960,7 +1095,7 @@ class ManualController:
                 oppo_board_count,
                 len(state.my_hand_cards),
             )
-            return ActionExecutionResult(True, f"已使用地标：{location.name}")
+            return ActionExecutionResult(True, location_detail)
 
         if isinstance(action, LaunchStarshipAction):
             if not 0 <= action.starship_index < len(state.my_minions):

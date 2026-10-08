@@ -92,7 +92,10 @@ class ChooseOneTests(unittest.TestCase):
         log = self.options()
         self.feed(log, '    subOption 0 entity=[entityName=山谷植根 id=153 zone=SETASIDE zonePos=0 cardId=AV_205pb player=1] error=REQ_ENOUGH_MANA errorParam=')
         manual = adapt_action(self.proposed(), self.state(log)).manual_action
-        self.assertEqual(DiscoverChoiceAction(1, 2), manual.choose_one)
+        # 号位按可用布局算（1 号位仍对应 2 号选项），并绑上选项/父实体 id 供执行前复核。
+        self.assertEqual(DiscoverChoiceAction(1, 2, choice_entity_id='154',
+                                             choice_parent_entity_id='152'),
+                         manual.choose_one)
         with self.assertRaisesRegex(RecommendationStateError, 'choose_one_option_unavailable'):
             adapt_action(self.proposed(name='山谷植根'), self.state(log))
 
@@ -101,13 +104,20 @@ class ChooseOneTests(unittest.TestCase):
         adapted = adapt_action(self.proposed(), state)
         self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
 
-    def test_unknown_or_ambiguous_name_never_guesses(self):
+    def test_unknown_or_ambiguous_name_never_guesses_or_deadlocks(self):
+        """判不出选项时只出牌、不点选项，不再抛错进死循环。
+
+        线上实测这里抛 `choose_one_name_not_unique` 会连续重试 3090 次、最长空转
+        1 分半（面板每 0.3~1 秒被重读一次），所以改成"退化成正常打牌"。
+        """
         log = self.options()
-        with self.assertRaisesRegex(RecommendationStateError, 'choose_one_name'):
-            adapt_action(self.proposed(name='错误名称'), self.state(log))
+        adapted = adapt_action(self.proposed(name='错误名称'), self.state(log))
+        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+        self.assertEqual('hero_power_changed', adapted.postcondition)
+        # 两个选项同名时同样不猜。
         self.feed(log, '    subOption 2 entity=[entityName=冰雪绽放 id=155 zone=SETASIDE zonePos=0 cardId=AV_205a player=1] error=NONE errorParam=')
-        with self.assertRaisesRegex(RecommendationStateError, 'choose_one_name'):
-            adapt_action(self.proposed(), self.state(log))
+        adapted = adapt_action(self.proposed(), self.state(log))
+        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
 
     def test_new_options_block_and_enemy_options_cannot_reuse_old_choices(self):
         log = self.options()
@@ -117,13 +127,109 @@ class ChooseOneTests(unittest.TestCase):
         with self.assertRaisesRegex(RecommendationStateError, 'choose_one_options'):
             adapt_action(self.proposed(), self.state(self.options(player='2')))
 
+    # ------------------------------------------------ 选项定位的四档（线上死循环修复）
+    def troubles(self, choices, source='EDR_570', name='凶险梦魇'):
+        """凶险梦魇（EDR_570 / EDR_570A / EDR_570B）的日志夹具。"""
+        log = LogState()
+        log.my_player_id = '1'
+        self.feed(log, 'id=23')
+        self.feed(log, f'  option 5 type=POWER mainEntity=[entityName={name} '
+                       f'id=152 zone=PLAY zonePos=0 cardId={source} player=1] '
+                       f'error=NONE errorParam= ')
+        for index, (option_name, card_id, error) in enumerate(choices):
+            self.feed(log, f'    subOption {index} entity=[entityName={option_name} '
+                           f'id={153 + index} zone=SETASIDE zonePos=0 '
+                           f'cardId={card_id} player=1] error={error} errorParam= ')
+        return log
+
+    TROUBLE_CHOICES = (('噩梦爆发', 'EDR_570A', 'NONE'),
+                       ('动荡能量', 'EDR_570B', 'NONE'))
+
+    def trouble_state(self, log, target=None, source='EDR_570', name='凶险梦魇'):
+        card = SimpleNamespace(entity_id='152', card_id=source,
+                               cardtype='SPELL', name=name)
+        my_minions = [SimpleNamespace(entity_id='301', zone_pos=1,
+                                      cardtype='MINION', name='随从')]
+        return SimpleNamespace(
+            game_num_turns_in_play=3, is_my_turn=True, my_player_id='1',
+            power_options=log.power_options, my_hero_power=card,
+            my_hand_cards=[card], my_minions=my_minions, my_locations=[],
+            oppo_minions=[], oppo_locations=[],
+            my_hero=SimpleNamespace(entity_id='hero'),
+            oppo_hero=SimpleNamespace(entity_id='enemy'),
+            discover_choice_count=None,
+            target=target, general_choice_cards={},
+            general_choice_entity_ids={})
+
+    def trouble_proposed(self, name, target=''):
+        text = (f'打法参考A\n打出1号位法术\n{target}\n'
+                f'选择卡牌\n{name}')
+        return RecommendationParser().parse(SimpleNamespace(
+            frame_id='frame', normalized_text=text, confidence=.99), 3, 7)
+
+    def test_single_character_ocr_error_still_matches_the_option(self):
+        """OCR 差一个字（动荡能量 → 动荡能星）也要认得出，不再死循环。"""
+        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
+                             ('动荡能星', 'EDR_570B', 'NONE')))
+        adapted = adapt_action(self.trouble_proposed('动荡能量'),
+                               self.trouble_state(log))
+        self.assertEqual(1, adapted.manual_action.choose_one.choice_index)
+
+    def test_ambiguous_near_names_never_guess(self):
+        """两个名字都只差一个字：判不唯一就只出牌，不点选项。"""
+        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
+                             ('噩梦暴发', 'EDR_570B', 'NONE')))
+        adapted = adapt_action(self.trouble_proposed('动荡能量'),
+                               self.trouble_state(log))
+        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+
+    def test_named_option_that_is_unavailable_is_refused(self):
+        """盒子点名的选项当前不可选：拒绝重试，绝不静默改成另一个选项。"""
+        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
+                             ('动荡能量', 'EDR_570B', 'REQ_ENOUGH_MANA')))
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    'choose_one_option_unavailable'):
+            adapt_action(self.trouble_proposed('动荡能量'),
+                         self.trouble_state(log))
+
+    def test_panel_card_name_falls_back_to_box_index(self):
+        """盒子写母卡名（凶险梦魇）时，允许用盒子号位兜底：
+        有目标行 → 选要目标的那个选项；没有目标行 → 选不要目标的那个。"""
+        log = self.troubles(self.TROUBLE_CHOICES)
+        with_target = adapt_action(
+            self.trouble_proposed('凶险梦魇', '目标是己方1号位'),
+            self.trouble_state(log))
+        self.assertEqual(1, with_target.manual_action.choose_one.choice_index)
+        without_target = adapt_action(
+            self.trouble_proposed('凶险梦魇'),
+            self.trouble_state(log))
+        self.assertEqual(0, without_target.manual_action.choose_one.choice_index)
+
+    def test_panel_card_name_without_discriminator_is_not_guessed(self):
+        """两个选项的"要不要目标"一样时，母卡名兜底也分不出 → 只出牌。"""
+        log = self.troubles(
+            (('梦中入侵', 'AV_205pb', 'NONE'), ('梦中奇袭', 'AV_205a', 'NONE')),
+            source='AV_205p', name='培育')
+        adapted = adapt_action(self.trouble_proposed('培育'),
+                               self.trouble_state(log, source='AV_205p',
+                                                  name='培育'))
+        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+
+    def test_single_option_choose_one_is_not_clicked(self):
+        """只有一个选项时游戏自动结算，多点一下反而会误选。"""
+        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),))
+        adapted = adapt_action(self.trouble_proposed('噩梦爆发'),
+                               self.trouble_state(log))
+        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+
     def test_numbered_discover_still_uses_original_layout(self):
         state = self.state(self.options())
         state.discover_choice_count = 3
         proposed = RecommendationParser().parse(SimpleNamespace(frame_id='frame',
             normalized_text='选择我方2号位卡牌', confidence=.99), 3, 7)
         manual = adapt_action(proposed, state).manual_action
-        self.assertEqual(DiscoverChoiceAction(1, 3), manual)
+        self.assertEqual(DiscoverChoiceAction(1, 3, choice_entity_id='154',
+                                             choice_parent_entity_id='152'), manual)
 
     def test_choice_name_participates_in_ocr_confidence_and_stability(self):
         reader = StableRecommendationReader(SimpleNamespace(min_ocr_confidence=.9), None,

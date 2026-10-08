@@ -41,7 +41,8 @@ WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
-    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS, HOST,
+    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS,
+    DEFAULT_RANK_STOP, HOST,
     BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig)
 # 环境自检（Python 3.12 / 依赖包 / 分辨率缩放）与原样截图区域框预览。
 import screen_regions
@@ -67,6 +68,7 @@ DEFAULT_CONFIG = {
     "schedule_end": None,
     "auto_concede": dict(DEFAULT_AUTO_CONCEDE),
     "liveness": dict(DEFAULT_LIVENESS),
+    "rank_stop": dict(DEFAULT_RANK_STOP),
 }
 
 
@@ -128,6 +130,8 @@ def _overlay_key(line: str) -> bool:
     keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]",
             "识别换牌", "换牌", "留牌", "阶段", "对局结束", "未对局",
             "本局结束", "失败", "立即停止",
+            # 上分停止条件（每局结束读段位）也要能看到检测结果
+            "段位", "上分",
             # 存活检测 / 昵称校验的告警必须进浮窗（issue 反馈看不到就白做）
             "炉石", "昵称", "用户 ID")
     return ("[OCR]" not in line) and any(k in line for k in keys)
@@ -442,13 +446,21 @@ def _automation_worker(fsm):
                 "wins": int(fsm.win_count),
                 "concedes": int(getattr(fsm, "concede_count", 0) or 0),
             }
+            # 上分达标自动停止：状态机的 stop_after_current_game 置位后线程自己退出，
+            # 这里把它记成「上分达标」，让页面出横幅（读的是 last_summary["stopped_by"]）。
+            rank_reason = getattr(fsm, "_rank_stop_stop_reason", None)
+            rank_reached = bool(getattr(fsm, "_rank_stop_triggered", False)
+                                and rank_reason)
+            if rank_reached:
+                CTRL.stopped_by = "rank_reached"
+                CTRL.phase = "finished"
             CTRL.last_summary = {**summary, "stopped_by": CTRL.stopped_by}
             CTRL.automation_thread = None
             if CTRL.phase == "stopping" and CTRL.stopped_by == "schedule":
                 CTRL.phase = "finished"
                 CTRL.schedule = {"start": None, "end": None}
                 _persist_schedule(None, None)
-            else:
+            elif not rank_reached:
                 CTRL.phase = "idle"
         if summary["games"]:
             _log("SYS", f"自动化结束：共完成 {summary['games']} 场对战，"
@@ -616,6 +628,75 @@ def api_save_concede(body):
                         "threshold": threshold, "rounds": rounds}}
 
 
+# ------------------------------------------------------------------ 上分停止条件（可选）
+def _current_rank_stop() -> dict:
+    """返回当前生效的上分停止配置（默认值叠加 ui_config.json 的 rank_stop 段）。"""
+    cfg = dict(DEFAULT_RANK_STOP)
+    saved = load_config().get("rank_stop")
+    if isinstance(saved, dict):
+        for key in cfg:
+            if saved.get(key) is not None:
+                cfg[key] = saved[key]
+    cfg["enabled"] = bool(cfg["enabled"])
+    if cfg["mode"] not in ("legend", "legend_number"):
+        cfg["mode"] = DEFAULT_RANK_STOP["mode"]
+    try:
+        cfg["legend_number"] = int(cfg["legend_number"])
+    except (TypeError, ValueError):
+        cfg["legend_number"] = DEFAULT_RANK_STOP["legend_number"]
+    cfg["legend_number"] = max(1, min(100000, cfg["legend_number"]))
+    return cfg
+
+
+def api_save_rank_stop(body):
+    """保存「上分停止条件」（ui_config.json 的 rank_stop 段）。
+
+    每局结束时读一次结算界面的段位数字，命中条件就让自动化在本局结束后停止。
+    """
+    with CTRL.lock:
+        if CTRL.automation_thread is not None:
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改上分停止条件。"}
+        cfg = load_config()
+        rank = _current_rank_stop()
+        rank["enabled"] = bool(body.get("enabled", rank["enabled"]))
+        mode = str(body.get("mode") or rank["mode"]).strip()
+        if mode not in ("legend", "legend_number"):
+            return {"ok": False,
+                    "error": "停止方式只能选「上传说」或「上到传说某个名次」。"}
+        rank["mode"] = mode
+        try:
+            number = int(body.get("legend_number", rank["legend_number"]))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "传说名次必须为整数（1-100000）。"}
+        rank["legend_number"] = max(1, min(100000, number))
+        cfg["rank_stop"] = rank
+        save_config(cfg)
+    if not rank["enabled"]:
+        detail = "已关闭"
+    elif rank["mode"] == "legend":
+        detail = "上传说即停"
+    else:
+        detail = f"上到传说第 {rank['legend_number']} 名或更好时停"
+    _log("SYS", f"上分停止条件已保存：{detail}。")
+    return {"ok": True, "message": "上分停止条件已保存", "rank_stop": rank}
+
+
+def _rank_stop_state() -> dict:
+    """上分停止的显示状态：自动化已加载时取状态机实时值，否则用配置兜底。"""
+    with CTRL.lock:
+        fsm = CTRL.fsm
+    if fsm is not None and hasattr(fsm, "rank_stop_detection_state"):
+        try:
+            return fsm.rank_stop_detection_state()
+        except Exception:
+            pass
+    cfg = _current_rank_stop()
+    return {"enabled": cfg["enabled"], "mode": cfg["mode"],
+            "legend_number": cfg["legend_number"], "last_number": None,
+            "last_legend": None, "last_raw": None, "last_empty": False,
+            "triggered": False, "stop_reason": None}
+
+
 # ------------------------------------------------------------------ 活人感（可选）
 def _current_human_like() -> dict:
     """返回当前生效的活人感配置（默认值叠加 ui_config.json 的 human_like 段）。"""
@@ -724,9 +805,9 @@ _DELAY_BOUNDS = {
     "pre_action_delay_seconds": (0.0, 60.0),
     "post_action_delay_seconds": (0.0, 10.0),
     "draw_extra_delay_per_card_seconds": (0.0, 20.0),
+    "discover_target_delay_seconds": (0.0, 5.0),
     "ocr_preprocess_scale": (0.5, 4.0),
 }
-
 
 def _current_delays() -> dict:
     """返回当前生效的延时配置（默认值叠加 ui_config.json 的 delays 段）。"""
@@ -1567,6 +1648,7 @@ def status_snapshot():
         "schedule_end": end_iso,
         "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
         "concede_detect": _concede_detect_state(),
+        "rank_stop": _rank_stop_state(),
         "human_like": _current_human_like(),
         "liveness": {**_liveness_state(), **_current_liveness()},
         "liveness_alert": _liveness_state().get("alert"),
@@ -1669,6 +1751,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_toggle_overlay(body))
             elif path == "/api/concede":
                 self._json(api_save_concede(body))
+            elif path == "/api/rank_stop":
+                self._json(api_save_rank_stop(body))
             elif path == "/api/human_like":
                 self._json(api_save_human_like(body))
             elif path == "/api/liveness":

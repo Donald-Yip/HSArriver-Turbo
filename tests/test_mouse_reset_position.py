@@ -69,5 +69,34 @@ class MouseResetPositionTests(unittest.TestCase):
         self.assertEqual([("position", RESET)], mouse.events)
 
 
+class PostGameClickPointTests(unittest.TestCase):
+    """每局结束的推进点击：**屏幕中间那两个点**，不点右边。
+
+    回归背景：结算界面要点好几下才会出现「开始」按钮。用户口径是每轮点中间那两下
+    ——`(1100,820)`（奇怪的错误提示）+ `(960,650)`（断线时取消），也就是
+    `commit_error_report()` 用的两个位置；右边那些辅助点会被右上角日志浮窗吃掉，
+    也可能误点到下一屏。第三个点（「开始」按钮正中心）留给收尾。
+    """
+
+    def test_two_middle_points_are_clicked_each_round(self):
+        import FSM_action
+
+        calls = []
+
+        with (
+            patch.object(hearthstone_click, "left_click",
+                         side_effect=lambda *a: calls.append(a)),
+            patch.object(hearthstone_click, "cancel_click",
+                         side_effect=lambda: calls.append("cancel")),
+            patch.object(hearthstone_click, "test_click",
+                         side_effect=lambda: calls.append("test")),
+        ):
+            FSM_action.click_post_game_point()
+
+        self.assertEqual([(1100, 820), (960, 650)], calls)
+        self.assertEqual(((1100, 820), (960, 650)),
+                         hearthstone_click.ERROR_REPORT_POINTS)
+
+
 if __name__ == "__main__":
     unittest.main()

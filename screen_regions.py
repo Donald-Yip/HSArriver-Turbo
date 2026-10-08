@@ -15,6 +15,8 @@
     2. 盒子 UI 有没有摆正——盒子的「打法参考A」面板是否正好落在绿框
        （推荐区域 recommendation_roi）里；
     3. 换牌「确认」按钮、AI胜率浮动条这些区域有没有对偏。
+4. 每局结束用的两个区域（结算「开始」按钮 / 段位数字）位置是否对——它们不需要
+   校准，只用来对照（见 POST_GAME_START_BUTTON_REGION / POST_GAME_RANK_REGION）。
 
 整个过程只截屏，不点击、不移动鼠标，自动化运行中也能安全使用。
 区域坐标全部来自 config.py（用户可在 ui_config.json 覆盖，校准窗口写入），
@@ -49,6 +51,16 @@ def expand_box(box, margin) -> tuple[int, int, int, int]:
 
 AI_WIN_RATE_WIDE_REGION = expand_box(AI_WIN_RATE_REGION, AI_WIN_RATE_WIDE_MARGIN)
 
+# 每局结束（对局结算）阶段的区域，必须与 FSM_action._POST_GAME_START_BUTTON_ROI /
+# _POST_GAME_RANK_ROI 一致（test_screen_regions.py 会导入 FSM_action 校验）：
+#   * POST_GAME_START_BUTTON_REGION：结算界面的「开始」按钮——**可校准**（用户拖框，
+#     点击点取框中心；这个默认框的中心正好是实测的 (1400,900)）；
+#   * POST_GAME_RANK_REGION        ：段位数字（没上传说时这里是空白），只读；
+#   * POST_GAME_START_FALLBACK_REGION：检测「开始」的兜底区域（用户把框拖小后仍能认出）。
+POST_GAME_START_BUTTON_REGION = (1325, 865, 1475, 935)
+POST_GAME_START_FALLBACK_REGION = (1250, 845, 1550, 945)
+POST_GAME_RANK_REGION = (1230, 180, 1385, 225)
+
 # 可用校准工具拖拽并保存到 ui_config.json 的区域（校准目标登记表）。
 # key 与屏幕叠加层的区域 key 一致；config_key 是 ui_config.json 的顶层键，
 # 同时也是 config.RecommendationConfig 的字段名。dict 的 "default" 是代码默认值。
@@ -66,6 +78,10 @@ CALIBRATION_TARGETS = (
      "label": "盒子「AI胜率」浮动条", "short": "AI胜率", "color": "#e2a84e",
      "default": AI_WIN_RATE_REGION,
      "hint": "框住左上角盒子的「AI胜率 X%」浮动条"},
+    {"key": "post_game_start", "config_key": "post_game_start_roi",
+     "label": "结算「开始」按钮", "short": "开始按钮", "color": "#7fd4c1",
+     "default": POST_GAME_START_BUTTON_REGION,
+     "hint": "框住每局结束时底部的「开始」按钮：检测它是否出现，并用框中心点击"},
 )
 
 # get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
@@ -165,6 +181,17 @@ def screenshot_regions(config=None) -> list[dict]:
          # 兜底区域完全包住主区域，所以画细一点、标签放框下面，避免和上面重叠。
          "width": 1, "label_below": True,
          "note": "主区域读不到时放宽再读一次，偏一点也能兜住"},
+        # 下面两个只在「对局结算」阶段使用（打完一局后的界面）：
+        # 「开始」按钮可校准（点击点取框中心），段位框只读、画出来供对照。
+        {"key": "post_game_start", "color": "#7fd4c1",
+         "label": "结算「开始」按钮（每局结束等它出现）",
+         "box": by_key["post_game_start"]["box"],
+         "config_key": "post_game_start_roi",
+         "note": "检测它有没有出现，并用框中心点击它；按钮挪位置了就把这个框拖过去"},
+        {"key": "rank", "color": "#c9a3e8",
+         "label": "段位数字（上传说后读取，用于按段位停止）",
+         "box": POST_GAME_RANK_REGION,
+         "note": "每局结束读一次：有数字=已上传说（数字即名次），空白=还没上传说"},
     ]
 
 
@@ -256,11 +283,19 @@ def _expected(config) -> tuple[int, int, int]:
 
 
 # ---------------------------------------------------------------- 预览图
-def draw_region_boxes(image, config=None, scale: float = 1.0) -> list[dict]:
+def draw_region_boxes(image, config=None, scale: float = 1.0,
+                      skip_labels=(), skip_keys=()) -> list[dict]:
     """在 PIL 图像上画出所有截图区域框 + 标签，并回填 in_bounds。
 
     网页里的区域框预览图与屏幕上叠加的「校准」框共用这一份绘制逻辑，
     保证两处画出来的框完全一致。scale 是图像相对屏幕的缩放倍数。
+
+    skip_keys：这些 key 的区域**整个不画**。校准窗口用它让"当前正在拖的区域"
+    由 `_draw_active_target()` 单独画一遍——否则同一个框会被画两次（差 1px、
+    外圈偏暗），叠起来就像"一个区域两个框"。
+    skip_labels：这些 key 的区域**只画框、不画标签**（标签底紧贴框边时也会被看
+    成第二个框；当前目标的坐标在屏幕正中央的目标条里已经有了）。
+    每个 region dict 会带回 label_drawn，方便调用方与测试判断。
     """
     from PIL import ImageColor, ImageDraw
 
@@ -272,18 +307,25 @@ def draw_region_boxes(image, config=None, scale: float = 1.0) -> list[dict]:
     font = _font(16)
     small = _font(13)
     width, height = image.size
+    skip_labels = set(skip_labels or ())
+    skip_keys = set(skip_keys or ())
     regions = screenshot_regions(config)
     for region in regions:
+        region["label_drawn"] = False
         left, top, right, bottom = region["box"]
         in_bounds = (0 <= left < right <= width and 0 <= top < bottom <= height)
         region["in_bounds"] = in_bounds
         if not in_bounds:
+            continue
+        if region["key"] in skip_keys:
             continue
         color = ImageColor.getrgb(region["color"])
         x0, y0 = int(left * scale), int(top * scale)
         x1, y1 = int(right * scale), int(bottom * scale)
         draw.rectangle((x0, y0, x1, y1), outline=color,
                        width=int(region.get("width", 3)))
+        if region["key"] in skip_labels:
+            continue
         label = (f"{region['label']} {left},{top},{right},{bottom}"
                  if font is not None else
                  f"{region['key']} {left},{top},{right},{bottom}")
@@ -311,6 +353,7 @@ def draw_region_boxes(image, config=None, scale: float = 1.0) -> list[dict]:
                         label_x + text_width + 3, label_y + text_height + 3),
                        fill=(0, 0, 0))
         draw.text((label_x, label_y), label, fill=color, font=text_draw)
+        region["label_drawn"] = True
     return regions
 
 

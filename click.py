@@ -534,11 +534,17 @@ def drag_card_to_deck():
         mouse.release(Button.left)
 
 
+# 屏幕中间那两个「点掉遮挡」的位置：
+#   (1100, 820) —— 一些奇怪的错误提示；
+#   (960, 650)  —— 已断线时点这里取消。
+# 每局结束推结算界面也复用这两下（用户口径：回合结束点中间这两个点，**不点右边**
+# ——右边那些辅助点会被右上角日志浮窗吃掉/会误点到下一屏）。
+ERROR_REPORT_POINTS = ((1100, 820), (960, 650))
+
+
 def commit_error_report():
-    # 一些奇怪的错误提示
-    left_click(1100, 820)
-    # 如果已断线, 点这里时取消
-    left_click(960, 650)
+    for x, y in ERROR_REPORT_POINTS:
+        left_click(x, y)
 
 
 def emoj(target=None):

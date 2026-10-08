@@ -8,17 +8,18 @@
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
   * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-三个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
+四个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
 | # | 目标 | 写入 ui_config.json | 对齐方法 |
 | --- | --- | --- | --- |
 | 1 | 盒子推荐面板（绿） | `recommendation_roi` | 把盒子的「打法参考A」面板框进绿框 |
 | 2 | 换牌「确认」按钮（蓝） | `mulligan_confirm_roi` | 框住换牌界面的确认按钮 |
 | 3 | 盒子「AI胜率」浮动条（橙） | `ai_win_rate_roi` | 框住左上角 AI胜率浮动条（兜底区域自动跟着外扩） |
+| 4 | 结算「开始」按钮（青绿） | `post_game_start_roi` | 框住每局结束底部的「开始」按钮：脚本用它判断结算界面点完没有，并点它的正中心 |
 
 操作：
   * 拖框的边框可整体移动，拖右下角手柄可调整大小；
-  * **S** 或点 [保存] 把三个区域一起写回 `ui_config.json`；**Esc** 退出；
+  * **S** 或点 [保存] 把四个区域一起写回 `ui_config.json`；**Esc** 退出；
   * 画面空白处的鼠标是**穿透**的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到
     炉石上，所以可以边看游戏画面边调；
   * 顶部提示条每 1.5s 重判一次「绿框里有没有盒子面板」，对齐成功会变绿。
@@ -138,7 +139,7 @@ def _load_config():
 
 
 class CalibrationSession:
-    """屏幕上的交互式校准窗口：三个目标都能拖、都能存。"""
+    """屏幕上的交互式校准窗口：每个登记的目标都能拖、都能存。"""
 
     def __init__(self, selftest: bool = False, ocr_enabled: bool = True,
                  start_key: str = ""):
@@ -421,8 +422,17 @@ class CalibrationSession:
         )
 
     def render(self, width: int, height: int):
-        """画出一整屏 RGBA：所有区域框 + 提示条 + 当前目标高亮 + 目标条/预览。"""
-        layer = paint_layer(width, height, self.panel_state, self._preview_config())
+        """画出一整屏 RGBA：所有区域框 + 提示条 + 当前目标高亮 + 目标条/预览。
+
+        当前目标在这一层里被**整个跳过**，由 `_draw_active_target()` 单独画：
+        否则同一个框会被画两次（两次描边差 1px，外圈偏暗），看起来像"一个区域
+        有两个框"；它的标签也不画（坐标在屏幕正中央的目标条里已经有了，标签底
+        又会紧贴框边）。
+        """
+        active_key = self.active["key"]
+        layer = paint_layer(width, height, self.panel_state,
+                            self._preview_config(),
+                            skip_keys=(active_key,))
         draw = ImageDraw.Draw(layer)
         self._draw_active_target(draw, width, height)
         self._draw_card(draw, width, height)

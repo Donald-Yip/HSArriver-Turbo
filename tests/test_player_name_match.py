@@ -127,89 +127,78 @@ class FsmWarningTests(unittest.TestCase):
 
 
 class OverlayAccountRowTests(unittest.TestCase):
-    def test_unknown(self):
-        row = log_overlay.account_row(None)
-        self.assertEqual("—", row["value"])
-        self.assertEqual(log_overlay.MARKER_UNKNOWN, row["marker"])
+    """「账号」行：状态 → 文案/颜色/标记，以及说明列的截断。"""
 
-    def test_inconclusive(self):
-        row = log_overlay.account_row({"config": "X#1", "players": {},
-                                       "matched": None})
-        self.assertEqual("—", row["value"])
+    def test_row_states(self):
+        cases = (
+            # (info, 期望 value, 期望 marker, 期望颜色/None=不校验, detail 片段)
+            (None, "—", log_overlay.MARKER_UNKNOWN, None, None),
+            ({"config": "X#1", "players": {}, "matched": None},
+             "—", None, None, None),
+            ({"config": "X#1", "players": {"1": "X#1"}, "matched": True},
+             "匹配", log_overlay.MARKER_ON, log_overlay.GREEN, None),
+            ({"config": "Old#1111", "players": {"1": "New#2222"},
+              "matched": False},
+             "不匹配", log_overlay.MARKER_OFF, log_overlay.DANGER, "New#2222"),
+        )
+        for info, value, marker, color, detail in cases:
+            with self.subTest(value=value):
+                row = log_overlay.account_row(info)
 
-    def test_matched_is_green(self):
-        row = log_overlay.account_row({"config": "X#1",
-                                       "players": {"1": "X#1"},
-                                       "matched": True})
-        self.assertEqual("匹配", row["value"])
-        self.assertEqual(log_overlay.MARKER_ON, row["marker"])
-        self.assertEqual(log_overlay.GREEN, row["value_color"])
+                self.assertEqual(value, row["value"])
+                if marker is not None:
+                    self.assertEqual(marker, row["marker"])
+                if color is not None:
+                    self.assertEqual(color, row["value_color"])
+                if detail is not None:
+                    self.assertIn(detail, row["detail"])
 
-    def test_mismatch_is_red_and_shows_log_names(self):
-        row = log_overlay.account_row({"config": "Old#1111",
-                                       "players": {"1": "New#2222"},
-                                       "matched": False})
-        self.assertEqual("不匹配", row["value"])
-        self.assertEqual(log_overlay.MARKER_OFF, row["marker"])
-        self.assertEqual(log_overlay.DANGER, row["value_color"])
-        self.assertIn("New#2222", row["detail"])
-
-    def test_long_names_are_clipped_to_the_column(self):
-        """说明列宽度固定：超长昵称必须截断，否则会被窗口右边缘裁掉。"""
-        row = log_overlay.account_row({
+    def test_detail_column_is_clipped(self):
+        """说明列宽度固定：超长昵称必须截断，短昵称原样显示。"""
+        long_row = log_overlay.account_row({
             "config": "Old#1111",
             "players": {"1": "一个非常非常非常长的战网昵称#54321"},
             "matched": False})
+        self.assertLessEqual(len(long_row["detail"]), 16)
+        self.assertTrue(long_row["detail"].endswith("…"))
 
-        self.assertLessEqual(len(row["detail"]), 16)
-        self.assertTrue(row["detail"].endswith("…"))
-
-    def test_short_names_are_not_clipped(self):
-        row = log_overlay.account_row({"config": "A#1",
-                                       "players": {"1": "A#1"},
-                                       "matched": True})
-        self.assertEqual("A#1", row["detail"])
+        short_row = log_overlay.account_row({"config": "A#1",
+                                             "players": {"1": "A#1"},
+                                             "matched": True})
+        self.assertEqual("A#1", short_row["detail"])
 
 
 class OverlayLivenessRowTests(unittest.TestCase):
-    def test_unknown(self):
-        row = log_overlay.hearthstone_row(None)
-        self.assertEqual("—", row["value"])
+    """存活状态行：每个 status 的文案与颜色。"""
 
-    def test_disabled_is_red_dot(self):
-        row = log_overlay.hearthstone_row({"status": "disabled"})
-        self.assertEqual("关", row["value"])
-        self.assertEqual(log_overlay.MARKER_OFF, row["marker"])
+    def test_row_states(self):
+        cases = (
+            # (info, 期望 value, 期望 marker/None=不校验, 期望颜色/None=不校验,
+            #  detail 片段)
+            (None, "—", None, None, None),
+            ({"status": "disabled"}, "关", log_overlay.MARKER_OFF,
+             None, None),
+            ({"status": "ok", "log_age": 12.0, "in_game": True},
+             "运行中", None, log_overlay.GREEN, "12s"),
+            ({"status": "gone", "log_age": None}, "已退出", None,
+             log_overlay.DANGER, "停止"),
+            ({"status": "warning", "log_age": 130.0, "in_game": True},
+             "疑似卡死", None, log_overlay.WARN, None),
+            ({"status": "stale", "log_age": 400.0, "in_game": True},
+             "无响应", None, log_overlay.DANGER, "400s"),
+            ({"status": "idle"}, "未运行", None, None, None),
+        )
+        for info, value, marker, color, detail in cases:
+            with self.subTest(status=(info or {}).get("status")):
+                row = log_overlay.hearthstone_row(info)
 
-    def test_running(self):
-        row = log_overlay.hearthstone_row(
-            {"status": "ok", "log_age": 12.0, "in_game": True})
-        self.assertEqual("运行中", row["value"])
-        self.assertEqual(log_overlay.GREEN, row["value_color"])
-        self.assertIn("12s", row["detail"])
-
-    def test_gone(self):
-        row = log_overlay.hearthstone_row({"status": "gone", "log_age": None})
-        self.assertEqual("已退出", row["value"])
-        self.assertEqual(log_overlay.DANGER, row["value_color"])
-        self.assertIn("停止", row["detail"])
-
-    def test_warning(self):
-        row = log_overlay.hearthstone_row(
-            {"status": "warning", "log_age": 130.0, "in_game": True})
-        self.assertEqual("疑似卡死", row["value"])
-        self.assertEqual(log_overlay.WARN, row["value_color"])
-
-    def test_stale(self):
-        row = log_overlay.hearthstone_row(
-            {"status": "stale", "log_age": 400.0, "in_game": True})
-        self.assertEqual("无响应", row["value"])
-        self.assertEqual(log_overlay.DANGER, row["value_color"])
-        self.assertIn("400s", row["detail"])
-
-    def test_idle_when_hearthstone_not_started(self):
-        row = log_overlay.hearthstone_row({"status": "idle"})
-        self.assertEqual("未运行", row["value"])
+                self.assertEqual(value, row["value"])
+                if marker is not None:
+                    self.assertEqual(marker, row["marker"])
+                if color is not None:
+                    self.assertEqual(color, row["value_color"])
+                if detail is not None:
+                    self.assertIn(detail, row["detail"])
 
     def test_alert_lines_are_highlighted(self):
         self.assertTrue(log_overlay._is_alert_line("⚠️ 炉石已退出：Hearthstone.exe 进程消失"))

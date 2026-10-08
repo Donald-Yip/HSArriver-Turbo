@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+import region_overlay
 import screen_regions
 
 
@@ -31,7 +32,8 @@ class RegionRegistryTests(unittest.TestCase):
 
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
-            ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide"],
+            ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide",
+             "post_game_start", "rank"],
             [region["key"] for region in self.regions])
 
     def test_boxes_come_from_the_config(self):
@@ -67,6 +69,20 @@ class RegionRegistryTests(unittest.TestCase):
         self.assertEqual(FSM_action._AI_WIN_RATE_REGIONS[1],
                          screen_regions.AI_WIN_RATE_WIDE_REGION)
 
+    def test_post_game_regions_match_the_automation(self):
+        """每局结束用的「开始」按钮 / 段位框必须和 FSM_action 读的区域一致。"""
+        import FSM_action
+
+        self.assertEqual(FSM_action._POST_GAME_START_BUTTON_ROI,
+                         screen_regions.POST_GAME_START_BUTTON_REGION)
+        self.assertEqual(FSM_action._POST_GAME_RANK_ROI,
+                         screen_regions.POST_GAME_RANK_REGION)
+        boxes = {region["key"]: region["box"]
+                 for region in screen_regions.screenshot_regions(make_config())}
+        self.assertEqual(screen_regions.POST_GAME_START_BUTTON_REGION,
+                         boxes["post_game_start"])
+        self.assertEqual(screen_regions.POST_GAME_RANK_REGION, boxes["rank"])
+
     def test_state_probe_points_are_reported(self):
         points = screen_regions.state_probe_points()
 
@@ -77,19 +93,33 @@ class RegionRegistryTests(unittest.TestCase):
 class CalibrationTargetTests(unittest.TestCase):
     """可校准区域清单：校准工具、叠加层、AI胜率读取共用这一份来源。"""
 
-    def test_lists_the_three_calibratable_targets(self):
+    def test_lists_the_calibratable_targets(self):
         targets = screen_regions.calibration_targets(make_config())
 
-        self.assertEqual(["recommendation", "mulligan_confirm", "win_rate"],
+        self.assertEqual(["recommendation", "mulligan_confirm", "win_rate",
+                          "post_game_start"],
                          [target["key"] for target in targets])
         self.assertEqual(
-            ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi"],
+            ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi",
+             "post_game_start_roi"],
             [target["config_key"] for target in targets])
         for target in targets:
             self.assertTrue(target["label"])
             self.assertTrue(target["short"])
             self.assertTrue(target["hint"])
             self.assertRegex(target["color"], r"^#[0-9a-fA-F]{6}$")
+
+    def test_calibrated_post_game_start_box_wins_over_the_default(self):
+        targets = screen_regions.calibration_targets(
+            make_config(post_game_start_roi=(1500, 850, 1600, 950)))
+
+        box = next(t["box"] for t in targets if t["key"] == "post_game_start")
+        regions = screen_regions.screenshot_regions(
+            make_config(post_game_start_roi=(1500, 850, 1600, 950)))
+        preview = next(r["box"] for r in regions
+                       if r["key"] == "post_game_start")
+        self.assertEqual((1500, 850, 1600, 950), box)
+        self.assertEqual((1500, 850, 1600, 950), preview)
 
     def test_boxes_come_from_the_config_with_defaults(self):
         boxes = {target["key"]: target["box"]
@@ -190,7 +220,8 @@ class RegionPreviewTests(unittest.TestCase):
     def test_all_regions_are_inside_the_screen(self):
         result = self.preview()
 
-        self.assertEqual(4, len(result["regions"]))
+        # 4 个可校准/兜底区域 + 每局结束用的「开始」按钮 / 段位两个只读框
+        self.assertEqual(6, len(result["regions"]))
         self.assertTrue(all(r["in_bounds"] for r in result["regions"]))
 
     def test_wrong_resolution_is_reported_as_a_failure(self):
@@ -265,6 +296,65 @@ class RegionPreviewTests(unittest.TestCase):
     def test_grabber_failure_is_reported(self):
         with self.assertRaises(RuntimeError):
             self.preview(grabber=lambda: None)
+
+
+class RegionBoxDrawingTests(unittest.TestCase):
+    """画框本身：默认全画标签；校准窗口可以只跳过"当前目标"和它的标签。
+
+    回归背景：同一个框被 `paint_layer` 和校准窗口的当前目标高亮各画一遍
+    （两次描边差 1px），再叠上紧贴框边的深色标签底，看起来像"一个区域两个框"。
+    """
+
+    def setUp(self):
+        from PIL import Image
+        self.image = Image.new("RGB", (1920, 1080), (18, 22, 30))
+        self.config = make_config(post_game_start_roi=(1325, 865, 1475, 935))
+
+    def _draw(self, **kwargs):
+        labels = {region["key"]: (region["box"], region["label_drawn"])
+                  for region in screen_regions.draw_region_boxes(
+                      self.image, self.config, **kwargs)}
+        return labels
+
+    def test_every_region_gets_a_label_by_default(self):
+        labels = self._draw()
+
+        for key, (_box, drawn) in labels.items():
+            with self.subTest(key=key):
+                self.assertTrue(drawn)
+
+    def test_skip_labels_only_hides_the_named_region(self):
+        labels = self._draw(skip_labels=("post_game_start",))
+
+        self.assertFalse(labels["post_game_start"][1])
+        for key, (_box, drawn) in labels.items():
+            if key == "post_game_start":
+                continue
+            with self.subTest(key=key):
+                self.assertTrue(drawn)
+
+    def test_skip_keys_omits_the_region_entirely(self):
+        """被跳过的区域在这一层里一个像素都不画（改由校准窗口单独高亮）。"""
+        layer = region_overlay.paint_layer(
+            1920, 1080, None, self.config, skip_keys=("post_game_start",))
+
+        left, top, right, bottom = (1325, 865, 1475, 935)
+        for x in range(left, right + 1):
+            with self.subTest(x=x):
+                self.assertEqual(0, layer.getpixel((x, top))[3])
+                self.assertEqual(0, layer.getpixel((x, bottom))[3])
+
+        # 但区域本身仍登记在清单里（网页预览/调用方还要它的坐标）
+        region = next(r for r in screen_regions.screenshot_regions(self.config)
+                      if r["key"] == "post_game_start")
+        self.assertEqual((1325, 865, 1475, 935), region["box"])
+
+    def test_other_regions_are_still_drawn(self):
+        layer = region_overlay.paint_layer(
+            1920, 1080, None, self.config, skip_keys=("post_game_start",))
+
+        # 绿框（推荐面板）顶边必须还在：跳过只针对当前目标
+        self.assertGreater(layer.getpixel((100, 200))[3], 0)
 
 
 if __name__ == "__main__":

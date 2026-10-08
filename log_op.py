@@ -188,12 +188,15 @@ def parse_line(line_str):
         # 时间线（回溯/维持）的选择项只能靠 cardId 认出来：盒子的推荐可能只写
         # 「选择我方N号位卡牌」，没有回溯/维持文字（TIME_000tb=回溯/TIME_000ta=维持）。
         card_match = re.search(r"cardId=([^ ]+)", line_str)
+        entity_match = re.search(r" id=(\d+) ", line_str)
         return LineInfoContainer(
             LOG_LINE_GENERAL_CHOICE_ENTITY,
             choice_id=None,
             index=int(match_obj.group(1)),
             player=match_obj.group(2),
             card_id=card_match.group(1) if card_match else None,
+            # 选项实体 id：执行前复核"选项还是原来那批"（发现/选择一项菜单）。
+            entity_id=entity_match.group(1) if entity_match else None,
         )
 
     match_obj = GENERAL_CHOICE_READY_PATTERN.match(line_str)

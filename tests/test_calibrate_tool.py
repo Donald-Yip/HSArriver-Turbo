@@ -39,10 +39,12 @@ class TargetTests(unittest.TestCase):
     def test_every_registered_target_is_editable(self):
         session = make_session()
 
-        self.assertEqual(3, len(session.targets))
+        self.assertEqual(4, len(session.targets))
         self.assertEqual("recommendation", session.active["key"])
         for target in session.targets:
             self.assertEqual(4, len(target["box"]))
+        self.assertIn("post_game_start_roi",
+                      [target["config_key"] for target in session.targets])
 
     def test_start_key_selects_that_target(self):
         session = make_session(start_key="win_rate")

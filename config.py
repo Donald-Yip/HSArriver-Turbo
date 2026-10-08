@@ -131,6 +131,46 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 #               避免开局一两次低胜率就误降。
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
+# ---------------------------------------------------------------- 上分停止条件（可选）
+# 每局对战结束后读一次结算界面的段位数字（屏幕坐标 1230,180 - 1385,225；
+# 未上传说时该处没有数字），命中条件就把「本局结束后停止」置位，让自动化
+# 在回到非对局状态时干净退出。
+#   enabled       : 是否启用。默认 False（需用户在 Web 手动开启）。
+#   mode          : "legend"        上传说即停；
+#                   "legend_number" 上到传说某个名次（数字 <= legend_number）就停。
+#   legend_number : mode=legend_number 时的目标名次（1 = 第一名，越小越靠前）。
+# 真实值保存在 ui_config.json 的 rank_stop 段；这里只提供“没配置时”的兜底。
+DEFAULT_RANK_STOP = {"enabled": False, "mode": "legend", "legend_number": 1}
+# 目标名次的取值范围（防配置写坏成 0 / 负数 / 天文数字）。
+RANK_STOP_MIN_NUMBER = 1
+RANK_STOP_MAX_NUMBER = 100000
+
+
+def rank_stop_settings() -> dict:
+    """读取 ui_config.json 的 rank_stop 段（每次调用都读文件，改完即时生效）。
+
+    缺字段/类型不对时回退默认值；mode 只认 "legend"/"legend_number"，
+    目标名次收敛到 RANK_STOP_MIN_NUMBER..RANK_STOP_MAX_NUMBER，
+    避免配置写坏导致“永远不触发”或“莫名停止”。
+    """
+    cfg = dict(DEFAULT_RANK_STOP)
+    data = _load_ui_config().get("rank_stop")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    cfg["enabled"] = bool(cfg["enabled"])
+    if cfg["mode"] not in ("legend", "legend_number"):
+        cfg["mode"] = DEFAULT_RANK_STOP["mode"]
+    try:
+        number = int(cfg["legend_number"])
+    except (TypeError, ValueError):
+        number = DEFAULT_RANK_STOP["legend_number"]
+    cfg["legend_number"] = max(RANK_STOP_MIN_NUMBER,
+                               min(RANK_STOP_MAX_NUMBER, number))
+    return cfg
+
+
 # ---------------------------------------------------------------- 活人感（可选）
 # 三个开关（Web「🎭 活人感」卡片里是三行、三个勾）：
 #   enabled            : 总开关（默认关）。
@@ -307,7 +347,8 @@ OCR_MODEL_ROOT = os.environ.get("HS_OCR_MODEL_ROOT") or os.path.normpath(
 # 的字段名）。新增一个可校准区域时，这里和 screen_regions.CALIBRATION_TARGETS
 # 一起加即可。
 _USER_BOX_KEYS = ("recommendation_roi", "mulligan_confirm_roi",
-                  "ai_win_rate_roi", "ai_win_rate_wide_roi")
+                  "ai_win_rate_roi", "ai_win_rate_wide_roi",
+                  "post_game_start_roi")
 
 
 def _user_box(key: str) -> Optional[tuple[int, int, int, int]]:
@@ -356,6 +397,7 @@ _USER_DELAY_KEYS = (
     "pre_action_delay_seconds",
     "post_action_delay_seconds",
     "draw_extra_delay_per_card_seconds",
+    "discover_target_delay_seconds",
     "ocr_preprocess_scale",
 )
 
@@ -441,6 +483,13 @@ class RecommendationConfig:
     ai_win_rate_roi: tuple[int, int, int, int] = (110, 8, 270, 48)
     ai_win_rate_wide_roi: tuple[int, int, int, int] = (95, 0, 300, 60)
 
+    # 每局结束（结算界面）底部的「开始」按钮区域。
+    # 作用有两个：① OCR 判定它有没有出现（出现即收尾完成）；② 点击点取它的
+    # 正中心（默认 (1400,900)）。用户可以在校准窗口里拖这个框——框中心就是
+    # 实际点击的位置，所以按钮挪了位置也能自己校正。
+    # 可通过 ui_config.json 的 post_game_start_roi 覆盖（校准工具写入）。
+    post_game_start_roi: tuple[int, int, int, int] = (1325, 865, 1475, 935)
+
     # ------------------------------------------------------------------ 第一回合额外延时
     # 第一回合开始时会有一批"开局生效的全局卡"（如黑暗主教本尼迪塔斯 SW_448
     # 触发 TriggerKeyword=START_OF_GAME_KEYWORD），它们要跑入场/效果动画，导致
@@ -465,6 +514,10 @@ class RecommendationConfig:
     # 作用：抽牌会连带手牌动画 + 盒子面板刷新，等够了再截图/OCR 才不会读到旧推荐。
     # 可通过 ui_config.json 的 delays 段覆盖（网页「延时设置」可调，0 = 关闭）。
     draw_extra_delay_per_card_seconds: float = 1.0
+    # 抉择/发现选项点完之后，到点「选项自带的目标」之间的等待（秒）。
+    # 鲍勃「招募随从」（选完选项还要点一个对方随从）这类牌：选项菜单收起、目标
+    # 高亮出现需要一点时间，太早点会点空。可通过 delays 段覆盖（网页可调）。
+    discover_target_delay_seconds: float = 0.3
     # 单次读取（截图+OCR+解析）的超时保护（秒）。
     recognition_timeout_seconds: float = 2.0
     # 单次执行（点击操作）结果的等待/校验超时（秒）。

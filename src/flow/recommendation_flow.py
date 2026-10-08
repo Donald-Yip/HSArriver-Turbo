@@ -127,6 +127,15 @@ class RecommendationFlow:
                 self._clear_waiting()
             proposed = self.parser.parse(
                 evidence, state.game_num_turns_in_play, revision)
+            # 先留痕再适配：适配抛错时也要能看到"盒子到底写了什么"。线上出现过
+            # 连续 3090 次 choose_one_name_not_unique 却一条原文都没留下的情况，
+            # 就是因为这行原来打在适配之后。
+            print(f"[推荐] {proposed.normalized_instruction}")
+            raw_text = getattr(proposed, "raw_instruction", "") or ""
+            if raw_text and raw_text != proposed.normalized_instruction:
+                for line in raw_text.splitlines():
+                    if line.strip():
+                        print(f"[推荐] 原文：{line.strip()}")
             if proposed.action == ActionKind.MULLIGAN:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
@@ -148,7 +157,6 @@ class RecommendationFlow:
             if not validation.accepted:
                 return FlowStepResult(FlowStepStatus.RETRY, validation.code)
             adapted, key = validation.value
-            print(f"[推荐] {proposed.normalized_instruction}")
             print("[执行] 开始点击。")
             result = self.controller.execute(adapted.manual_action, fresh_state)
             if not result.executed or result.recovery_needed:

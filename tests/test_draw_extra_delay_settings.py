@@ -22,7 +22,11 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(KEY, _USER_DELAY_KEYS)
 
     def test_key_is_part_of_the_user_delay_whitelist(self):
-        self.assertEqual(KEY, _USER_DELAY_KEYS[-2])
+        # 白名单尾部顺序会随新增项变化（例如后来的 discover_target_delay_seconds），
+        # 这里只锁"抽牌延时在延迟项区域里、且排在 OCR 缩放之前"。
+        self.assertIn(KEY, _USER_DELAY_KEYS)
+        self.assertLess(_USER_DELAY_KEYS.index(KEY),
+                        _USER_DELAY_KEYS.index("ocr_preprocess_scale"))
 
     def test_config_leaf_matches_the_field(self):
         from src.recommendation_config import RecommendationConfig as Forwarded

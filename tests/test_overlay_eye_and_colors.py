@@ -81,41 +81,43 @@ class AccountEyeToggleTests(unittest.TestCase):
 
         self.assertFalse(log_overlay.account_visible())
 
-    def test_hidden_row_does_not_leak_the_nickname(self):
-        info = {"config": "TestUser#12345",
-                "players": {"1": "TestUser#12345", "2": "Other#2"},
-                "matched": True}
+    def test_hidden_and_visible_account_rows(self):
+        """隐藏账号时行内容：不泄露昵称、但保留匹配/不匹配的结论与告警色。"""
+        cases = (
+            # (info, show_account, 期望 value/color/marker, detail 里不该出现的)
+            ({"config": "TestUser#12345",
+              "players": {"1": "TestUser#12345", "2": "Other#2"},
+              "matched": True}, False,
+             ("匹配", log_overlay.MARKER_ON), "TestUser"),
+            ({"config": "Old#1", "players": {"1": "New#2"}, "matched": False},
+             False, ("不匹配", log_overlay.MARKER_OFF), "New#2"),
+            ({"config": "", "players": {}, "matched": None}, False,
+             ("—", None), None),
+        )
+        for info, show_account, (value, marker), leaked in cases:
+            with self.subTest(value=value, show_account=show_account):
+                row = log_overlay.account_row(info, show_account=show_account)
 
-        row = log_overlay.account_row(info, show_account=False)
+                self.assertEqual(value, row["value"])
+                if marker is not None:
+                    self.assertEqual(marker, row["marker"])
+                if leaked is not None:
+                    self.assertNotIn(leaked, row["detail"])
+                    self.assertEqual(log_overlay._ACCOUNT_HIDDEN_TEXT,
+                                     row["detail"])
 
-        self.assertEqual("匹配", row["value"])
-        self.assertEqual(log_overlay.MARKER_ON, row["marker"])
-        self.assertEqual(log_overlay._ACCOUNT_HIDDEN_TEXT, row["detail"])
-        self.assertNotIn("TestUser", row["detail"])
+        self.assertEqual(
+            log_overlay.DANGER,
+            log_overlay.account_row(
+                {"config": "Old#1", "players": {"1": "New#2"},
+                 "matched": False},
+                show_account=False)["value_color"])
 
-    def test_hidden_row_keeps_the_mismatch_warning(self):
-        info = {"config": "Old#1", "players": {"1": "New#2"}, "matched": False}
-
-        row = log_overlay.account_row(info, show_account=False)
-
-        self.assertEqual("不匹配", row["value"])
-        self.assertEqual(log_overlay.DANGER, row["value_color"])
-        self.assertEqual(log_overlay.MARKER_OFF, row["marker"])
-        self.assertNotIn("New#2", row["detail"])
-
-    def test_hiding_keeps_the_default_behaviour_for_unknown_state(self):
-        row = log_overlay.account_row(
-            {"config": "", "players": {}, "matched": None}, show_account=False)
-
-        self.assertEqual("—", row["value"])
-
-    def test_visible_row_is_unchanged(self):
-        info = {"config": "TestUser#12345",
-                "players": {"1": "TestUser#12345"}, "matched": True}
-
-        row = log_overlay.account_row(info, show_account=True)
-
-        self.assertEqual("TestUser#12345", row["detail"])
+        visible = log_overlay.account_row(
+            {"config": "TestUser#12345",
+             "players": {"1": "TestUser#12345"}, "matched": True},
+            show_account=True)
+        self.assertEqual("TestUser#12345", visible["detail"])
 
     def test_eye_is_rendered_and_clickable(self):
         source = inspect.getsource(log_overlay._run)
@@ -142,22 +144,16 @@ class AccountPreferencePersistenceTests(unittest.TestCase):
     def test_default_shows_the_account(self):
         self.assertTrue(config.overlay_settings()["show_account"])
 
-    def test_save_and_read_back(self):
+    def test_save_round_trip_keeps_other_settings(self):
         config.save_overlay_setting("show_account", False)
 
         self.assertFalse(config.overlay_settings()["show_account"])
         written = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertFalse(written["overlay"]["show_account"])
-
-    def test_other_settings_are_preserved(self):
-        config.save_overlay_setting("show_account", False)
-
-        written = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual("TestUser#12345", written["name"])
         self.assertEqual("D:\\Logs", written["log_root"])
         self.assertTrue(written["auto_concede"]["enabled"])
 
-    def test_unknown_key_is_refused(self):
         with self.assertRaises(KeyError):
             config.save_overlay_setting("show_name", True)
 
@@ -168,7 +164,7 @@ class AccountPreferencePersistenceTests(unittest.TestCase):
 
         self.assertFalse(config.overlay_settings()["show_account"])
 
-    def test_web_bridge_reads_and_writes_the_preference(self):
+    def test_web_bridge_and_overlay_binding_use_the_preference(self):
         self.assertFalse(web_ui._overlay_account_visible() is None)
 
         with patch.object(web_ui, "_log"):
@@ -177,7 +173,6 @@ class AccountPreferencePersistenceTests(unittest.TestCase):
         self.assertFalse(config.overlay_settings()["show_account"])
         self.assertFalse(web_ui._overlay_account_visible())
 
-    def test_overlay_binding_passes_the_preference(self):
         bound = {}
         overlay = type("O", (), {
             "start": lambda self, **kwargs: bound.update(kwargs),
@@ -250,85 +245,61 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertEqual(log_overlay.BTN_LAYOUT["save"], (2, 1))
         self.assertEqual(log_overlay.BTN_LAYOUT["calibrate"], (2, 0))
         self.assertNotIn("calibrate", log_overlay.BTN_SPAN)
-
-    def test_restart_sits_next_to_exit_overlay(self):
-        """重启炉石（危险，有确认弹窗）和退出浮窗（安全）同排。"""
         self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (3, 0))
         self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (3, 1))
         self.assertNotIn("restart", log_overlay.BTN_SPAN)
         self.assertNotIn("exit_overlay", log_overlay.BTN_SPAN)
+        slots = list(log_overlay.BTN_LAYOUT.values())
+        self.assertEqual(len(slots), len(set(slots)))
 
-    def test_exit_overlay_is_not_the_script_exit(self):
-        """「退出浮窗」不能和「退出脚本」同槽位/同颜色，避免误点杀进程。"""
+    def test_destructive_buttons_guard_themselves(self):
+        """退出浮窗 ≠ 退出脚本；重启炉石必须先确认，取消时不调回调。"""
         self.assertNotEqual(log_overlay.BTN_LAYOUT["exit_overlay"],
                             log_overlay.BTN_LAYOUT["exit"])
         source = inspect.getsource(log_overlay._run)
-        self.assertIn('_make_btn(btn_frame, "✖  退出浮窗", NEUTRAL',
-                      source)
+        self.assertIn('_make_btn(btn_frame, "✖  退出浮窗", NEUTRAL', source)
         self.assertIn('_make_btn(btn_frame, "🚪  退出脚本", DANGER', source)
         self.assertIn('_make_btn(btn_frame, "♻  重启炉石", WARN', source)
 
-    def test_exit_overlay_only_closes_the_window(self):
-        """退出浮窗走 _ON_EXIT_OVERLAY + stop()，绝不去碰 _ON_EXIT。"""
-        source = inspect.getsource(log_overlay._run)
         body = source.split("def _call_exit_overlay", 1)[1]
         body = body.split("exit_overlay_btn = ", 1)[0]
-
         self.assertIn("_ON_EXIT_OVERLAY", body)
         self.assertIn("stop", body)
         self.assertNotIn("_ON_EXIT(", body)
 
-    def test_restart_button_asks_for_confirmation_first(self):
-        source = inspect.getsource(log_overlay._run)
-        body = source.split("def _call_restart", 1)[1]
-        body = body.split("restart_btn = ", 1)[0]
+        restart = source.split("def _call_restart", 1)[1]
+        restart = restart.split("restart_btn = ", 1)[0]
+        self.assertIn("_confirm_restart(root)", restart)
+        self.assertIn("_ON_RESTART", restart)
+        self.assertIn("已取消重启炉石", restart)
 
-        self.assertIn("_confirm_restart(root)", body)
-        self.assertIn("_ON_RESTART", body)
-        # 取消时不能去调回调
-        self.assertIn("已取消重启炉石", body)
+        confirm = inspect.getsource(log_overlay._confirm_restart)
+        self.assertIn('attributes("-topmost", True)', confirm)
+        self.assertIn("Hearthstone.exe", confirm)
+        self.assertIn("Log.config", confirm)
 
-    def test_restart_confirmation_is_a_topmost_window(self):
-        source = inspect.getsource(log_overlay._confirm_restart)
-
-        self.assertIn('attributes("-topmost", True)', source)
-        self.assertIn("Hearthstone.exe", source)
-        self.assertIn("Log.config", source)
-
-    def test_exit_spans_the_whole_last_row(self):
+    def test_spanning_rows(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
         row, _column = log_overlay.BTN_LAYOUT["exit"]
         rows = [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
                 if key != "exit"]
         self.assertEqual(max(rows) + 1, row)
 
-    def test_every_button_has_a_unique_slot(self):
-        slots = list(log_overlay.BTN_LAYOUT.values())
-        self.assertEqual(len(slots), len(set(slots)))
-
-    def test_stop_after_spans_the_whole_row(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["stop_after"])
         row, _column = log_overlay.BTN_LAYOUT["stop_after"]
         self.assertNotIn(row, [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
                                if key != "stop_after"])
 
-    def test_buttons_are_smaller_than_the_old_stacked_ones(self):
+    def test_window_metrics_and_grid_helpers(self):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
         self.assertLessEqual(log_overlay.BTN_PADY, 4)
-
-    def test_window_is_ten_percent_narrower(self):
-        """用户要求浮窗收窄 10%：292 → 263。"""
+        # 用户要求浮窗收窄 10%（292 → 263），高度要补回多出来的一行按钮。
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
         self.assertLessEqual(log_overlay.WINDOW_WIDTH,
                              int(292 * 0.9) + 1)
+        self.assertGreaterEqual(log_overlay.WINDOW_HEIGHT, 628 + 20)
 
-    def test_window_fits_the_extra_button_row(self):
-        # 多了一行按钮（重启炉石 / 退出浮窗），高度必须补回来。
-        self.assertGreaterEqual(log_overlay.WINDOW_HEIGHT,
-                                628 + 20)
-
-    def test_buttons_are_placed_with_grid(self):
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)
         for key in log_overlay.BTN_LAYOUT:

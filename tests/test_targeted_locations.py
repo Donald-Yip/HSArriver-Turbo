@@ -313,7 +313,8 @@ class HandTargetLocationTests(unittest.TestCase):
         self.assertEqual("hand", adapted.manual_action.target.kind)
         self.assertEqual(2, adapted.manual_action.target.index)
         self.assertEqual("hand-3", adapted.target_entity_id)
-        self.assertEqual([0.3], sleeps)
+        # 0.3s = 点地标后等目标 UI 出现；0.9s = 手牌目标本身出现得慢（统一入口里等）
+        self.assertEqual([0.3, 0.9], sleeps)
         self.assertEqual([
             ("choose_my_board_entity", 0, 1),
             ("choose_card", 2, 3),

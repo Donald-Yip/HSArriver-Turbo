@@ -9,8 +9,14 @@ from manual_controller import (
     TradeCardAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
-from src.game_state.choose_one import choose_one_card_ids
+from src.game_state.choose_one import (
+    card_text,
+    choose_one_card_name,
+    choose_one_option_card_ids,
+    is_choose_one_card,
+)
 from src.game_state.hand_target import (
+    hand_target_cardtype_mismatch,
     is_friendly_hand_target_card,
     is_hand_or_board_target_card,
 )
@@ -108,6 +114,10 @@ def adapt_action(proposed, state):
                         raise RecommendationStateError(
                             "hand_target_out_of_range")
                     target_card = state.my_hand_cards[target_index]
+                    if hand_target_cardtype_mismatch(location.card_id,
+                                                     target_card):
+                        raise RecommendationStateError(
+                            "hand_target_cardtype_mismatch")
                     target_id = getattr(target_card, "entity_id", None)
                     target = Target(
                         "friendly", "hand", target_index, target_id)
@@ -145,11 +155,18 @@ def adapt_action(proposed, state):
         if (choice_count == 2 and set(choices) == {0, 1}
                 and set(choices.values()) == {"TIME_000ta", "TIME_000tb"}):
             timeline_card_id = choices[proposed.source.index - 1]
+        choice_index = proposed.source.index - 1
+        target, target_id = _discover_target(proposed, state)
+        parent_entity_id, choice_entity_id = _discover_choice_identity(
+            proposed, state, choice_index)
         return AdaptedAction(
             DiscoverChoiceAction(
-                proposed.source.index - 1, choice_count,
-                timeline_card_id=timeline_card_id),
-            None, None, "choice_resolved")
+                choice_index, choice_count,
+                timeline_card_id=timeline_card_id,
+                target=target,
+                choice_entity_id=choice_entity_id,
+                choice_parent_entity_id=parent_entity_id),
+            None, target_id, "choice_resolved")
     if proposed.action == ActionKind.END_TURN:
         return AdaptedAction(EndTurnAction(), None, None, "turn_changed")
     if proposed.action == ActionKind.TIMELINE_UNDO:
@@ -170,6 +187,70 @@ def adapt_action(proposed, state):
     raise RecommendationStateError("unsupported_action")
 
 
+def _discover_target(proposed, state):
+    """发现/选项菜单后面还要点目标时（鲍勃「招募随从」→ 对方随从），解析它。
+
+    返回 (Target|None, entity_id|None)。只接受场面随从与英雄两类目标：
+    发现菜单之后的目标永远是场上的实体，不会是自己手牌。
+    """
+    target = proposed.target
+    if target is None:
+        return None, None
+    side = target.owner
+    if side not in {"friendly", "enemy"}:
+        raise RecommendationStateError("discover_target_unsupported")
+    if target.kind == "hero":
+        hero = (getattr(state, "my_hero", None) if side == "friendly"
+                else getattr(state, "oppo_hero", None))
+        if hero is None:
+            raise RecommendationStateError("discover_target_missing")
+        entity_id = getattr(hero, "entity_id", None)
+        return Target(side, "hero", None, entity_id), entity_id
+    if target.kind != "board_slot":
+        raise RecommendationStateError("discover_target_unsupported")
+    try:
+        entry = board_slot(state, side, target.index)
+    except RecommendationStateError as exc:
+        raise RecommendationStateError("discover_target_out_of_range") from exc
+    if entry.kind != "minion":
+        raise RecommendationStateError("target_not_minion")
+    entity_id = getattr(entry.entity, "entity_id", None)
+    return Target(side, "minion", entry.collection_index, entity_id), entity_id
+
+
+def _discover_choice_identity(proposed, state, choice_index):
+    """(父实体 id, 选项实体 id)：执行前用它复核"还是原来那批选项"。
+
+    对不上就返回 (None, None)：这只是加分项，绝不能让本来能点的发现动作失败。
+    """
+    name = getattr(proposed, "choice_name", None)
+    general = getattr(state, "general_choice_cards", {}) or {}
+    for parent_id, option in (getattr(state, "power_options", {}) or {}).items():
+        choice = (option.get("choices") or {}).get(choice_index)
+        if choice is None:
+            continue
+        if not name or _name_matches(name, choice.get("name")) or _name_matches(
+                name, _card_name_of(state, choice.get("card_id"))):
+            return parent_id, choice.get("entity_id")
+        return None, None
+    if choice_index in general:
+        # 通用选择（发现/选择一项）：日志里也有选项的实体 id，绑上它同样能在
+        # 执行前复核"选项没变"；取不到 id 时只按号位走，不新增失败路径。
+        entity_ids = getattr(state, "general_choice_entity_ids", {}) or {}
+        return None, entity_ids.get(choice_index)
+    return None, None
+
+
+def _card_name_of(state, card_id):
+    if not card_id:
+        return None
+    try:
+        from log_state import query_json_dict
+        return query_json_dict(card_id)
+    except Exception:
+        return None
+
+
 def _logged_timeline(state, card_id):
     """日志里的选择项正好是回溯/维持时，返回绑定该选项卡的动作。"""
     choices = getattr(state, "general_choice_cards", {})
@@ -184,32 +265,210 @@ def _logged_timeline(state, card_id):
 
 
 def _with_choose_one(proposed, state, adapted, source):
+    """把「选择卡牌 X」变成「打出去之后点第 N 个选项」。
+
+    选项定位分四档，任何一档判不出来都**退回原动作**（正常打牌/用技能、不点
+    选项），绝不抛错进死循环——线上实测 `choose_one_name_not_unique` 连续重试
+    过 3090 次、最长空转 1 分半，就是这里抛错导致的。
+
+      1. 名字全等（归一化后比较，容忍 OCR 的空格/标点/全角差异）；
+      2. 小差异容错（编辑距离 ≤1 且长度 ≥3）：OCR 认错一两个字仍然认得出；
+      3. 盒子写的是**牌名**（如「暮光侵扰」）：日志里这批 subOption 必须全部属于
+         这张卡的选项子卡，才允许用盒子自己的号位；
+      4. 都判不出 → 只出牌，不点选项。
+
+    安全约束：盒子点名了某个选项时，该选项必须是唯一命中的那一个；命中多个或
+    名字对不上号位，一律拒绝而不是猜——抉择牌两个选项常常差很远（凶险梦魇：
+    全场 1 伤 vs 一个受伤随从 +2/+2），点错比不点更糟。
+    """
     name = getattr(proposed, "choice_name", None)
     if name is None or source is None:
         return adapted
-    if source.card_id not in choose_one_card_ids():
+    card_id = getattr(source, "card_id", None)
+    if not is_choose_one_card(card_id):
+        # 星舰发射面板也带「选择卡牌」一行（选择卡牌 / 发射星舰），源牌不是抉择牌
+        # 就完全不动，保持改动前的行为。
         return adapted
     if (isinstance(adapted.manual_action, PlayCardAction)
             and adapted.manual_action.cardtype not in {"SPELL", "MINION"}):
         raise RecommendationStateError("choose_one_cardtype_unsupported")
     option = getattr(state, "power_options", {}).get(
         getattr(source, "entity_id", None))
-    if (option is None or option.get("card_id") != source.card_id
+    if (option is None or option.get("card_id") != card_id
             or option.get("player") != getattr(state, "my_player_id", None)):
         raise RecommendationStateError("choose_one_options_unavailable")
     choices = option["choices"]
     count = len(choices)
     if count not in (1, 2, 3, 4) or set(choices) != set(range(count)):
         raise RecommendationStateError("choose_one_options_incomplete")
-    matches = [index for index, choice in choices.items()
-               if choice.get("name") == name]
-    if len(matches) != 1:
-        raise RecommendationStateError("choose_one_name_not_unique")
-    index = matches[0]
-    if choices[index].get("error") not in {"NONE", "REQ_TARGET_TO_PLAY"}:
+    if count < 2:
+        # 单选项抉择游戏自己就结算了，不需要玩家再点一下。
+        return adapted
+
+    usable = {index for index, choice in choices.items()
+              if _choice_available(choice)}
+    index, named = _resolve_choice_index(
+        name, card_id, choices, usable, has_target=proposed.target is not None)
+    if index is None:
+        # 判不出来：只出牌，不点选项（退回改动前的"能打出去"行为，不再死循环）。
+        print(f"[推荐] 抉择选项未能确定（面板：{name}），本次只出牌、不点选项。")
+        return adapted
+    if index not in usable:
+        # 盒子点名的那个选项当前不可选（`REQ_ENOUGH_MANA` 之类）：拒绝重试，
+        # 绝不静默改成另一个选项——抉择牌两个选项常常差很远。
         raise RecommendationStateError("choose_one_option_unavailable")
+    print(f"[推荐] 抉择：{card_id} → {index + 1}号位"
+          f"（{choices[index].get('name') or '?'}）")
     return replace(adapted, manual_action=replace(
-        adapted.manual_action, choose_one=DiscoverChoiceAction(index, count)))
+        adapted.manual_action, choose_one=DiscoverChoiceAction(
+            index, count,
+            choice_entity_id=choices[index].get("entity_id"),
+            choice_parent_entity_id=getattr(source, "entity_id", None))))
+
+
+def _choice_available(choice):
+    """日志里这个选项现在是不是"可点"（REQ_ENOUGH_MANA 这类一律不行）。
+
+    注意：**不能**拿这里的 error 判断"要不要目标"。实测日志里带目标的选项
+    在待抉择阶段报的仍是 `NONE`（`EX1_154a` 真实面板就是这种情况），所以
+    要不要点目标只信盒子面板上的目标行，不在这里推断。
+    """
+    return (choice or {}).get("error") in (None, "NONE")
+
+
+def _choice_needs_target(choice):
+    """这个选项**大概**要不要再点一个目标。
+
+    依据两条，任一条成立即算"要目标"：
+      * 日志的 `error` 是 `REQ_TARGET_*` 系列（实测不总出现，所以不够）；
+      * 卡面文字里有「使…一个随从」「对一个随从」「消灭一个随从」这类写法
+        （选项子卡的 card_id 能查到，见 choose_one.card_text）。
+
+    这只用于「号位兜底」那一档判断选哪个选项，**不会**用它去删掉盒子给的
+    目标行——实测待抉择阶段带目标的选项也可能报 `NONE`（EX1_154a）。
+    """
+    error = (choice or {}).get("error") or ""
+    if error.startswith("REQ_TARGET"):
+        return True
+    text = (choice or {}).get("text") or ""
+    if not text:
+        text = card_text((choice or {}).get("card_id"))
+    return bool(_CHOICE_TARGET_TEXT.search(text))
+
+
+# 卡面里"要点一个目标"的写法（`$` 是卡表的伤害占位符，直接吃掉）。
+# 「一个」和「随从」之间可能夹着很长的定语（「消灭一个攻击力小于或等于3的随从」
+# 中间有 10 个字），所以第二段给 20 字余量；只认「使/对/消灭/沉默/冻结/变形」
+# 打头的句式，避免把「随机召唤一个…随从」这种不用点的也算进来。
+_CHOICE_TARGET_TEXT = re.compile(
+    r"(?:使|对|消灭|沉默|冻结|变形)[^。；\n]{0,8}?一个[^。；\n]{0,20}?"
+    r"(?:随从|角色|地标|恶魔|野兽|龙|鱼人|机械)")
+
+
+def _resolve_choice_index(name, card_id, choices, usable, has_target):
+    """选项号位解析：见 `_with_choose_one` 的四档说明。
+
+    返回 (index|None, named)。named=True 表示"盒子点名了这个选项"，
+    False 表示是靠牌名/号位兜底认出来的。
+    """
+    wanted = _normalize_choice_name(name)
+    # 第 1 档：名字全等。
+    exact = [index for index, choice in choices.items()
+             if _normalize_choice_name(choice.get("name")) == wanted and wanted]
+    if len(exact) == 1:
+        return exact[0], True
+    if len(exact) > 1:
+        # 两个选项同名（实测偶发）：不猜，也不退到牌名兜底。
+        return None, False
+    # 第 2 档：小差异容错（OCR 差一两个字）。
+    near = [index for index, choice in choices.items()
+            if _names_close(wanted, _normalize_choice_name(choice.get("name")))]
+    if len(near) == 1:
+        return near[0], True
+    if len(near) > 1:
+        return None, False
+    # 盒子写的是母卡名（真实日志里偶尔出现）：只在这批 subOption 确实都是这张卡
+    # 的选项时才敢用号位兜底。分流依据就是盒子有没有给目标行——给目标就挑"要目标"
+    # 的那个选项，没给就挑"不要目标"的；仍然分不出来就放弃（退回只出牌）。
+    source_name = _normalize_choice_name(choose_one_card_name(card_id))
+    if not source_name or wanted != source_name:
+        return None, False
+    if not _all_choices_are_options(card_id, choices):
+        return None, False
+    return _pick_by_target_need(choices, usable, has_target), False
+
+
+def _all_choices_are_options(card_id, choices):
+    """日志里这批 subOption 是不是全都是 card_id 的选项子卡。
+
+    只有这里为真，才允许用盒子给的号位兜底——否则宁可不点。
+    """
+    family = choose_one_option_card_ids(card_id)
+    if not family:
+        return False
+    card_ids = [choice.get("card_id") for choice in choices.values()]
+    return bool(card_ids) and all(
+        card_id_ in family for card_id_ in card_ids if card_id_)
+
+
+def _pick_by_target_need(choices, usable, has_target):
+    """按"要不要目标"分流：盒子给了目标就挑要目标的那个，没给就挑不要的。
+
+    只在候选唯一时才返回号位；分不出来（含"可点选项一个都不剩"）返回 None，
+    由调用方决定拒绝还是退回只出牌。
+    """
+    if not usable:
+        return None
+    pool = sorted(usable)
+    wanted = [index for index in pool
+              if _choice_needs_target(choices[index]) == has_target]
+    return wanted[0] if len(wanted) == 1 else None
+
+
+def _normalize_choice_name(value):
+    """卡名归一化：去空白/中英标点/间隔号，全角转半角，统一小写。"""
+    if not value:
+        return ""
+    text = str(value).translate(_FULLWIDTH_TO_HALFWIDTH)
+    return _NAME_NOISE.sub("", text).lower()
+
+
+def _names_close(left, right):
+    """两个归一化名字是不是"差一两个字"（OCR 容错）。
+
+    只在长度 ≥3 且编辑距离 ≤1 时算命中：要求长度是为了避免「冰雪绽放」被
+    「冰雪」这种截断误命中，限制距离是为了避免把两个不同的选项认成同一个。
+    """
+    if not left or not right or min(len(left), len(right)) < 3:
+        return False
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    return _edit_distance_at_most_one(left, right)
+
+
+def _edit_distance_at_most_one(left, right):
+    """左右是否只差一个增删改（长度差 ≤1 时用）。"""
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    index = 0
+    skipped = False
+    for char in longer:
+        if index < len(shorter) and shorter[index] == char:
+            index += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+    return True
+
+
+_FULLWIDTH_TO_HALFWIDTH = str.maketrans(
+    "０１２３４５６７８９（）【】《》，。、；：？！“”‘’ＡＢＣＤＥＦＧ",
+    "0123456789()[]<>,.、;:?!\"\"''ABCDEFG")
+_NAME_NOISE = re.compile(r"[\s·・．.,，。！!？?、：:；;（）()\[\]【】「」『』<>《》\-—_/～~\"']")
 
 
 def _friendly_hand_target_choice(proposed, state, source_index, card):
@@ -240,6 +499,10 @@ def _friendly_hand_target_choice(proposed, state, source_index, card):
     if target_index == source_index:
         raise RecommendationStateError("hand_target_is_source")
     target_card = state.my_hand_cards[target_index]
+    # 卡面要求「一张法术牌 / 随从牌 …」时，号位那张牌的类型必须对得上，
+    # 否则宁可拒绝也不要盲点（盒子的号位偶尔会指到不符合条件的牌）。
+    if hand_target_cardtype_mismatch(card.card_id, target_card):
+        raise RecommendationStateError("hand_target_cardtype_mismatch")
     return Target("friendly", "hand", target_index,
                   getattr(target_card, "entity_id", None))
 

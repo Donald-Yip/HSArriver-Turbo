@@ -11,6 +11,7 @@ import click
 import get_screen
 from config import (
     DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
+    rank_stop_settings,
 )
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
@@ -94,6 +95,17 @@ _last_snapshot_write = 0.0
 _oppo_minion_ids = None
 # 一次最多悬停几个新随从：对手一口气铺满场（token/亡语）时不至于长时间发呆。
 OPPO_MINION_HOVER_PER_BATCH = 3
+# ---------------------------------------------------------------- 上分停止条件
+# 每局对战结束后读结算界面的段位数字，命中用户设定的目标就把「本局结束后停止」
+# 置位（见 _check_rank_stop / DEFAULT_RANK_STOP）。
+#   _rank_stop_triggered      : 本局已命中并已请求停止（每局由 reset_game_session 复位）。
+#   _rank_stop_stop_reason    : 给网页横幅显示的中文停止原因。
+_rank_stop_triggered = False
+_rank_stop_stop_reason = None
+# 最近一次段位读数（供 Web / 浮窗显示，None = 还没读过）与它发生在哪一步
+# （"点「开始」前" / "点「开始」后" / "选择套牌界面"）——页面据此说明"到底检测了没有"。
+_rank_last_read = None
+_rank_last_phase = None
 
 
 def _automation_state():
@@ -284,6 +296,7 @@ def reset_game_session():
     global _concede_last_rate, _concede_last_check
     global _name_match_result
     global _oppo_minion_ids
+    global _rank_stop_triggered, _rank_stop_stop_reason
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -298,6 +311,10 @@ def reset_game_session():
     _concede_triggered = False
     _concede_last_rate = None
     _concede_last_check = None
+    # 新一局重新允许“上分停止”检测：已触发的停止不再撤销，但本局标志要复位，
+    # 否则下一局打完不会再检查段位。最近读数保留，方便网页继续显示。
+    _rank_stop_triggered = False
+    _rank_stop_stop_reason = None
     # 新一局重新校验昵称（换号提示按局给一次）。
     _name_match_result = None
     # 新一局重新建立“对手随从基线”，第一份快照只记录不悬停。
@@ -315,6 +332,8 @@ def init():
     global _name_match_result, _name_match_reported
     global _liveness_alert, _ocr_fail_streak
     global _oppo_minion_ids
+    global _rank_stop_triggered, _rank_stop_stop_reason
+    global _rank_last_read
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -336,6 +355,10 @@ def init():
     _liveness_alert = None
     _ocr_fail_streak = 0
     _oppo_minion_ids = None
+    # 上分停止条件：新一轮自动化从头开始（最近读数也清掉，避免显示上一次运行的旧值）。
+    _rank_stop_triggered = False
+    _rank_stop_stop_reason = None
+    _rank_last_read = None
     # 存活检测按“本轮自动化”重新开始计数：本轮没见过的炉石进程不算“消失”，
     # 否则“启动脚本 → 脚本拉起炉石”的正常流程会被误判成闪退。
     try:
@@ -510,6 +533,23 @@ def ChoosingHeroAction():
         return FSM_ERROR
 
     time.sleep(2)
+    # 排队前最后一道闸（用户口径「上传说就停止」）：这一段屏幕（选择套牌/选人）
+    # 右上角就是当前段位名次，读到了就**不点「开始匹配」**，把自动化停在本局之后。
+    # 实测漏过：打完一局后画面自己回到这个界面，结算里的段位检测没跑到，
+    # 脚本照样排队进了下一局。
+    try:
+        if _check_rank_stop(
+                attempts=_CHOOSING_HERO_RANK_READ_ATTEMPTS,
+                wait=_CHOOSING_HERO_RANK_RETRY_WAIT,
+                label="选择套牌界面",
+                min_confidence=_POST_GAME_MIN_CONFIDENCE,
+                confirm=True):
+            info_print(
+                "已到上分停止条件：不点「开始匹配」，本局结束后停止"
+                "（要继续打请在页面关掉「🏁 上分停止条件」）。")
+            return FSM_CHOOSING_HERO
+    except Exception as exc:
+        warn_print(f"选择套牌界面段位检测失败（忽略，继续匹配）：{exc}")
     click.run_hearthstone_action(click.match_opponent)
     time.sleep(1)
     return FSM_MATCHING
@@ -866,6 +906,396 @@ def player_name_state() -> dict:
     return {"config": config_name, "players": {}, "matched": None}
 
 
+# ---------------------------------------------------------------- 每局结束流程 / 段位
+# 一局打完（Power.log 报 COMPLETE）后进入 FSM_QUITTING_BATTLE。结算界面会有
+# 胜负横幅、段位升降级动画、奖励面板等好几屏，必须一路点掉，直到出现「开始」
+# 按钮才算收尾完成。只在对局结算阶段使用：
+#   * _POST_GAME_START_BUTTON_ROI ：结算界面底部「开始」按钮的默认框，
+#     用户可以校准（ui_config.json 的 post_game_start_roi），点击点取框中心；
+#   * _POST_GAME_START_FALLBACK_ROI：检测「开始」的兜底框（框被拖小后仍能认出）；
+#   * _POST_GAME_RANK_ROI         ：段位数字（没上传说时这里是空白）。
+# 推进结算界面点哪儿：**中间那两个点**（`click.ERROR_REPORT_POINTS` =
+# (1100,820) + (960,650)，原来用于错误弹窗/断线提示），每轮各点一次；
+# 第三个点（「开始」按钮正中心）只在检测到「开始」之后的收尾里点。右边那些
+# 辅助点不用（会被右上角日志浮窗吃掉/可能误点到下一屏），屏幕正中 (960,540)
+# 会落到下一局「选择卡组」界面的卡组上，也不用它。
+_POST_GAME_START_BUTTON_ROI = (1325, 865, 1475, 935)
+_POST_GAME_START_FALLBACK_ROI = (1250, 845, 1550, 945)
+_POST_GAME_START_DEFAULT_POINT = (1400, 900)
+_POST_GAME_RANK_ROI = (1230, 180, 1385, 225)
+_MAX_RANK_NUMBER = 100000
+# 小字号放大后再送 OCR（与 AI胜率浮动条同一套做法）。
+_POST_GAME_OCR_SCALE = 2.0
+# 收尾总轮数上限：每轮 = 点一下待命点 + 等 _POST_GAME_CLICK_WAIT 秒 +（可选）OCR。
+# 40 轮约 2~3 分钟；超时走原 FSM_ERROR 自愈路径（重启炉石），与改动前一致。
+_POST_GAME_MAX_CYCLES = 40
+_POST_GAME_CLICK_WAIT = 1.2
+# 检测「开始」的尝试间隔：每轮点完前两个点就检查一次，读不到就下一轮再查。
+# 段位的读取时机见 QuittingBattle / ChoosingHeroAction（点「开始」之前先读一次，
+# 收尾后再兜底读一次，排队点「开始匹配」之前再读一次）。
+_POST_GAME_RANK_READ_ATTEMPTS = 3
+_POST_GAME_RANK_RETRY_WAIT = 1.5
+# 收尾前预读的复核间隔：预读读到数字时，隔这么久再读一次，两次都读到才算数
+# （那会儿屏幕上还是结算界面，不能把过渡画面里的误识别当成名次）。
+_POST_GAME_RANK_CONFIRM_WAIT = 0.6
+# 「选择套牌/选人」界面（点「开始匹配」之前）的名次检测：名次是**点完「开始」
+# 之后那一屏**才画出来的，实测要 ~3 秒，所以这里多试几次；读到名次就不点
+# 「开始匹配」，直接停在本局之后。
+_CHOOSING_HERO_RANK_READ_ATTEMPTS = 4
+_CHOOSING_HERO_RANK_RETRY_WAIT = 1.2
+# 「开始」按钮的 OCR 关键词与最低置信度（繁体/英文一并兜住）。
+_POST_GAME_START_KEYWORDS = ("开始", "開始", "Play")
+_POST_GAME_MIN_CONFIDENCE = 0.5
+# 段位区域「是否空白」判定：区域内足够亮的像素少于这么多，就当没有数字。
+# 未上传说时该处是纯背景，直接跳过 OCR（省一次推理，也避免空图被误识别成数字）。
+_RANK_MIN_BRIGHT_PIXELS = 8
+_RANK_BRIGHT_THRESHOLD = 150.0
+# 全角数字/空格 → 半角（OCR 有时会把全角数字读出来）。
+_FULLWIDTH_DIGITS = str.maketrans(
+    "０１２３４５６７８９　", "0123456789 ")
+
+
+def _config_roi(key: str, default) -> tuple:
+    """读用户校准过的区域（ui_config.json 顶层 [left,top,right,bottom]）。
+
+    非法/缺失时回退 default，保证自动化永远有一个可用的框。
+    """
+    try:
+        box = getattr(recommendation_config, key, None)
+        if box is not None:
+            left, top, right, bottom = (int(v) for v in box)
+            if 0 <= left < right and 0 <= top < bottom:
+                return (left, top, right, bottom)
+    except Exception:
+        pass
+    return tuple(int(v) for v in default)
+
+
+def _grab_region(box, scale: float = 1.0):
+    """截取屏幕区域并返回放大后的 BGR ndarray；依赖缺失/截图失败返回 None。"""
+    try:
+        import cv2
+        import numpy as np
+        from PIL import ImageGrab
+    except Exception:
+        return None
+    try:
+        rgb = np.asarray(ImageGrab.grab(bbox=tuple(int(v) for v in box),
+                                        all_screens=False))
+        img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        if scale and scale != 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_CUBIC)
+        return img
+    except Exception:
+        return None
+
+
+def _ocr_lines(box, scale: float, tag: str):
+    """对屏幕区域做一次 OCR，返回 OcrLine 列表；不可用/异常返回 None。
+
+    复用换牌/胜率同一个 OCR backend（mulligan_reader 跨局复用），所以结算
+    阶段不会额外加载引擎；引擎没就绪时返回 None，由调用方回退。
+    """
+    reader = mulligan_reader
+    img = _grab_region(box, scale)
+    if img is None or reader is None:
+        return None
+    try:
+        evidence = reader.backend.recognize(
+            img, f"{tag}-{time.time():.3f}", tag)
+    except Exception:
+        return None
+    return list(evidence.lines)
+
+
+def _region_is_blank(img) -> bool:
+    """段位区域是不是「没有数字」的纯背景（未上传说）。
+
+    未上传说时段位数字的位置是空的，靠“亮像素太少”判定，直接跳过 OCR。
+    判不准（依赖异常）时返回 False = 当作有内容，交给 OCR 去读；
+    img 为 None（截图失败）也算“空”，但调用方会把它当成**还没读到**去重试。
+    """
+    if img is None:
+        return True
+    try:
+        import numpy as np
+        gray = np.asarray(img)
+        if gray.ndim == 3:
+            gray = gray[:, :, 0] * 0.114 + gray[:, :, 1] * 0.587 \
+                + gray[:, :, 2] * 0.299
+        return int((gray > _RANK_BRIGHT_THRESHOLD).sum()) < _RANK_MIN_BRIGHT_PIXELS
+    except Exception:
+        return False
+
+
+def _rank_bright_pixels(img) -> int:
+    """段位区域里「够亮」的像素个数（只用于日志/页面的失败原因，判不出来返回 -1）。"""
+    if img is None:
+        return -1
+    try:
+        import numpy as np
+        gray = np.asarray(img)
+        if gray.ndim == 3:
+            gray = gray[:, :, 0] * 0.114 + gray[:, :, 1] * 0.587 \
+                + gray[:, :, 2] * 0.299
+        return int((gray > _RANK_BRIGHT_THRESHOLD).sum())
+    except Exception:
+        return -1
+
+
+def parse_rank_text(text: str) -> dict:
+    """把结算界面段位区域的 OCR 文本解析成 {number, legend, raw, empty}。
+
+    判定只看数字（用户口径）：
+      * 这段区域在**未上传说时是空白的**，上了传说才会显示名次数字；
+      * 所以「读得到数字」＝已上传说，数字就是名次；「读不到数字」＝没上传说。
+    不做任何文字匹配（不再认「传说/傳奇/Legend」），只统一全角数字再取第一个
+    1.._MAX_RANK_NUMBER 的整数；文本里的其它字（如果有）不影响判定。
+    """
+    result = {"number": None, "legend": False, "raw": text, "empty": False}
+    if not text or not str(text).strip():
+        return result
+    normalized = str(text).translate(_FULLWIDTH_DIGITS)
+    compact = re.sub(r"\s+", "", normalized)
+    match = re.search(r"\d{1,6}", compact)
+    if match:
+        value = int(match.group(0))
+        if 1 <= value <= _MAX_RANK_NUMBER:
+            result["number"] = value
+    # 有数字就是传说（名次）；没数字就是没上传说。
+    result["legend"] = result["number"] is not None
+    return result
+
+
+def is_pure_rank_text(text: str) -> bool:
+    """整行是不是「只有名次数字」（允许全角数字和可选的前导「#」）。
+
+    给需要更严的检测用（例如必须在某一步之前就拦住点击时）：屏幕上别的
+    内容被 OCR 随口读出一个数字，不算「已上传说」。
+    """
+    compact = re.sub(r"\s+", "", str(text or "").translate(_FULLWIDTH_DIGITS))
+    return bool(re.fullmatch(r"#?\d{1,6}", compact))
+
+
+def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
+    """读一次段位区域的数字，返回 {number, legend, raw, empty, blank, bright}。
+
+    * 读到数字 → number/legend 有值；
+    * 区域是空白 → empty=True（**可能只是动画还没把名次画出来**，调用方会重试）；
+    * 截图失败 → blank=True（这次不算数，读不出来）；
+    * OCR 不可用/读不到 → raw=None。
+    strict          ：只认「整行就是数字」（见 is_pure_rank_text）；
+    min_confidence  ：低于这个置信度的 OCR 行直接丢掉。
+    bright 是这个区域里「够亮」的像素个数（-1 = 判不出来），只用于日志与页面显示。
+    """
+    result = {"number": None, "legend": False, "raw": None,
+              "empty": False, "blank": False, "bright": -1}
+    img = _grab_region(_POST_GAME_RANK_ROI, _POST_GAME_OCR_SCALE)
+    blank = _region_is_blank(img)
+    result["blank"] = blank
+    result["bright"] = _rank_bright_pixels(img)
+    if blank:
+        # 截图失败也算空，但要标成“还没读到”（blank=True），由调用方重试；
+        # 真正截到图且亮像素太少时只是 empty，同样交给调用方决定重试几次。
+        result["empty"] = img is not None
+        return result
+    lines = _ocr_lines(_POST_GAME_RANK_ROI, _POST_GAME_OCR_SCALE, "rank")
+    if lines is None:
+        return result
+    for line in lines:
+        text = str(getattr(line, "text", "") or "").strip()
+        confidence = float(getattr(line, "confidence", 0.0) or 0.0)
+        if min_confidence and confidence < float(min_confidence):
+            continue
+        if not text or not any(ch.isdigit() for ch in text):
+            # 没有数字的行（文字标签之类）一律忽略：判定只看数字。
+            continue
+        if strict and not is_pure_rank_text(text):
+            continue
+        parsed = parse_rank_text(text)
+        if parsed["number"] is not None:
+            parsed["blank"] = False
+            parsed["bright"] = result["bright"]
+            return parsed
+    return result
+
+
+def _rank_condition_met(reading, cfg) -> bool:
+    """读数是否命中用户设定的上分目标（见 config.DEFAULT_RANK_STOP）。
+
+    mode="legend"        ：上传说即命中；
+    mode="legend_number" ：上了传说且名次 <= 目标（第 N 名或更好）。
+    """
+    if not reading or not cfg.get("enabled"):
+        return False
+    if not reading.get("legend"):
+        return False
+    if cfg.get("mode") != "legend_number":
+        return True
+    number = reading.get("number")
+    try:
+        target = int(cfg.get("legend_number", 1))
+    except (TypeError, ValueError):
+        target = 1
+    return isinstance(number, int) and number <= target
+
+
+def _read_rank_with(attempts: int, wait: float, strict: bool = False,
+                    min_confidence: float = 0.0):
+    """按次数重试读段位，返回最后一次读数（读不到也返回，由调用方判断）。"""
+    total = max(1, int(attempts))
+    reading = None
+    for attempt in range(1, total + 1):
+        reading = read_rank_region(strict=strict,
+                                   min_confidence=min_confidence)
+        # 读到了能解析的数字、或读到了带数字的文本，就没必要再读。
+        if reading.get("number") is not None or reading.get("raw") is not None:
+            return reading
+        if attempt < total:
+            time.sleep(wait)
+    return reading
+
+
+def _check_rank_stop(attempts=None, wait=None, label="结算界面",
+                     strict=False, min_confidence=0.0, confirm=False) -> bool:
+    """读一次段位；命中用户设定的上分目标就请求「本局结束后停止」。
+
+    label        ：这一步叫什么（写进日志与页面，回答"到底检测了没有、在哪一步读的"）；
+    attempts/wait：重试次数与间隔（空白/截图失败/OCR 没读到都算"还没读到"，
+                   会重试——这是实测踩过的坑：动画还没把名次画出来时第一次读
+                   会得出"未上传说"的错误结论）；
+    strict       ：只认「整行就是数字」（见 is_pure_rank_text）；
+    min_confidence：丢掉低于该置信度的 OCR 行；
+    confirm      ：读到数字后隔 _POST_GAME_RANK_CONFIRM_WAIT 再读一次，两次都
+                   读到数字才算命中（防止把过渡画面里的误识别当名次）。
+    返回值只表示“是否命中”。
+    """
+    global _rank_stop_triggered, _rank_stop_stop_reason, _rank_last_read
+    global _rank_last_phase
+    if _rank_stop_triggered:
+        return False
+    cfg = rank_stop_settings()
+    if not cfg.get("enabled"):
+        return False
+    total = _POST_GAME_RANK_READ_ATTEMPTS if attempts is None else int(attempts)
+    interval = _POST_GAME_RANK_RETRY_WAIT if wait is None else float(wait)
+    reading = _read_rank_with(total, interval, strict, min_confidence)
+    if confirm and reading.get("number") is not None:
+        time.sleep(max(interval, _POST_GAME_RANK_CONFIRM_WAIT))
+        again = read_rank_region(strict=strict,
+                                 min_confidence=min_confidence)
+        if again.get("number") is None:
+            # 复核失败：当作"还没读到"，绝不因为一次误识别就停掉自动化。
+            reading = again
+    _rank_last_read = reading
+    _rank_last_phase = label
+    number = reading.get("number")
+    if number is None:
+        if reading.get("raw") is not None:
+            reason = f"读到的内容里没有名次数字（「{reading['raw']}」）"
+        elif reading.get("empty") \
+                and 0 <= reading.get("bright", -1) < _RANK_MIN_BRIGHT_PIXELS:
+            reason = (f"段位位置还是空白（亮像素 {reading['bright']} 个，"
+                      f"不够 {_RANK_MIN_BRIGHT_PIXELS} 个）")
+        else:
+            reason = f"没读到数字（截图/OCR 未读到，已试 {total} 次）"
+        manual_controller.output(
+            f"[SYS] 上分停止检测（{label}）：{reason} —— 按「还没上传说」处理。")
+        return False
+    if not _rank_condition_met(reading, cfg):
+        manual_controller.output(
+            f"[SYS] 上分停止检测（{label}）：当前段位读数「{reading['raw']}」，"
+            f"未达到停止条件。")
+        return False
+    detail = f"传说 {number} 名"
+    _rank_stop_triggered = True
+    _rank_stop_stop_reason = f"已上传说到{detail}，自动化停止（本局结束后生效）。"
+    manual_controller.output(
+        f"[SYS] 上分目标已达成（{label}）：{_rank_stop_stop_reason}")
+    request_stop_after_game()
+    return True
+
+
+def rank_stop_detection_state() -> dict:
+    """上分停止条件的当前状态（供 Web 控制台 / 浮窗显示）。"""
+    cfg = rank_stop_settings()
+    reading = _rank_last_read or {}
+    return {
+        "enabled": bool(cfg["enabled"]),
+        "mode": cfg["mode"],
+        "legend_number": int(cfg["legend_number"]),
+        "last_number": reading.get("number"),
+        "last_legend": reading.get("legend"),
+        "last_raw": reading.get("raw"),
+        "last_empty": bool(reading.get("empty")),
+        "last_phase": _rank_last_phase,
+        "triggered": bool(_rank_stop_triggered),
+        "stop_reason": _rank_stop_stop_reason,
+    }
+
+
+def _post_game_start_box() -> tuple:
+    """结算「开始」按钮的检测框：优先用用户校准的 post_game_start_roi。
+
+    recommendation_config 每次对局都会重建，所以校准完重开一局即生效。
+    配置缺失/非法时回退代码默认值（_POST_GAME_START_BUTTON_ROI）。
+    """
+    return _config_roi("post_game_start_roi", _POST_GAME_START_BUTTON_ROI)
+
+
+def post_game_start_point() -> tuple:
+    """点「开始」按钮用的坐标：校准框的正中心（默认正好 (1400,900)）。
+
+    框是用户在校准窗口里拖的，中心就是实际点击位置；配置异常时回退默认中心。
+    """
+    try:
+        left, top, right, bottom = _post_game_start_box()
+        return ((int(left) + int(right)) // 2, (int(top) + int(bottom)) // 2)
+    except Exception:
+        return _POST_GAME_START_DEFAULT_POINT
+
+
+def click_post_game_start():
+    """点一下结算界面的「开始」按钮正中心（坐标可校准）。"""
+    x, y = post_game_start_point()
+    info_print(f"已点击结算界面「开始」按钮的中心：({x}, {y})")
+    click.left_click(x, y)
+
+
+def start_button_present() -> bool:
+    """结算界面的「开始」按钮是否已经出现（出现即收尾完成）。
+
+    先读用户校准的框；读不到时再用固定兜底区域读一次（框被拖小/拖偏也能认出）。
+    OCR 不可用/异常一律返回 False：检测不到就继续点左上角待命点，绝不提前
+    跑掉（宁可多等一会儿，也不能在结算界面上空点着回到主界面）。
+    """
+    for box in (_post_game_start_box(), _POST_GAME_START_FALLBACK_ROI):
+        lines = _ocr_lines(box, _POST_GAME_OCR_SCALE, "start")
+        if lines is None:
+            continue
+        for line in lines:
+            text = str(getattr(line, "text", "") or "")
+            confidence = float(getattr(line, "confidence", 0.0) or 0.0)
+            if confidence < _POST_GAME_MIN_CONFIDENCE:
+                continue
+            if any(keyword in text for keyword in _POST_GAME_START_KEYWORDS):
+                return True
+    return False
+
+
+def click_post_game_point():
+    """点掉结算界面：**屏幕中间那两个点**（`click.ERROR_REPORT_POINTS`）。
+
+    这两下是原来就用来应对错误弹窗/断线提示的位置：`(1100, 820)`（奇怪的错误提示）
+    → `(960, 650)`（断线时取消）。用户口径：回合结束推结算界面点**中间**这两下，
+    **不点右边**（右边那些辅助点会被右上角日志浮窗吃掉，也可能误点到下一屏）。
+    每轮先点这两下把结算界面推过去，再由调用方 `QuittingBattle` 检测「开始」
+    按钮——检测到了才收尾，收尾里才点第三个点（「开始」按钮正中心）。
+    """
+    click.commit_error_report()
+
+
 def confirm_button_present() -> bool:
     """换牌“确认”按钮是否仍在屏幕中间（提交后应消失）。
 
@@ -1183,11 +1613,26 @@ def Battling():
 
 
 def QuittingBattle():
+    """对局结束收尾：点掉结算界面 → 等「开始」→ 读段位 → 决定要不要点「开始」。
+
+    结算界面（胜负横幅 / 段位升降级动画 / 奖励面板）要点好几下才会出现底部
+    「开始」按钮。顺序是用户定的：
+
+    1. 每轮点**中间那两个点**（`click_post_game_point()` → `(1100,820)` +
+       `(960,650)`，原来就是用来应对错误弹窗/断线提示的位置）把结算界面推过去；
+    2. 每轮用 OCR 检测「开始」按钮（读的是可校准的 post_game_start_roi，
+       读不到再用兜底区域）——**没检测到就继续点，不做别的**；
+    3. 检测到「开始」之后**先读段位**（`_check_rank_stop()`，label="点「开始」前"）：
+       读到名次 → 命中停止条件就直接停，**连「开始」都不点**；没读到名次才收尾；
+    4. 收尾只点**第三个点**：`click_post_game_start()`（「开始」按钮正中心），
+       然后再读一次段位（label="点「开始」后"）兜住名次画得晚的情况；
+    5. 没命中就返回 FSM_CHOOSING_HERO 继续下一局；命中则主循环干净退出。
+    """
     print_out()
 
     time.sleep(5)
 
-    loop_count = 0
+    cycle = 0
     while True:
         if quitting_flag or stop_after_current_game:
             sys.exit(0)
@@ -1195,17 +1640,52 @@ def QuittingBattle():
         state = get_screen.get_state()
         if state in [FSM_CHOOSING_HERO, FSM_LEAVE_HS]:
             return state
-        click.run_hearthstone_action(lambda: (
-            click.cancel_click(),
-            click.test_click(),
-            click.commit_error_report(),
-        ))
 
-        loop_count += 1
-        if loop_count >= 15:
+        if start_button_present():
+            info_print("检测到结算界面「开始」按钮：先读段位，再决定要不要点「开始」。")
+
+            # ① 用户口径：**检测到「开始」以后先检测段位**。读一次读不到就重试
+            #    （名次有时画得晚），读到数字还要复核一次。命中就**不点**「开始」，
+            #    本局已经结束，主循环会在非对局状态直接退出——绝不会替用户开下一局。
+            hit = False
+            try:
+                hit = _check_rank_stop(
+                    attempts=_POST_GAME_RANK_READ_ATTEMPTS, wait=0.8,
+                    label="点「开始」前",
+                    min_confidence=_POST_GAME_MIN_CONFIDENCE,
+                    confirm=True)
+            except Exception as exc:
+                warn_print(f"点「开始」前段位检测失败（忽略，继续收尾）：{exc}")
+            if hit:
+                info_print(
+                    "段位已到停止条件：不点「开始」，本局结束后直接退出自动化。")
+                return FSM_CHOOSING_HERO
+
+            # ② 没读到名次才收尾：**只点第三个点**——「开始」按钮正中心
+            #    （坐标可以在校准窗口里拖）。前两个点（中间那两个）每轮已经点过了，
+            #    这里不再点右边任何位置。
+            click.run_hearthstone_action(click_post_game_start)
+            info_print("结算界面已出现「开始」按钮，收尾完成。")
+
+            # ③ 收尾后再读一次兜底：命中「上分停止条件」时它会请求「本局结束后停止」。
+            try:
+                _check_rank_stop(label="点「开始」后")
+            except Exception as exc:
+                warn_print(f"上分停止检测失败（忽略，继续下一局）：{exc}")
+
+            # ④ 没命中停止就继续下一局；命中了主循环会在非对局状态立刻退出。
+            return FSM_CHOOSING_HERO
+
+        click_post_game_point()
+        cycle += 1
+
+        if cycle >= _POST_GAME_MAX_CYCLES:
+            warn_print(
+                f"结算界面超过 {_POST_GAME_MAX_CYCLES} 轮仍未出现「开始」按钮，"
+                "进入错误处理。")
             return FSM_ERROR
 
-        time.sleep(STATE_CHECK_INTERVAL+random.random()+random.random()+random.random())
+        time.sleep(_POST_GAME_CLICK_WAIT + random.random())
 
 
 def GoBackHSAction():
@@ -1343,7 +1823,10 @@ def AutoHS_automata():
         if quitting_flag:
             sys.exit(0)
         if stop_after_current_game and FSM_state in between_game_states:
-            info_print("已到计划停止时间，本局对战已经结束，自动化停止。")
+            if _rank_stop_stop_reason:
+                info_print(f"自动化停止：{_rank_stop_stop_reason}")
+            else:
+                info_print("已到计划停止时间，本局对战已经结束，自动化停止。")
             quitting_flag = True
             shutdown_event.set()
             sys.exit(0)
