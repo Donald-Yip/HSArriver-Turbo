@@ -123,7 +123,9 @@ class AccountEyeToggleTests(unittest.TestCase):
         source = inspect.getsource(log_overlay._run)
         self.assertIn("toggle_account_visibility()", source)
         self.assertIn('bind("<Button-1>"', source)
-        self.assertIn("column=4", source)      # 眼睛放在「账号」行最右侧
+        # 眼睛放在「账号」行最右侧（pack side="right" 的第一个就是最右）
+        self.assertIn("with_eye=True", source)
+        self.assertIn('eye_box.pack(side="right"', source)
 
 
 class AccountPreferencePersistenceTests(unittest.TestCase):
@@ -294,16 +296,60 @@ class ButtonLayoutTests(unittest.TestCase):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
         self.assertLessEqual(log_overlay.BTN_PADY, 4)
-        # 用户要求浮窗收窄 10%（292 → 263），高度要补回多出来的一行按钮。
-        self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertLessEqual(log_overlay.WINDOW_WIDTH,
-                             int(292 * 0.9) + 1)
-        self.assertGreaterEqual(log_overlay.WINDOW_HEIGHT, 628 + 20)
+        # 宽度 263 → 300：状态行右侧说明列必须放得下（用户反馈显示不全）。
+        self.assertEqual(300, log_overlay.WINDOW_WIDTH)
+        # 654 - 17：删掉「炉石传说 · 自动对战」副标题那一行。
+        self.assertEqual(637, log_overlay.WINDOW_HEIGHT)
 
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)
         for key in log_overlay.BTN_LAYOUT:
             self.assertIn(f'_place({key}_btn, "{key}")', source)
+
+    def test_status_rows_wrap_instead_of_being_clipped(self):
+        """说明列按 wraplength 换行：绝不再被窗口右边缘切掉。"""
+        self.assertGreater(log_overlay._DETAIL_WRAP_PX, 100)
+        self.assertLess(log_overlay._DETAIL_WRAP_PX_EYE,
+                        log_overlay._DETAIL_WRAP_PX)
+        self.assertGreaterEqual(log_overlay._DETAIL_MAX_LINES, 2)
+        source = inspect.getsource(log_overlay._run)
+        self.assertIn("wraplength=wrap_px", source)
+        self.assertIn("_DETAIL_WRAP_PX_EYE", source)
+
+    def test_overlay_can_be_minimized_to_a_title_bar(self):
+        """最小化 = 折叠成标题条（浮窗是 TOOLWINDOW，iconify 之后无法还原）。"""
+        self.assertLess(log_overlay.MINIMIZED_HEIGHT,
+                        log_overlay.WINDOW_HEIGHT)
+        self.assertEqual(
+            f"{log_overlay.WINDOW_WIDTH}x{log_overlay.MINIMIZED_HEIGHT}+8+9",
+            log_overlay.minimized_geometry(log_overlay.WINDOW_WIDTH,
+                                           log_overlay.WINDOW_HEIGHT,
+                                           8, 9, collapsed=True))
+        self.assertEqual(
+            f"{log_overlay.WINDOW_WIDTH}x{log_overlay.WINDOW_HEIGHT}+8+9",
+            log_overlay.minimized_geometry(log_overlay.WINDOW_WIDTH,
+                                           log_overlay.WINDOW_HEIGHT,
+                                           8, 9, collapsed=False))
+        source = inspect.getsource(log_overlay._run)
+        self.assertIn("def _set_collapsed(flag)", source)
+        self.assertIn("MINIMIZE_TEXT", source)
+        self.assertIn("RESTORE_TEXT", source)
+        self.assertIn("content.pack_forget()", source)
+        self.assertIn("mini_bar.pack(fill=\"x\")", source)
+
+    def test_details_are_fitted_by_real_font_width(self):
+        """fit_text：放得下原样返回，放不下按字符截断加省略号。"""
+        measure = lambda text: 10 * len(text)          # noqa: E731
+
+        self.assertEqual("连  续", log_overlay.fit_text("连  续", 200, measure))
+        self.assertEqual("", log_overlay.fit_text("", 50, measure))
+        self.assertEqual("", log_overlay.fit_text(None, 50, measure))
+        fitted = log_overlay.fit_text("一二三四五六七八九十", 45, measure)
+        self.assertTrue(fitted.endswith("…"))
+        self.assertLessEqual(measure(fitted), 45)
+        # 截断点上正好落着一个省略号：只能留一个，不能变成「一二……」。
+        self.assertEqual("一二…",
+                         log_overlay.fit_text("一二…三四五六", 45, measure))
 
 
 if __name__ == "__main__":

@@ -6,6 +6,10 @@ top-right corner. It streams the latest automation log lines; lines that mark
 the own-turn start are highlighted green. The window can be dragged by holding
 the left mouse button. Failures disable the overlay and never crash the caller.
 
+start() 返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING，调用方（web_ui）据此
+判断浮窗到底开没开；网页/浮窗重开在收尾竞争、上一轮线程超时等情况下都**不会
+再静默失败**（见 mark_closing / _defer_open / _stop_generation）。
+
 Buttons:
   * ▶ 开始对战            — start automation
   * ⏹ 中止 / ▶ 恢复       — toggle stop/resume (state-aware)
@@ -15,6 +19,7 @@ Buttons:
   * ♻ 重启炉石            — confirm, then kill Hearthstone + wipe logs + relaunch
   * ✖ 退出浮窗            — close only this window (script keeps running)
   * 🚪 退出脚本            — stop automation and exit the whole process
+  * ▁ 最小化 / ▣ 展开      — collapse to a title bar / restore (标题行右侧)
 Every button hands the foreground back to Hearthstone afterwards.
 """
 from __future__ import annotations
@@ -108,17 +113,73 @@ BTN_SPAN = {"stop_after": 2, "exit": 2}
 # 浮窗尺寸：宽度按最长的一行文字/按钮定，高度 = 品牌行 + 状态面板（4 行）
 # + 五行按钮（开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
 # 退出脚本）+ 日志区。
-# 宽度按用户要求收窄 10%（292 → 263）：原来的留白偏大。
-WINDOW_WIDTH = 263
-WINDOW_HEIGHT = 654
+# 宽度 263 → 300：状态行右侧「说明」列必须放得下（用户反馈投降检测/炉石行
+# 后面的字显示不全）；原先是把弹性列给了「数值」，说明一长就被窗口右边缘硬裁。
+WINDOW_WIDTH = 300
+# 654 → 637：删掉「炉石传说 · 自动对战」副标题那一行，省下的高度全给日志区。
+WINDOW_HEIGHT = 637
+# 最小化（折叠成标题条）：浮窗是 WS_EX_TOOLWINDOW，没有任务栏条目，
+# 真 iconify() 之后用户没有任何入口还原，所以折叠成标题条 + 「▣ 展开」。
+MINIMIZED_HEIGHT = 34
+MINIMIZE_TEXT = "▁ 最小化"
+RESTORE_TEXT = "▣ 展开"
 
-# 浮窗顶部品牌行：本项目大名 + 一行小字副标题（放在“自动化日志”标题之前）。
+# 状态行「说明」列的**换行宽度**（像素，100% 缩放、8pt 微软雅黑）：
+#   147 = 300 - (圆点 25 + 名称列最宽「投降检测」50 + 数值列最宽「已触发认输」62
+#               + 说明列左右内边距 16)；
+#   「账号」行右侧还有眼睛按钮（24+2+8），再让出 34 → 113。
+# 说明超过这个宽度就换行（wraplength），不再被窗口右边缘切掉。
+_DETAIL_WRAP_PX = WINDOW_WIDTH - (25 + 50 + 62 + 16)
+_DETAIL_WRAP_PX_EYE = _DETAIL_WRAP_PX - 34
+# 说明最多占几行：超过就截断加省略号，避免极端长文把日志区挤没。
+_DETAIL_MAX_LINES = 3
+
+# 浮窗顶部品牌行：本项目大名（放在“自动化日志”标题之前）。
+# 副标题「炉石传说 · 自动对战」已按用户要求删除。
 BRAND_NAME = "HSLegendArriver"
-BRAND_SUB = "炉石传说 · 自动对战"
 # 状态圆点：功能开着 = 绿，关着 = 红，状态未知 = 灰。
 MARKER_ON = GREEN
 MARKER_OFF = DANGER
 MARKER_UNKNOWN = DIM
+
+
+def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
+    """把说明文字裁进给定位宽（超出加省略号，不再被窗口边缘切掉）。
+
+    measure 是"这段文字有多宽"的函数（Tk 传 tkinter.font.Font.measure，
+    测试里可以直接给一个按字符数算的假函数），这样这条逻辑不依赖 Tk。
+    """
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    try:
+        if measure(text) <= max_px:
+            return text
+    except Exception:
+        return text
+    try:
+        ellipsis_px = measure(ellipsis)
+    except Exception:
+        ellipsis_px = 0
+    kept = ""
+    for char in text:
+        try:
+            width = measure(kept + char)
+        except Exception:
+            return text
+        if width + ellipsis_px > max_px:
+            break
+        kept += char
+    # 文字本身可能已经带省略号（account_row 的 _clip）：别叠成两个。
+    kept = kept.rstrip("…").rstrip()
+    return f"{kept}{ellipsis}" if kept else ellipsis
+
+
+def minimized_geometry(width: int, height: int, x: int, y: int,
+                       collapsed: bool) -> str:
+    """折叠/展开时的窗口几何串（折叠只剩标题条那么高）。"""
+    size = MINIMIZED_HEIGHT if collapsed else height
+    return f"{width}x{size}+{x}+{y}"
 
 
 def _turn_start(line: str) -> bool:
@@ -843,6 +904,7 @@ def _confirm_restart(root) -> bool:
 def _run() -> None:
     try:
         import tkinter as tk
+        import tkinter.font as tkfont
     except Exception as exc:
         _report(f"tkinter 不可用: {type(exc).__name__}: {exc}")
         _STARTED[0] = False
@@ -855,15 +917,49 @@ def _run() -> None:
         root.attributes("-alpha", ALPHA)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        # 高度：品牌行 + 状态面板（4 行）+ 四行按钮都要放得下，日志区还要有
-        # 9 行左右。按钮改成一行两个 + 字号变小后比原来（640）矮；新增「校准」
-        # 按钮后又加回一行，所以是 628。
+        # 高度：品牌行 + 状态面板（4 行）+ 五行按钮都要放得下，日志区还要有
+        # 9 行左右。删掉副标题后比原来（654）矮 17px，省下的留给日志区。
         W, H = WINDOW_WIDTH, WINDOW_HEIGHT
         x = sw - W - 12
         y = 12
         root.geometry(f"{W}x{H}+{x}+{y}")
         root.configure(bg=TITLE_BG)
         _disable_overlay_activation(root)
+
+        # 最小化 = 折叠成标题条：内容全在 content 里，折叠时藏起来只留 mini_bar。
+        # （浮窗是 WS_EX_TOOLWINDOW，真 iconify() 之后没有任务栏条目可以还原。）
+        collapsed = [False]
+        content = tk.Frame(root, bg=TITLE_BG)
+        content.pack(fill="both", expand=True)
+        mini_bar = tk.Frame(root, bg=TITLE_BG, height=MINIMIZED_HEIGHT)
+        mini_bar.pack_propagate(False)
+        tk.Label(mini_bar, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
+                 font=("Georgia", 12, "bold")).pack(side="left", padx=(10, 0))
+        restore_btn = tk.Label(mini_bar, text=RESTORE_TEXT, bg=PANEL, fg=TEXT,
+                               font=("Microsoft YaHei", 9), cursor="hand2",
+                               padx=8, pady=2)
+        restore_btn.pack(side="right", padx=(0, 8), pady=5)
+
+        def _set_collapsed(flag):
+            """折叠/展开浮窗（同时把窗口几何改成标题条那么高）。"""
+            collapsed[0] = bool(flag)
+            if collapsed[0]:
+                content.pack_forget()
+                mini_bar.pack(fill="x")
+            else:
+                mini_bar.pack_forget()
+                content.pack(fill="both", expand=True)
+            # 用**当前位置**（不是启动位置）：用户拖动过浮窗以后，最小化/展开
+            # 不该把它弹回右上角。
+            root.geometry(minimized_geometry(W, H, root.winfo_x(),
+                                             root.winfo_y(),
+                                             collapsed=collapsed[0]))
+
+        def _on_minimize(_event=None):
+            _set_collapsed(not collapsed[0])
+            return "break"
+
+        restore_btn.bind("<Button-1>", _on_minimize)
 
         def _hover(c):
             # lighten a hex color for hover feedback
@@ -906,17 +1002,16 @@ def _run() -> None:
             return btn
 
         # ---- 品牌行：本项目大名（放在“自动化日志”标题之前） ------------
-        brand = tk.Frame(root, bg=TITLE_BG)
+        # 副标题「炉石传说 · 自动对战」按用户要求删除（那一行高度留给日志区）。
+        brand = tk.Frame(content, bg=TITLE_BG)
         brand.pack(fill="x")
         tk.Label(brand, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
-                 font=("Georgia", 13, "bold")).pack(pady=(9, 0))
-        tk.Label(brand, text=BRAND_SUB, bg=TITLE_BG, fg=DIM,
-                 font=("Microsoft YaHei", 8)).pack(pady=(1, 7))
-        tk.Frame(root, bg=GOLD, height=1).pack(fill="x", padx=10)
-        tk.Frame(root, bg=PANEL, height=1).pack(fill="x")
+                 font=("Georgia", 13, "bold")).pack(pady=(9, 7))
+        tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=10)
+        tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- header ----------------------------------------------------
-        head = tk.Frame(root, bg=TITLE_BG)
+        head = tk.Frame(content, bg=TITLE_BG)
         head.pack(fill="x")
         dot = tk.Label(head, text="●", bg=TITLE_BG, fg=GREEN,
                        font=("Segoe UI", 10))
@@ -924,49 +1019,68 @@ def _run() -> None:
         title = tk.Label(head, text="自动化日志", bg=TITLE_BG, fg=TEXT,
                          font=("Microsoft YaHei", 10, "bold"))
         title.pack(side="left", pady=8)
-        tk.Frame(root, bg=PANEL, height=1).pack(fill="x")
+        # 标题行右侧的「▁ 最小化」：折叠成标题条，再点标题条上的「▣ 展开」还原。
+        mini_btn = tk.Label(head, text=MINIMIZE_TEXT, bg=TITLE_BG, fg=DIM,
+                            font=("Microsoft YaHei", 9), cursor="hand2")
+        mini_btn.pack(side="right", padx=(0, 10), pady=8)
+        mini_btn.bind("<Button-1>", _on_minimize)
+        tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- 战绩行 -------------------------------------------------
-        score_label = tk.Label(root, text="📊 战绩： —", bg=TITLE_BG, fg=DIM,
+        score_label = tk.Label(content, text="📊 战绩： —", bg=TITLE_BG, fg=DIM,
                                font=("Microsoft YaHei", 9), anchor="w")
         score_label.pack(fill="x", padx=8, pady=(6, 0))
-        # ---- 状态面板：活人感 / 投降检测 ----------------------------
-        # 用 grid 对齐成两行两列（左：名称+状态值；右：参数/计数），比原先
-        # 一整行塞满括号文本更清爽，也不再依赖容易糊掉的 emoji 图标。
-        status = tk.Frame(root, bg=PANEL)
+        # ---- 状态面板：活人感 / 投降检测 / 炉石 / 账号 ----------------
+        # 每行一个独立 Frame（**不用**共享 grid 列）：grid 会把每一列按"所有行里
+        # 最宽的那个单元格"定宽，于是「投降检测」那行的长说明会把「账号」行的
+        # 昵称一起顶出窗口（用户反馈：投降检测/炉石后面的字显示不全）。行内用
+        # pack，说明列配 wraplength：宽度不够就换行，绝不裁字。
+        status = tk.Frame(content, bg=PANEL)
         status.pack(fill="x")
-        status.columnconfigure(2, weight=1)
+        # 说明文字要按真实字体宽度换行（中文和数字宽度差很多）。
+        detail_font = tkfont.Font(family="Microsoft YaHei", size=8)
 
-        def _status_row(row_index, name_text):
-            marker = tk.Label(status, text="●", bg=PANEL, fg=DIM,
-                              font=("Segoe UI", 7))
-            marker.grid(row=row_index, column=0, sticky="w",
-                        padx=(10, 4), pady=1)
-            name = tk.Label(status, text=name_text, bg=PANEL, fg=DIM,
-                            font=("Microsoft YaHei", 8))
-            name.grid(row=row_index, column=1, sticky="w", pady=1)
-            value = tk.Label(status, text="—", bg=PANEL, fg=TEXT,
+        def _fit_detail(value, wrap_px):
+            """说明文字：交给 wraplength 换行；超过 _DETAIL_MAX_LINES 行才省略。"""
+            return fit_text(value, wrap_px * _DETAIL_MAX_LINES,
+                            detail_font.measure)
+
+        def _status_row(name_text, with_eye=False):
+            """一行状态：● 名称（左）… 数值（粗体）· 说明（右，可换行）。"""
+            row = tk.Frame(status, bg=PANEL)
+            row.pack(fill="x")
+            wrap_px = _DETAIL_WRAP_PX_EYE if with_eye else _DETAIL_WRAP_PX
+            # side="right" 的 pack 顺序就是"从右往左"：先 pack 的最靠右。
+            eye_box = None
+            if with_eye:
+                # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间
+                # 互换（隐藏状态会记住），适合截图/录屏/开直播。
+                # 固定尺寸的小容器能让整行布局绝对稳定（Tk 重排偶尔留重影）。
+                eye_box = tk.Frame(row, bg=PANEL, width=24, height=18)
+                eye_box.pack(side="right", padx=(2, 8), pady=1)
+                eye_box.pack_propagate(False)
+            detail = tk.Label(row, text="", bg=PANEL, fg=DIM,
+                              font=("Microsoft YaHei", 8), justify="right",
+                              anchor="e", wraplength=wrap_px)
+            detail.pack(side="right", padx=(6, 10), pady=1)
+            value = tk.Label(row, text="—", bg=PANEL, fg=TEXT,
                              font=("Microsoft YaHei", 8, "bold"))
-            value.grid(row=row_index, column=2, sticky="w", padx=(6, 0), pady=1)
-            detail = tk.Label(status, text="", bg=PANEL, fg=DIM,
-                              font=("Microsoft YaHei", 8))
-            detail.grid(row=row_index, column=3, sticky="e",
-                        padx=(6, 10), pady=1)
-            return marker, value, detail
+            value.pack(side="right", padx=(6, 0), pady=1)
+            marker = tk.Label(row, text="●", bg=PANEL, fg=DIM,
+                              font=("Segoe UI", 7))
+            marker.pack(side="left", padx=(10, 4), pady=1)
+            name = tk.Label(row, text=name_text, bg=PANEL, fg=DIM,
+                            font=("Microsoft YaHei", 8))
+            name.pack(side="left", pady=1)
+            return marker, value, detail, eye_box
 
-        hl_marker, hl_value, hl_detail = _status_row(0, "活人感")
-        cd_marker, cd_value, cd_detail = _status_row(1, "投降检测")
-        lv_marker, lv_value, lv_detail = _status_row(2, "炉石")
-        ac_marker, ac_value, ac_detail = _status_row(3, "账号")
+        hl_marker, hl_value, hl_detail, _ = _status_row("活人感")
+        cd_marker, cd_value, cd_detail, _ = _status_row("投降检测")
+        lv_marker, lv_value, lv_detail, _ = _status_row("炉石")
+        ac_marker, ac_value, ac_detail, eye_box = _status_row("账号",
+                                                             with_eye=True)
 
-        # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间互换，
-        # 适合截图、录屏、开直播时用（隐藏状态会记住）。
         # 图标只有一个 👁，状态靠颜色区分：绿色 = 显示中，白色 = 已隐藏。
-        # 图标放在固定尺寸的小容器里：虽然字形不变，但固定尺寸能让整行布局
-        # 绝对稳定（Tk 重排偶尔会留下没擦干净的重影）。
-        eye_box = tk.Frame(status, bg=PANEL, width=24, height=18)
-        eye_box.grid(row=3, column=4, sticky="e", padx=(2, 8), pady=1)
-        eye_box.grid_propagate(False)
         initial_visible = account_visible()
         eye_btn = tk.Label(
             eye_box, text=EYE_ICON, bg=PANEL,
@@ -985,12 +1099,12 @@ def _run() -> None:
             return "break"
 
         eye_btn.bind("<Button-1>", _on_eye)
-        tk.Frame(root, bg=TITLE_BG, height=1).pack(fill="x")
+        tk.Frame(content, bg=TITLE_BG, height=1).pack(fill="x")
 
         # ---- buttons ---------------------------------------------------
         # 一行两个，「本局结束后停止」单独一行；字号/内边距都比原来小，
         # 省下的高度全部留给日志区（见 BTN_LAYOUT / BTN_FONT_SIZE）。
-        btn_frame = tk.Frame(root, bg=BG)
+        btn_frame = tk.Frame(content, bg=BG)
         btn_frame.pack(fill="x", padx=8, pady=(8, 0))
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
@@ -1148,7 +1262,7 @@ def _run() -> None:
         _place(exit_btn, "exit")
 
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
-        delay_frame = tk.Frame(root, bg=BG)
+        delay_frame = tk.Frame(content, bg=BG)
         delay_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
         delay_canvas = tk.Canvas(delay_frame, height=8, bg=PANEL,
                                  highlightthickness=0)
@@ -1158,7 +1272,7 @@ def _run() -> None:
         delay_label.pack(fill="x")
 
         # ---- log body --------------------------------------------------
-        body = tk.Frame(root, bg=BG)
+        body = tk.Frame(content, bg=BG)
         body.pack(fill="both", expand=True, padx=8, pady=(6, 8))
         text = tk.Text(body, bg=BG, fg=TEXT, font=("Microsoft YaHei", 9),
                        bd=0, highlightthickness=0, wrap="word",
@@ -1200,6 +1314,12 @@ def _run() -> None:
             if _STOP.is_set():
                 root.destroy()
                 _STARTED[0] = False
+                return
+            if collapsed[0]:
+                # 最小化时正文看不见：不重画（省 CPU），展开后靠 shown[0]=None
+                # 整体重建，中间进来的日志一行都不会丢。
+                shown[0] = None
+                root.after(_REFRESH_MS, _update)
                 return
             with _LOCK:
                 lines = list(_LINES)
@@ -1258,7 +1378,8 @@ def _run() -> None:
                 row = human_like_row(hl_info)
                 _set(hl_marker, fg=row["marker"])
                 _set(hl_value, text=row["value"], fg=row["value_color"])
-                _set(hl_detail, text=row["detail"])
+                _set(hl_detail,
+                     text=_fit_detail(row["detail"], _DETAIL_WRAP_PX))
             if _CONCEDE_DETECT is not None:
                 try:
                     cd_info = _CONCEDE_DETECT()
@@ -1267,7 +1388,8 @@ def _run() -> None:
                 row = concede_detect_row(cd_info)
                 _set(cd_marker, fg=row["marker"])
                 _set(cd_value, text=row["value"], fg=row["value_color"])
-                _set(cd_detail, text=row["detail"])
+                _set(cd_detail,
+                     text=_fit_detail(row["detail"], _DETAIL_WRAP_PX))
             if _LIVENESS is not None:
                 try:
                     lv_info = _LIVENESS()
@@ -1276,7 +1398,8 @@ def _run() -> None:
                 row = hearthstone_row(lv_info)
                 _set(lv_marker, fg=row["marker"])
                 _set(lv_value, text=row["value"], fg=row["value_color"])
-                _set(lv_detail, text=row["detail"])
+                _set(lv_detail,
+                     text=_fit_detail(row["detail"], _DETAIL_WRAP_PX))
             if _ACCOUNT is not None:
                 try:
                     ac_info = _ACCOUNT()
@@ -1287,7 +1410,9 @@ def _run() -> None:
                 _set(ac_marker, fg=row["marker"])
                 _set(ac_value, text=row["value"], fg=row["value_color"])
                 # 隐藏时「已隐藏」用白色，和白色的眼睛保持同一套语义。
-                _set(ac_detail, text=row["detail"],
+                # 「账号」行右侧还有眼睛按钮，换行宽度要再窄 34px。
+                _set(ac_detail,
+                     text=_fit_detail(row["detail"], _DETAIL_WRAP_PX_EYE),
                      fg=TEXT if hidden else DIM)
                 _refresh_eye()
             with _LOCK:

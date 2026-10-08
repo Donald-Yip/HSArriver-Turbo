@@ -18,11 +18,14 @@ class _FakeThread:
 
 
 class BrandHeaderTests(unittest.TestCase):
-    """浮窗顶部品牌行：本项目大名 + 副标题（排在“自动化日志”之前）。"""
+    """浮窗顶部品牌行：只留本项目大名（副标题按用户要求删掉了）。"""
 
-    def test_brand_name_and_subtitle(self):
+    def test_brand_name_has_no_subtitle(self):
         self.assertEqual("HSLegendArriver", log_overlay.BRAND_NAME)
-        self.assertTrue(log_overlay.BRAND_SUB.strip())
+        self.assertFalse(hasattr(log_overlay, "BRAND_SUB"))
+        source = inspect.getsource(log_overlay._run)
+        self.assertNotIn("BRAND_SUB", source)
+        self.assertNotIn('text="炉石传说', source)      # 副标题那一行已删除
         self.assertTrue(log_overlay.GOLD.startswith("#"))
 
     def test_marker_colors_are_green_red_gray(self):
