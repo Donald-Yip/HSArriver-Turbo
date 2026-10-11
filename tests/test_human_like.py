@@ -125,6 +125,9 @@ class HumanLikePauseTests(unittest.TestCase):
             patch.object(hearthstone_click.time, "monotonic", self.clock.monotonic),
             patch.object(hearthstone_click, "sys_print",
                          side_effect=lambda line: self.printed.append(line)),
+            # 鼠标位置现在要经 display_mapping 换算成屏幕坐标；这里注入"读不到
+            # 客户区"，让断言用的是客户区相对坐标（不受测试机窗口位置影响）。
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
         ]
         for item in self._patches:
             item.start()
@@ -232,6 +235,7 @@ class ParkMouseTests(unittest.TestCase):
                                        "hover_min": 0.2, "hover_max": 1.0}),
             patch.object(hearthstone_click, "human_like_pause",
                          side_effect=lambda m=None, s=None: called.append(1)),
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
             patch.object(hearthstone_click.time, "sleep") as sleep,
         ):
             hearthstone_click.park_mouse(mouse)
@@ -251,6 +255,7 @@ class ParkMouseTests(unittest.TestCase):
             patch.object(hearthstone_click, "human_like_pause",
                          side_effect=lambda m=None, s=None: called.append(1)),
             patch.object(hearthstone_click, "Controller", return_value=mouse),
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
             patch.object(hearthstone_click.time, "sleep"),
         ):
             with hearthstone_click.hearthstone_action_session():

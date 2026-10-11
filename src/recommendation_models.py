@@ -39,6 +39,9 @@ class FrameEvidence:
     perceptual_hash: str
     panel_visible: bool
     pixels: Any = None
+    # 抓这一帧时的炉石客户区尺寸（参考帧口径，见 display_mapping.REFERENCE_CLIENT）。
+    # None = 未知（旧证据/测试构造），此时跳过客户区一致性校验。
+    client_size: Optional[tuple[int, int]] = None
 
 
 @dataclass(frozen=True)

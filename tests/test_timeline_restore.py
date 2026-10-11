@@ -69,12 +69,21 @@ class RestoredTimelineTests(unittest.TestCase):
         self.assertFalse(controller.execute(action, state).executed)
 
     def test_calibrated_buttons_use_client_origin(self):
-        for card, x in [('TIME_000ta', 585), ('TIME_000tb', 350)]:
-            with patch.object(hearthstone_click, 'get_HS_hwnd', return_value=1), \
-                 patch.object(hearthstone_click.win32gui, 'GetClientRect', return_value=(0, 0, 1920, 1080)), \
-                 patch.object(hearthstone_click.win32gui, 'ClientToScreen', side_effect=lambda h, p: (p[0]+50, p[1]+31)), \
-                 patch.object(hearthstone_click, 'rand_sleep'), \
-                 patch.object(hearthstone_click, 'left_click') as click:
-                executor = ClickExecutor(click_module=hearthstone_click, action_context=nullcontext)
-                executor.choose_timeline(card)
-                click.assert_called_once_with(x+50, 836)
+        """时间线按钮坐标是**客户区相对**的；换算由 click.left_click 统一做。
+
+        回归背景：这里原先自己 GetClientRect + ClientToScreen 手工换算，
+        漏掉了窗口偏移导致整体点偏；现在只传客户区相对坐标。
+        """
+        import click as hearthstone_click
+        import display_mapping
+        display_mapping.clear_mapping_cache()
+        try:
+            for card, pos in [('TIME_000ta', (585, 805)), ('TIME_000tb', (350, 805))]:
+                with patch.object(hearthstone_click, 'get_HS_hwnd', return_value=1), \
+                     patch.object(hearthstone_click, 'rand_sleep'), \
+                     patch.object(hearthstone_click, 'left_click') as click:
+                    executor = ClickExecutor(click_module=hearthstone_click, action_context=nullcontext)
+                    executor.choose_timeline(card)
+                    click.assert_called_once_with(*pos)
+        finally:
+            display_mapping.clear_mapping_cache()

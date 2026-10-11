@@ -32,9 +32,14 @@ def _roi_screen_grabber(bbox) -> Callable[[], np.ndarray]:
 
     Capturing the 271x938 panel directly skips transferring and converting
     the other ~88% of a 1920x1080 frame on every capture.
+
+    bbox 可以是矩形，也可以是**返回矩形**的可调用对象——后者让抓图时按当前
+    炉石客户区实时换算（窗口移动/缩放后不用重建 grabber 也跟着对）。
     """
     def grab() -> np.ndarray:
-        rgb = np.asarray(ImageGrab.grab(bbox=bbox, all_screens=False))
+        box = bbox() if callable(bbox) else bbox
+        rgb = np.asarray(ImageGrab.grab(bbox=tuple(int(v) for v in box),
+                                        all_screens=False))
         return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
     return grab
 
@@ -58,15 +63,44 @@ def _default_process_checker() -> bool:
         return False
 
 
-def _default_window_reader() -> tuple[int, bool]:
+def _default_window_reader() -> tuple[int, bool, Optional[tuple[int, int]]]:
+    """炉石窗口状态： (hwnd, 是否前台, 客户区尺寸)。
+
+    客户区尺寸用来做**证据新鲜度**校验：这一帧是不是按当前客户区截的。它不再是
+    "分辨率必须等于配置"那种门槛——分辨率/窗口位置由 display_mapping 换算处理。
+    """
     try:
         import win32gui
         from get_screen import get_HS_hwnd, is_allowed_hearthstone_foreground
         hwnd = int(get_HS_hwnd())
-        return hwnd, bool(hwnd and is_allowed_hearthstone_foreground(
+        foreground = bool(hwnd and is_allowed_hearthstone_foreground(
             hwnd, win32gui.GetForegroundWindow()))
+        client_size = None
+        try:
+            from display_mapping import display_mapping
+            mapping = display_mapping(hwnd)
+            if mapping is not None:
+                client_size = (mapping.width, mapping.height)
+        except Exception:
+            client_size = None
+        return hwnd, foreground, client_size
     except Exception:
-        return 0, False
+        return 0, False, None
+
+
+def _unpack_window_reader(result):
+    """兼容 window_reader 的 2 元组（旧实现/测试）与 3 元组返回。"""
+    try:
+        values = tuple(result)
+    except Exception:
+        return 0, False, None
+    if len(values) >= 3:
+        return values[0], values[1], values[2]
+    if len(values) == 2:
+        return values[0], values[1], None
+    if len(values) == 1:
+        return values[0], False, None
+    return 0, False, None
 
 
 class DesktopCapture:
@@ -76,17 +110,25 @@ class DesktopCapture:
         screen_grabber: Optional[Callable[[], np.ndarray]] = None,
         dpi_reader: Callable[[], int] = _default_dpi_reader,
         process_checker: Callable[[], bool] = _default_process_checker,
-        window_reader: Callable[[], tuple[int, bool]] = _default_window_reader,
+        window_reader: Callable[[], tuple] = _default_window_reader,
         clock: Callable[[], float] = time.time,
     ):
         self.config = config
+        # ROI 抓图前先把客户区相对 ROI 换算成屏幕坐标：炉石窗口不在屏幕原点时，
+        # 不换算就会截到别的地方（客户区相对坐标 ↔ 屏幕坐标见 display_mapping）。
         self.screen_grabber = (screen_grabber
                                or _roi_screen_grabber(
-                                   config.recommendation_roi))
+                                   lambda: self._screen_roi_box()))
         self.dpi_reader = dpi_reader
         self.process_checker = process_checker
         self.window_reader = window_reader
         self.clock = clock
+
+    def _screen_roi_box(self) -> tuple[int, int, int, int]:
+        """把配置里的推荐 ROI 换算成屏幕坐标框（拿不到客户区时原样返回）。"""
+        from display_mapping import box_to_screen, display_mapping
+        return tuple(box_to_screen(self.config.recommendation_roi,
+                                   display_mapping()))
 
     @property
     def _roi_size(self) -> tuple[int, int]:
@@ -107,7 +149,8 @@ class DesktopCapture:
     def capture(self, ocr_panel_ok: bool = False) -> FrameEvidence:
         if not self.process_checker():
             raise CaptureEnvironmentError("required_process_missing")
-        hwnd, foreground = self.window_reader()
+        hwnd, foreground, client_size = _unpack_window_reader(
+            self.window_reader())
         if not hwnd:
             raise CaptureEnvironmentError("hearthstone_window_missing")
         if not foreground:
@@ -116,7 +159,8 @@ class DesktopCapture:
         try:
             return self.from_array(
                 pixels, validate_environment=True, dpi=self.dpi_reader(),
-                window_handle=hwnd, foreground=foreground)
+                window_handle=hwnd, foreground=foreground,
+                client_size=client_size)
         except CaptureEnvironmentError as exc:
             if "recommendation_panel_missing" not in str(exc):
                 raise
@@ -127,7 +171,8 @@ class DesktopCapture:
             # 面板在，否则由 reader 置零置信度拒绝，安全兜底。
             return self.from_array(
                 pixels, validate_environment=False, dpi=self.dpi_reader(),
-                window_handle=hwnd, foreground=foreground)
+                window_handle=hwnd, foreground=foreground,
+                client_size=client_size)
 
 
     def from_array(
@@ -138,6 +183,7 @@ class DesktopCapture:
         dpi: Optional[int] = None,
         window_handle: int = 0,
         foreground: bool = True,
+        client_size: Optional[tuple[int, int]] = None,
     ) -> FrameEvidence:
         if pixels is None or pixels.ndim != 3 or pixels.shape[2] < 3:
             raise CaptureEnvironmentError("invalid_frame")
@@ -149,11 +195,16 @@ class DesktopCapture:
                 desktop_width, desktop_height = self.config.desktop_size
             else:
                 desktop_width, desktop_height = width, height
-                if (width, height) != self.config.desktop_size:
-                    raise CaptureEnvironmentError(
-                        f"desktop_size_mismatch:{width}x{height}")
         else:
             desktop_width, desktop_height = width, height
+        # 证据新鲜度：整屏抓图必须与当前客户区一致；ROI 抓图不需要（尺寸本就
+        # 由 config 的 ROI 决定）。分辨率不再是门槛 —— 客户区几何由
+        # display_mapping 换算，任何桌面分辨率都能跑。
+        if validate_environment and not roi_frame and client_size is not None:
+            if tuple(client_size) != (width, height):
+                raise CaptureEnvironmentError(
+                    f"client_size_mismatch:{width}x{height}"
+                    f"!={client_size[0]}x{client_size[1]}")
         effective_dpi = self.config.desktop_dpi if dpi is None else int(dpi)
         if validate_environment and effective_dpi != self.config.desktop_dpi:
             raise CaptureEnvironmentError(f"dpi_mismatch:{effective_dpi}")
@@ -172,6 +223,7 @@ class DesktopCapture:
             recommendation_roi=self.config.recommendation_roi,
             exact_hash=exact_hash, perceptual_hash=perceptual_hash,
             panel_visible=panel_visible, pixels=pixels,
+            client_size=(tuple(client_size) if client_size is not None else None),
         )
 
     def crop_recommendation(self, frame: FrameEvidence) -> np.ndarray:

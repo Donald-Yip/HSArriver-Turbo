@@ -52,6 +52,9 @@ LOG_DIR = script_logs.LOG_DIR
 RUNTIME_LOG = script_logs.RUNTIME_LOG
 WEB_DIR = ROOT / "web"
 CONFIG_PATH = ROOT / "ui_config.json"
+# CLI / agent 用来定位控制台的端口文件：监听端口被占用时会自动顺延
+# （8765→8785），写下来比让调用方猜端口/扫端口可靠（消费方见 hsctl.py）。
+PORT_FILE = ROOT / "log" / "ui_port.txt"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
     DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS,
@@ -288,9 +291,204 @@ def api_regions() -> dict:
         _log("WARN", "截图区域框：" + "；".join(
             f"{c.get('label', '')} {c.get('detail', '')}" for c in failed))
     else:
-        _log("SYS", f"截图区域框：分辨率 {result['width']}×{result['height']}，"
-                    f"已标注 {len(result.get('regions', []))} 个区域")
+        mapping = result.get("mapping") or {}
+        if mapping.get("available"):
+            client = mapping.get("client") or {}
+            _log("SYS", f"截图区域框：客户区 {client.get('width')}×"
+                        f"{client.get('height')} @屏幕"
+                        f"{tuple(mapping.get('screen_origin', []))}，已标注 "
+                        f"{len(result.get('regions', []))} 个区域")
+        else:
+            _log("SYS", f"截图区域框：屏幕 {result['width']}×{result['height']}"
+                        f"（炉石未运行，客户区未知），已标注 "
+                        f"{len(result.get('regions', []))} 个区域")
     return {"ok": True, "result": result}
+
+
+# ---------------------------------------------------------------- 按需抓图（给 agent 看画面）
+# 目的：让 agent / 用户能**实时**看到"脚本眼里的画面"。全程只读 —— 不点击、
+# 不移动鼠标、不改任何游戏状态。截图在**控制台进程**里做（不是 CLI 里），
+# 所以 CLI 是否提权都不影响；而且复用 display_mapping 的客户区几何换算，
+# 与 OCR 看到的是同一个口径。
+SCREENSHOT_DIR = ROOT / "tmp_screens"
+SCREENSHOT_LATEST = SCREENSHOT_DIR / "agent_latest.png"
+SCREENSHOT_KINDS = ("client", "full", "roi", "boxes")
+
+
+def _pillow_region_grabber(box):
+    """给 display_mapping.capture_region 用的抓图器：按屏幕框截一块。"""
+    from PIL import ImageGrab
+    return ImageGrab.grab(bbox=tuple(int(v) for v in box), all_screens=False)
+
+
+def _hs_client_capture_ready():
+    """炉石窗口现在**能不能真的截到客户区**？返回 ``(ok, 说明)``。
+
+    为什么需要这一步：炉石**最小化**时 ``get_HS_hwnd()`` 依然返回有效句柄
+    （class=UnityWndClass、标题「炉石传说」），但客户区是空矩形 ``(0,0,0,0)``、
+    客户区原点被 Windows 挪到 ``(-32000,-32000)``。这时若还照常截"客户区"，
+    得到的是一块没有意义的画面，却会对外自称为"炉石客户区" —— 看图的 agent
+    会被误导。所以这里先判定窗口真的可见、客户区非空，否则让调用方退化为整屏
+    并在 note 里说清楚原因。
+    """
+    try:
+        import display_mapping
+    except Exception as exc:
+        return False, f"坐标换算模块不可用：{type(exc).__name__}: {exc}"
+    try:
+        hwnd = display_mapping.hwnd_of()
+        if not hwnd:
+            return False, "读不到炉石窗口（炉石未运行）"
+        rect = display_mapping.read_client_rect(hwnd)
+        if not rect:
+            return False, "读不到炉石客户区"
+        left, top, right, bottom = (int(v) for v in rect)
+        if right - left <= 0 or bottom - top <= 0:
+            return False, f"炉石窗口不可见或已最小化（客户区 {right-left}×{bottom-top}）"
+        origin = display_mapping.client_to_screen(hwnd, 0, 0)
+        if origin and (origin[0] <= -30000 or origin[1] <= -30000):
+            return False, f"炉石窗口被最小化到屏幕外（{tuple(origin)}）"
+        return True, ""
+    except Exception as exc:
+        return False, f"读炉石窗口状态失败：{type(exc).__name__}: {exc}"
+
+
+def capture_frame(kind: str = "client"):
+    """抓当前一帧，返回 ``(PIL.Image | None, info: dict)``。
+
+    kind:
+      * ``client`` —— 只抓炉石**客户区**（默认；"看游戏界面"就用这个）
+      * ``full``   —— 整屏（含桌面其它窗口，用来看盒子/浮窗的摆位）
+      * ``roi``    —— 只抓盒子推荐面板 ROI（脚本 OCR 真正看到的那一小块）
+      * ``boxes``  —— 整屏 + 所有校准区域框（与网页「校准区域」同一张图）
+
+    读不到客户区（炉石没开/最小化/窗口不可用）时 ``client``/``roi`` 会退化成
+    整屏并在 info 里说明原因 —— 让调用方至少能看到当前屏幕，而不是拿到一块
+    没有意义的画面还以为在看游戏。
+    """
+    from PIL import Image, ImageGrab
+
+    kind = str(kind or "client").strip().lower()
+    if kind not in SCREENSHOT_KINDS:
+        raise ValueError(f"不支持的抓图类型：{kind}（可选 "
+                         + " / ".join(SCREENSHOT_KINDS) + "）")
+    info = {"kind": kind}
+
+    if kind == "boxes":
+        import base64
+        import io
+        result = screen_regions.build_region_preview()
+        encoded = str(result.get("image") or "").split(",", 1)[-1]
+        image = Image.open(io.BytesIO(base64.b64decode(encoded))).convert("RGB")
+        info.update({"mapping": result.get("mapping"),
+                     "checks": result.get("checks"),
+                     "note": "整屏 + 所有校准区域框（同网页「🎯 校准区域」）"})
+        return image, info
+
+    if kind == "full":
+        image = ImageGrab.grab(all_screens=False)
+        info["note"] = "整屏（主显示器），含桌面其它窗口"
+        return image.convert("RGB"), info
+
+    import display_mapping
+    ready, why = _hs_client_capture_ready()
+    if not ready:
+        image = ImageGrab.grab(all_screens=False)
+        info.update({"fallback": "full", "reason": why,
+                     "note": f"{why}；已退化为整屏截图"})
+        return image.convert("RGB"), info
+
+    if kind == "client":
+        frame, mapping = display_mapping.capture_region(
+            grabber=_pillow_region_grabber)
+        if frame is not None:
+            info.update({"mapping": display_mapping.mapping_info(mapping),
+                         "client_box": list(mapping.client_box),
+                         "note": "炉石客户区（脚本操作的正是这块）"})
+            return frame.convert("RGB"), info
+        why = "客户区抓图返回空帧"
+
+    else:   # roi：与 OCR 同口径 —— box_to_screen(config.recommendation_roi, mapping)
+        roi = tuple(RecommendationConfig().recommendation_roi)
+        frame, mapping = display_mapping.capture_region(
+            region=roi, region_is_client=True, grabber=_pillow_region_grabber)
+        if frame is not None:
+            info.update({"roi": list(roi),
+                         "mapping": display_mapping.mapping_info(mapping),
+                         "box": list(display_mapping.box_to_screen(
+                             roi, mapping, clamp=False)),
+                         "note": "盒子推荐面板 ROI —— 脚本 OCR 真正看到的那一小块"})
+            return frame.convert("RGB"), info
+        why = "推荐面板 ROI 抓图返回空帧"
+
+    image = ImageGrab.grab(all_screens=False)
+    info.update({"fallback": "full", "reason": why,
+                 "note": f"{why}；已退化为整屏截图"})
+    return image.convert("RGB"), info
+
+
+def _save_frame(image, info: dict, out=None) -> dict:
+    """把这一帧存成 PNG，并更新固定路径 ``agent_latest.png``。"""
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    if out:
+        path = Path(str(out))
+        if not path.is_absolute():
+            path = SCREENSHOT_DIR / path
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path = SCREENSHOT_DIR / f"{info.get('kind', 'shot')}_{stamp}.png"
+    image.save(path, format="PNG")
+    # 固定路径：agent 可以一直读同一个文件，不用每次解析时间戳。
+    latest = None
+    try:
+        image.save(SCREENSHOT_LATEST, format="PNG")
+        latest = str(SCREENSHOT_LATEST)
+    except Exception as exc:
+        _log("WARN", f"写入固定抓图路径失败：{exc}")
+    payload = {"ok": True, "path": str(path), "latest": latest,
+               "width": int(image.width), "height": int(image.height),
+               "generated_at": datetime.now().isoformat(timespec="seconds")}
+    payload.update({k: v for k, v in info.items() if k != "checks"})
+    if info.get("checks"):
+        payload["checks"] = info["checks"]
+    return payload
+
+
+def api_screenshot(body=None):
+    """按需抓一帧并存成 PNG，返回路径（CLI/agent 用）。
+
+    body: {"kind": client|full|roi|boxes, "max_width": int, "out": "文件名",
+           "quiet": bool}
+    """
+    from PIL import Image
+
+    body = body or {}
+    try:
+        image, info = capture_frame(body.get("kind") or "client")
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        traceback.print_exc()
+        return {"ok": False, "error": f"抓图失败：{type(exc).__name__}: {exc}"}
+    if image is None:
+        return {"ok": False, "error": "抓图失败：没有得到画面"}
+    try:
+        max_width = int(body.get("max_width") or 0)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "max_width 必须是整数。"}
+    if max_width > 0 and image.width > max_width:
+        ratio = max_width / float(image.width)
+        image = image.resize((max_width, max(1, int(image.height * ratio))),
+                             Image.LANCZOS)
+        info["scaled_to_width"] = max_width
+    payload = _save_frame(image, info, out=body.get("out"))
+    if not body.get("quiet"):
+        # 跟随抓图（--watch）会带上 quiet，免得把网页日志刷满。
+        _log("SYS", f"抓图：{Path(payload['path']).name}"
+                    f"（{payload['width']}×{payload['height']}，"
+                    f"{payload.get('kind')}）")
+    return payload
 
 
 def take_logs_after(seq: int):
@@ -634,6 +832,88 @@ STATE_LABELS = {
 }
 
 
+# ------------------------------------------------- 热更新通道（CLI / agent 用）
+# 网页上的「延时设置」「活人感」等卡片在自动化运行中是**禁止修改**的（保护性
+# 设计：避免用户对局中途手滑改坏参数）。但 CLI / agent 需要实时控制能力，所以
+# 这里给 API 开一条显式通道：请求体里带 "hot": true 才跳过那道守卫。
+# 网页不带这个字段，行为与以前完全一致。
+def _hot_requested(body) -> bool:
+    """请求体里是否显式要求「运行中也改」（{"hot": true}）。"""
+    try:
+        return bool((body or {}).get("hot"))
+    except Exception:
+        return False
+
+
+# 延时字段的生效时机（实测结论，别照抄成"全部立即生效"）：
+#   * live      —— FSM_action 在调用点读 recommendation_config.<字段>，就地改写
+#                  内存里的实例即可立刻生效；
+#   * file      —— 调用方每次都新建 RecommendationConfig()（重新读 ui_config.json），
+#                  所以只要落盘就立刻生效；
+#   * next_start—— 在 initialize_recommendation_automation() 里被**按值**快照进
+#                  MulliganFlow / RecommendationFlow 的构造参数，要等下一次
+#                  「开始对战」（fsm.init()）才生效；
+#   * restart   —— src/ocr/preprocess.py 在**模块导入期**就把值算成常量 _SCALE，
+#                  连重开自动化都改不动，必须重启脚本进程。
+_DELAY_LIVE_KEYS = frozenset({
+    "mulligan_ready_delay_seconds",
+    "mulligan_retry_delay_seconds",
+    "pre_action_delay_seconds",
+    "first_turn_per_card_delay_seconds",
+})
+_DELAY_FILE_KEYS = frozenset({
+    "discover_target_delay_seconds",
+})
+_DELAY_NEXT_START_KEYS = frozenset({
+    "mulligan_post_ocr_delay_seconds",
+    "post_action_delay_seconds",
+    "draw_extra_delay_per_card_seconds",
+})
+_DELAY_RESTART_KEYS = frozenset({
+    "ocr_preprocess_scale",
+})
+
+
+def _delay_effect_scope(key: str) -> str:
+    """某个延时字段改完什么时候生效（给 CLI 回话用）。"""
+    if key in _DELAY_LIVE_KEYS or key in _DELAY_FILE_KEYS:
+        return "live"
+    if key in _DELAY_NEXT_START_KEYS:
+        return "next_start"
+    return "restart"
+
+
+def _apply_delays_live(changes: dict) -> dict:
+    """把延时改动**就地**写进正在运行的 RecommendationConfig。
+
+    RecommendationConfig 是 frozen dataclass，正常 setattr 会抛
+    FrozenInstanceError；这里用 object.__setattr__ 绕过冻结是**有意**的：
+    FSM_action 与若干流程对象共享同一个实例，就地改写才能让它们当场看到新值
+    （重新 new 一个再绑回 FSM_action.recommendation_config 只能改到模块全局，
+    已经被流程对象按值/按引用拿走的旧实例不会跟着变）。
+
+    返回 {字段: 生效时机}；没有正在运行的自动化时返回 {}（下次开始自然读盘）。
+    """
+    if not changes:
+        return {}
+    try:
+        import FSM_action
+    except Exception:
+        return {}
+    cfg = getattr(FSM_action, "recommendation_config", None)
+    if cfg is None:
+        return {}
+    applied = {}
+    for key, value in changes.items():
+        try:
+            object.__setattr__(cfg, key, value)
+        except Exception as exc:
+            _log("WARN", f"热更新 {key} 失败（重启脚本后生效）：{exc}")
+            continue
+        applied[key] = _delay_effect_scope(key)
+    return applied
+
+
 def api_save_config(body: dict):
     name = str(body.get("name") or "").strip()
     log_root = str(body.get("log_root") or "").strip()
@@ -643,7 +923,7 @@ def api_save_config(body: dict):
     if log_root and not os.path.isdir(log_root):
         warnings.append("日志目录不存在，请确认路径正确（通常为炉石安装目录下的 Logs 文件夹）。")
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
             return {"ok": False, "error": "自动化运行中，请先停止后再修改配置。"}
         cfg = load_config()
         cfg["name"] = name
@@ -657,7 +937,7 @@ def api_save_config(body: dict):
 def api_save_concede(body):
     """保存自动投降配置（ui_config.json 的 auto_concede 段）。"""
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
             return {"ok": False, "error": "自动化运行中，请先停止后再修改自动投降配置。"}
         cfg = load_config()
         ac = dict(cfg.get("auto_concede") or DEFAULT_AUTO_CONCEDE)
@@ -712,7 +992,7 @@ def api_save_rank_stop(body):
     每局结束时读一次结算界面的段位数字，命中条件就让自动化在本局结束后停止。
     """
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
             return {"ok": False, "error": "自动化运行中，请先停止后再修改上分停止条件。"}
         cfg = load_config()
         rank = _current_rank_stop()
@@ -770,7 +1050,7 @@ def _current_human_like() -> dict:
 def api_save_human_like(body):
     """保存活人感配置（ui_config.json 的 human_like 段）。"""
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
             return {"ok": False, "error": "自动化运行中，请先停止后再修改活人感配置。"}
         cfg = load_config()
         hl = _current_human_like()
@@ -830,7 +1110,7 @@ def api_save_liveness(body):
     （issue 反馈空转近 3 小时），所以默认开启，但允许用户关闭。
     """
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
             return {"ok": False, "error": "自动化运行中，请先停止后再修改存活检测配置。"}
         cfg = load_config()
         lv = _current_liveness()
@@ -874,12 +1154,22 @@ def _current_delays() -> dict:
 
 
 def api_save_delays(body):
-    """保存延时配置（ui_config.json 的 delays 段）。"""
+    """保存延时配置（ui_config.json 的 delays 段）。
+
+    带 "hot": true 时允许在自动化运行中修改，并**就地**改写正在运行的
+    RecommendationConfig（见 _apply_delays_live）。返回值的 effects 说明每个
+    字段的实际生效时机：
+        live       —— 立刻生效（内存实例已改写，或调用方每次重新读盘）
+        next_start —— 下一次「开始对战」生效（启动时按值快照进流程对象）
+        restart    —— 需重启脚本进程（OCR 预处理在模块导入期取常量）
+    """
+    hot = _hot_requested(body)
     with CTRL.lock:
-        if CTRL.automation_thread is not None:
+        if CTRL.automation_thread is not None and not hot:
             return {"ok": False, "error": "自动化运行中，请先停止后再修改延时配置。"}
         cfg = load_config()
         delays = dict(cfg.get("delays") or {})
+        changes = {}
         for key in _USER_DELAY_KEYS:
             if key not in body:
                 continue
@@ -892,10 +1182,28 @@ def api_save_delays(body):
                 return {"ok": False,
                         "error": f"{key} 必须介于 {lo}–{hi}。"}
             delays[key] = value
+            changes[key] = value
         cfg["delays"] = delays
         save_config(cfg)
-    _log("SYS", "延时配置已保存。")
-    return {"ok": True, "message": "延时配置已保存", "delays": _current_delays()}
+        running = CTRL.automation_thread is not None
+    # 就地热更新的返回值同时充当"生效时机表"（没在跑时为空，走 _delay_effect_scope）。
+    live_applied = _apply_delays_live(changes) if (hot and running) else {}
+    effects = {key: live_applied.get(key, _delay_effect_scope(key))
+               for key in changes}
+    if changes:
+        _log("SYS", "延时配置已保存：" + "、".join(
+            f"{key}={value:g}（{effects[key]}）"
+            for key, value in changes.items()) + "。")
+    else:
+        _log("SYS", "延时配置已保存。")
+    result = {"ok": True, "message": "延时配置已保存",
+              "delays": _current_delays()}
+    if effects:
+        result["effects"] = effects
+        if any(scope != "live" for scope in effects.values()):
+            result["note"] = ("标 next_start 的字段要等下一次「开始对战」才生效；"
+                              "标 restart 的字段要重启脚本进程。")
+    return result
 
 
 def api_start(body: dict):
@@ -1072,7 +1380,9 @@ def api_schedule(body: dict):
 # 校准窗口（calibrate_roi.py）。这里只维护「同一时刻最多一个」的会话句柄。
 _CALIBRATION_PROC = None
 CALIBRATION_HINT = ("拖框对齐后按 S 保存：1 推荐面板 · 2 换牌确认按钮 · "
-                    "3 AI胜率浮动条（Tab 切换，Esc 退出）")
+                    "3 AI胜率浮动条 · 4 结算开始按钮 · 5 段位数字 · "
+                    "6 主界面「传统对战」 · 7 选择套牌 9 个卡组"
+                    "（Tab 切换，Esc 退出）")
 
 
 def _calibration_running() -> bool:
@@ -1083,8 +1393,12 @@ def _calibration_running() -> bool:
         return False
 
 
-def _start_calibration() -> dict:
-    """启动校准窗口（已在跑就直接复用，不重复开窗）。"""
+def _start_calibration(target: str = "") -> dict:
+    """启动校准窗口（已在跑就直接复用，不重复开窗）。
+
+    `target` 可以指定一打开就停在哪个目标上（`calibrate_roi.py --target KEY`，
+    例如 `main_menu_battle`），省得用户自己按 Tab 翻。
+    """
     global _CALIBRATION_PROC
     if _calibration_running():
         return {"ok": True, "running": True,
@@ -1093,9 +1407,11 @@ def _start_calibration() -> dict:
     if not script.exists():
         _log("WARN", f"校准工具缺失：{script}")
         return {"ok": False, "error": f"校准工具缺失：{script}"}
+    command = [sys.executable, str(script)]
+    if target:
+        command += ["--target", str(target)]
     try:
-        _CALIBRATION_PROC = subprocess.Popen([sys.executable, str(script)],
-                                             cwd=str(ROOT))
+        _CALIBRATION_PROC = subprocess.Popen(command, cwd=str(ROOT))
     except Exception as exc:
         _log("WARN", f"启动校准窗口失败：{exc}")
         return {"ok": False, "error": f"启动校准工具失败：{exc}"}
@@ -1127,9 +1443,13 @@ def _toggle_calibration() -> bool:
     return _calibration_running()
 
 
-def api_calibrate():
-    """网页「🎯 校准区域」卡片：启动同一个校准窗口。"""
-    result = _start_calibration()
+def api_calibrate(body=None):
+    """网页「🎯 校准区域」卡片 / CLI：启动同一个校准窗口。
+
+    body 可选 `{"target": "main_menu_battle"}`：一打开就停在那个框上。
+    """
+    body = body or {}
+    result = _start_calibration(str(body.get("target") or ""))
     if not result.get("ok"):
         return result
     return {"ok": True, "message": result.get("message", "")}
@@ -1712,6 +2032,274 @@ def _restart_hearthstone_worker():
                 "确认无误后点「开始对战」继续。")
 
 
+# 串行化「重启炉石」：并发触发两次会把刚拉起来的炉石再杀一遍。
+_restart_lock = threading.Lock()
+_RESTART_STATE = {"running": False}
+
+
+# ---------------------------------------------------------------- 界面识别 / 一键进入对战
+# 「现在在哪个界面」由 battle_entry 认：**只认文字**（灰度 NCC，在可校准框
+# ±40px 内找「传统对战」四个字 / 「开始」按钮的图案）。先看清楚再动手 ——
+# 认不出来就什么都不点，超时退出并说明原因。
+_UI_STATE_LABELS = {"main_menu": "主界面（认出「传统对战」）",
+                    "deck_select": "选择套牌界面（认出「开始」）",
+                    "unknown": "没认出界面"}
+_ENTER_STATE = {"running": False, "stage": "", "ok": None, "message": "",
+                "started_at": None, "finished_at": None, "steps": []}
+_ENTER_LOCK = threading.Lock()
+
+
+def _ui_info() -> dict:
+    """界面识别的公共信息：三个框的位置、9 个点击点、当前卡组设置。"""
+    import battle_entry
+    return {
+        "boxes": {"traditional": list(battle_entry.traditional_box()),
+                  "start": list(battle_entry.start_box()),
+                  "deck_grid": list(battle_entry.deck_grid_box())},
+        "slot_points": [list(point) for point in battle_entry.deck_slot_points()],
+        "deck_index": battle_entry.battle_entry_settings().get("deck_index"),
+        "templates": {kind: str(battle_entry.TEMPLATE_DIR / name)
+                      for kind, name in battle_entry.TEMPLATE_FILE.items()},
+    }
+
+
+def api_ui_state(frame_name: str = "") -> dict:
+    """认出当前界面（只读）：state / 匹配分 / 认到的位置 / 9 格证据。
+
+    `frame_name` 非空时顺带把这一帧存成 PNG（`tmp_screens/<name>`）——
+    agent 可以直接读那张图核对"它到底看到了什么"。
+    """
+    import battle_entry
+    result = {"ok": True, "enter_battle": dict(_ENTER_STATE)}
+    result.update(_ui_info())
+    try:
+        frame, mapping = battle_entry.capture_client_frame()
+    except Exception as exc:
+        return {"ok": False, "error": f"抓图失败：{exc}", "ui": None, **result}
+    if frame is None:
+        return {"ok": False, "ui": None, **result,
+                "error": "抓不到炉石客户区（炉石未运行或已最小化）"}
+    ui = battle_entry.identify(frame)
+    result["ui"] = ui
+    result["state"] = ui.get("state")
+    result["state_label"] = _UI_STATE_LABELS.get(ui.get("state"), "未知")
+    if mapping is not None:
+        import display_mapping
+        result["mapping"] = display_mapping.mapping_info(mapping)
+    if frame_name:
+        try:
+            import numpy as np
+            from PIL import Image
+            rgb = frame[:, :, :3][:, :, ::-1]           # BGRA/BGR → RGB
+            image = Image.fromarray(np.ascontiguousarray(rgb))
+            saved = _save_frame(image, {"kind": "ui_frame"}, out=frame_name)
+            result["frame_path"] = saved.get("path")
+            result["frame_latest"] = saved.get("latest")
+        except Exception as exc:
+            result["frame_error"] = str(exc)
+    return result
+
+
+def api_ui_learn(body=None) -> dict:
+    """按当前（可校准）框从**当前画面**重裁识别模板。
+
+    皮肤/补丁把字改了颜色或反色之后，匹配分会掉下来；站到对应界面调一次这里
+    就能自愈，框坐标不用动。框里没有字（一片平坦）时拒绝学习并说明原因。
+    """
+    body = body or {}
+    kind = str(body.get("kind") or "all")
+    import battle_entry
+    with _ENTER_LOCK:
+        if _ENTER_STATE["running"]:
+            return {"ok": False, "error": "正在进入对战，等它结束再重学模板。"}
+    try:
+        result = battle_entry.learn_template(kind)
+    except Exception as exc:
+        return {"ok": False, "error": f"重裁模板失败：{exc}"}
+    if not result.get("ok"):
+        _log("WARN", f"重裁模板未成功：{result.get('message')}")
+        return {"ok": False, "error": result.get("message") or "没有学到模板",
+                **result}
+    _log("SYS", result["message"])
+    return dict(result)
+
+
+def api_save_deck(body) -> dict:
+    """设置"自动选择的卡组序号"（ui_config.json 的 `battle_entry.deck_index`）。
+
+    每次开局前都会重新读盘，所以改完下一局就生效，不用重启脚本。
+    `{"clear": true}` = 关掉自动选卡组（保持你手选的卡组）。
+    """
+    body = body or {}
+    from config import save_battle_entry_setting
+    index = None if body.get("clear") else body.get("index")
+    try:
+        saved = save_battle_entry_setting("deck_index", index)
+    except (KeyError, ValueError) as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"保存卡组序号失败：{exc}"}
+    value = saved.get("deck_index")
+    if value is None:
+        message = "已关闭自动选卡组（保持你手选的卡组）"
+    else:
+        import battle_entry
+        x, y = battle_entry.deck_slot_point(int(value))
+        message = (f"已设置：每局自动选第 {value} 个卡组"
+                   f"（点击点 {x},{y}；只按当前页的 9 格算）")
+    _log("SYS", message)
+    return {"ok": True, "deck_index": value, "message": message}
+
+
+def api_enter_battle_status() -> dict:
+    """只看「进入对战」的进度（**不抓图**，所以 CLI 轮询它很便宜）。"""
+    with _ENTER_LOCK:
+        state = dict(_ENTER_STATE)
+    return {"ok": True, "enter_battle": state}
+
+
+def api_enter_battle(body=None) -> dict:
+    """一键进入对战：拉起炉石 → 等主界面 → 点「传统对战」 → 选卡组 →（可选）点「开始」。
+
+    自动化正在跑时直接拒绝：鼠标归 FSM 管，两边同时点会互相打断。
+    同步做参数预检，之后丢后台线程跑（可能要等几十秒到几分钟），进度写日志，
+    也可以从 `GET /api/ui_state` 的 `enter_battle` 字段查。
+    """
+    import battle_entry
+    body = body or {}
+    if CTRL.automation_thread is not None or CTRL.starting:
+        return {"ok": False,
+                "error": "自动化已经在运行中；它会自己进对战，不需要手动进。"}
+    raw_index = body.get("deck_index")
+    deck_index = None
+    if raw_index not in ("", None):
+        try:
+            deck_index = int(raw_index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "deck_index 必须是 1-9 的整数（或省略）"}
+        if not 1 <= deck_index <= 9:
+            return {"ok": False, "error": "deck_index 必须是 1-9（当前页只有 9 格）"}
+    try:
+        interval = float(body.get("interval") or battle_entry.CHECK_INTERVAL_SECONDS)
+        timeout = float(body.get("timeout") or battle_entry.MAIN_MENU_TIMEOUT_SECONDS)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "interval / timeout 必须是数字（秒）"}
+    if interval <= 0 or timeout <= 0:
+        return {"ok": False, "error": "interval / timeout 必须大于 0"}
+    click_start = bool(body.get("click_start"))
+    with _ENTER_LOCK:
+        if _ENTER_STATE["running"]:
+            return {"ok": False, "error": "上一次「进入对战」还没结束，请稍候。"}
+        _ENTER_STATE.update({"running": True, "stage": "launch", "ok": None,
+                             "message": "正在进入对战……", "steps": [],
+                             "started_at": datetime.now().isoformat(timespec="seconds"),
+                             "finished_at": None})
+
+    def _worker():
+        try:
+            result = battle_entry.enter_battle(
+                deck_index=deck_index, click_start=click_start,
+                interval=interval, main_menu_timeout=timeout,
+                logger=lambda text: _log("SYS", text))
+            for step in result.get("steps") or []:
+                at = f" @{step['at']}" if step.get("at") else ""
+                _log("SYS", f"进入对战·{step['stage']}：{step.get('detail') or ''}{at}")
+            with _ENTER_LOCK:
+                _ENTER_STATE.update({
+                    "running": False, "stage": result.get("stage", ""),
+                    "ok": bool(result.get("ok")),
+                    "message": result.get("message", ""),
+                    "steps": result.get("steps") or [],
+                    "finished_at": datetime.now().isoformat(timespec="seconds")})
+            _log("SYS" if result.get("ok") else "WARN",
+                 f"进入对战{'完成' if result.get('ok') else '未完成'}："
+                 f"{result.get('message')}")
+        except Exception as exc:
+            traceback.print_exc()
+            with _ENTER_LOCK:
+                _ENTER_STATE.update({
+                    "running": False, "stage": "error", "ok": False,
+                    "message": str(exc),
+                    "finished_at": datetime.now().isoformat(timespec="seconds")})
+            _log("ERROR", f"进入对战失败：{exc}")
+
+    _log("SYS", "收到「进入对战」请求：拉起炉石 → 认主界面 → 点「传统对战」 → "
+                + (f"选第 {deck_index} 个卡组 → " if deck_index else "")
+                + ("点「开始」" if click_start else "停在选择套牌界面"))
+    threading.Thread(target=_worker, name="hs-enter-battle", daemon=True).start()
+    return {"ok": True,
+            "message": "已开始进入对战（进度见日志与 /api/ui_state 的 enter_battle）。",
+            "enter_battle": dict(_ENTER_STATE)}
+
+
+def api_deck_click(body=None) -> dict:
+    """快速选卡组：确认当前在「选择套牌」界面后，**直接点**第 N 格（同步、秒级）。
+
+    与 `enter_battle` 的区别：不做"等主界面→点传统对战"那套状态机，
+    只做一次带保护的单击 —— `battle_entry.select_deck` 会先抓一帧确认这一格
+    名牌上有白字（真的像个卡组）才点，否则一格都不点。
+    自动化正在跑时拒绝：鼠标归 FSM 管，两边同时点会互相打断。
+    """
+    import battle_entry
+    body = body or {}
+    if CTRL.automation_thread is not None or CTRL.starting:
+        return {"ok": False,
+                "error": "自动化已经在运行中；它会自己选卡组，不需要手动点。"}
+    with _ENTER_LOCK:
+        if _ENTER_STATE["running"]:
+            return {"ok": False, "error": "「进入对战」正在跑，等它结束再点卡组。"}
+    try:
+        index = int(body.get("index"))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "index 必须是 1-9 的整数"}
+    result = battle_entry.select_deck(index, logger=lambda text: _log("SYS", text))
+    if result.get("ok"):
+        _log("SYS", result.get("message") or f"已快速点第 {index} 个卡组")
+    return dict(result)
+
+
+def api_restart_hearthstone(body=None):
+    """CLI / agent 的「重启炉石」接口（复用浮窗按钮同一套流程）。
+
+    必须显式 confirm=true：这一步会结束 Hearthstone.exe 并清空它的日志目录，
+    正在打的对局会直接没了，所以不接受裸调用。
+
+    先做**同步预检**（路径解析），让调用方立刻拿到 ok=false 和原因；预检通过才
+    丢到后台线程跑，避免 CLI 卡在这里等几十秒。
+    """
+    body = body or {}
+    if not body.get("confirm"):
+        return {"ok": False,
+                "error": "重启炉石会结束炉石进程并清空其日志目录，"
+                         '请显式确认：{"confirm": true}'}
+    cfg = load_config()
+    log_root = (cfg.get("log_root") or "").strip()
+    try:
+        import hs_restart
+        info = hs_restart.resolve_paths(log_root)
+    except Exception as exc:
+        return {"ok": False, "error": f"重启炉石不可用：{exc}"}
+    if not info.get("ok"):
+        return {"ok": False, "error": info.get("error")}
+    with _restart_lock:
+        if _RESTART_STATE["running"]:
+            return {"ok": False, "error": "上一次重启炉石还没结束，请稍候。"}
+        _RESTART_STATE["running"] = True
+
+    def _worker():
+        try:
+            _restart_hearthstone_worker()
+        finally:
+            with _restart_lock:
+                _RESTART_STATE["running"] = False
+
+    threading.Thread(target=_worker, name="hs-restart-api",
+                     daemon=True).start()
+    return {"ok": True,
+            "message": "已开始重启炉石（停止自动化 → 结束进程 → 清空日志目录 "
+                       "→ 重新启动），进度见日志。"}
+
+
 def _overlay_exit_overlay():
     """浮窗「退出浮窗」：只写一行日志说明发生了什么（脚本继续运行）。
 
@@ -1878,6 +2466,25 @@ def status_snapshot():
 
 
 # ---------------------------------------------------------------- HTTP 服务
+class _ControlServer(ThreadingHTTPServer):
+    """本地控制台服务器。
+
+    **必须关掉 allow_reuse_address。** Python 的 HTTPServer 默认给它开
+    SO_REUSEADDR，而 Windows 上 SO_REUSEADDR 的语义是"允许绑定**别人已占用**的
+    端口"（与 Unix 完全不同）。结果是 main() 里"端口被占用就顺延到 8766"的逻辑
+    形同虚设：第二个实例会**成功**绑到同一个端口，两个进程同时 LISTENING，
+    请求随机落到其中一个 —— 网页可能打到 A 实例、浮窗属于 B 实例，而两者共用
+    同一份 ui_config.json。现象是"命令发出去了但没反应/改了没生效"，极难排查。
+
+    关掉之后，抢不到端口的实例会正常拿到 OSError 并顺延。
+
+    注意：监听套接字在 Windows 上关闭即释放，不受 TIME_WAIT 影响，所以"停掉后
+    立刻重启同一个端口"不会被这里挡住。
+    """
+
+    allow_reuse_address = False
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HSLegendArriver/1.0"
 
@@ -1933,6 +2540,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_selfcheck(force=False))
             elif path == "/api/regions":
                 self._json(api_regions())
+            elif path == "/api/ui_state":
+                q = parse_qs(parsed.query)
+                self._json(api_ui_state(frame_name=q.get("frame", [""])[0]))
+            elif path == "/api/enter_battle":
+                self._json(api_enter_battle_status())
             else:
                 self._json({"ok": False, "error": "未知接口"}, 404)
         except Exception as exc:
@@ -1961,7 +2573,19 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/schedule/cancel":
                 self._json(api_cancel_schedule())
             elif path == "/api/calibrate":
-                self._json(api_calibrate())
+                self._json(api_calibrate(body))
+            elif path == "/api/ui_learn":
+                self._json(api_ui_learn(body))
+            elif path == "/api/deck":
+                self._json(api_save_deck(body))
+            elif path == "/api/enter_battle":
+                self._json(api_enter_battle(body))
+            elif path == "/api/deck_click":
+                self._json(api_deck_click(body))
+            elif path == "/api/restart_hearthstone":
+                self._json(api_restart_hearthstone(body))
+            elif path == "/api/screenshot":
+                self._json(api_screenshot(body))
             elif path == "/api/overlay":
                 self._json(api_toggle_overlay(body))
             elif path == "/api/concede":
@@ -1984,6 +2608,36 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------- 启动
+def _write_port_file(port: int) -> None:
+    """把实际监听端口写给 CLI / agent（原子替换，读到的永远是一份完整 JSON）。
+
+    端口会因为占用而顺延（BASE_PORT..BASE_PORT+19），所以消费方不该硬编码 8765。
+    """
+    try:
+        PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "port": int(port),
+            "host": HOST,
+            "url": f"http://{HOST}:{port}",
+            "pid": os.getpid(),
+            "started_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp = PORT_FILE.with_name(PORT_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf8")
+        os.replace(tmp, PORT_FILE)
+    except Exception as exc:
+        # 写不了不影响控制台本身，只是 CLI 要退化成扫端口。
+        print(f"[port] 端口文件写入失败（CLI 将扫描端口）：{exc}")
+
+
+def _clear_port_file() -> None:
+    """退出时删掉端口文件，避免 CLI 打到一个已经死掉的端口。"""
+    try:
+        PORT_FILE.unlink()
+    except Exception:
+        pass
+
+
 def _boot_resume_schedule():
     cfg = load_config()
     s, e = cfg.get("schedule_start"), cfg.get("schedule_end")
@@ -2027,7 +2681,7 @@ def main():
     port = None
     for port in range(BASE_PORT, BASE_PORT + 20):
         try:
-            server = ThreadingHTTPServer((HOST, port), Handler)
+            server = _ControlServer((HOST, port), Handler)
             break
         except OSError:
             continue
@@ -2035,6 +2689,7 @@ def main():
         print("无法绑定端口，请检查 8765-8785 是否被占用。")
         sys.exit(1)
     threading.Thread(target=server.serve_forever, name="hs-web", daemon=True).start()
+    _write_port_file(port)
 
     url = f"http://{HOST}:{port}"
     print("=" * 64)
@@ -2052,6 +2707,8 @@ def main():
             time.sleep(3600)
     except KeyboardInterrupt:
         print("\n控制台已退出。")
+    finally:
+        _clear_port_file()
 
 
 if __name__ == "__main__":

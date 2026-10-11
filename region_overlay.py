@@ -6,6 +6,7 @@
     🟩 绿框 = 盒子推荐面板（OCR 识别来源，把「打法参考A」面板移进来）
     🟦 蓝框 = 换牌「确认」按钮
     🟧 橙框 = 盒子「AI胜率」浮动条   🟥 红细框 = AI胜率兜底区域
+    🩵 青绿框 = 结算「开始」按钮      🟪 紫框 = 段位数字（名次）
     ✛  黄十字 = 阶段判定点
 
 本模块对外提供三样东西，校准工具（calibrate_roi.py）全部复用：
@@ -273,12 +274,25 @@ _OK_COLOR = (99, 199, 111, 255)
 _WARN_COLOR = (226, 168, 78, 255)
 
 
-def hint_lines(panel_state: Optional[bool] = None) -> list[dict]:
-    """提示条内容：标题「请对齐相应UI」+ 说明 + 盒子面板判定 + 关闭方式。"""
+def hint_lines(panel_state: Optional[bool] = None, mapping_text: str = "",
+               status: Optional[dict] = None) -> list[dict]:
+    """提示条内容：标题 + 说明 + 客户区几何 + 盒子面板判定 + 关闭方式。
+
+    mapping_text 是 display_mapping 的一行描述（客户区尺寸 / 屏幕偏移 / 缩放）；
+    窗口不在屏幕原点时，这行是判断"框到底画在哪"的第一手信息。
+
+    status（可选）是**当前校准目标自己的**实时判定，形如
+    ``{"text": "框内文字匹配 1.00（阈值 0.80）· 对准了", "ok": True}``：
+    界面识别类目标（主界面「传统对战」/ 9 个卡组）靠它当场看准没准 ——
+    不传时输出与以前逐字节相同。
+    """
     lines = [
         {"text": HINT_TITLE, "color": _TITLE_COLOR, "size": 22, "bold": True},
         {"text": HINT_DETAIL, "color": _TEXT_COLOR, "size": 13, "bold": False},
     ]
+    if mapping_text:
+        lines.append({"text": mapping_text, "color": _TEXT_COLOR,
+                      "size": 13, "bold": False})
     if panel_state is True:
         # 这些字是 PIL 用微软雅黑画的：没有彩色 emoji 字形，✓/✗ 也不一定在
         # 字体里（会画成方框），所以只用纯文字 + 颜色区分状态。
@@ -287,29 +301,80 @@ def hint_lines(panel_state: Optional[bool] = None) -> list[dict]:
     elif panel_state is False:
         lines.append({"text": "还没检测到盒子面板：请把「打法参考A」面板移进绿框",
                       "color": _WARN_COLOR, "size": 15, "bold": True})
+    if status and status.get("text"):
+        lines.append({"text": str(status["text"]),
+                      "color": _OK_COLOR if status.get("ok") else _WARN_COLOR,
+                      "size": 15, "bold": True})
     lines.append({"text": HINT_CLOSE, "color": _TEXT_COLOR,
                   "size": 12, "bold": False})
     return lines
 
 
+# 哨兵：区分"调用方没传映射（自动探测）"与"显式传 None（不换算）"。
+# **函数的默认值必须是这个哨兵**：以前写成 `mapping=None`，于是"不传参"和
+# "显式传 None"完全无法区分 —— `auto_mapping()` 会直接返回 None（不换算），
+# 校准窗口因此永远拿不到客户区几何：框全都画在配置的原始坐标上，拖动炉石时
+# 一个都不跟着动（用户报告的核心问题）。
+_AUTO_MAPPING = object()
+
+
+def auto_mapping(mapping=_AUTO_MAPPING):
+    """解析映射参数：显式传了就用（包括 None），没传才自动探测客户区几何。
+
+    调用方在同一帧里要画多条路径（区域框 + 当前高亮框）时必须**只解析一次**，
+    否则两条路径可能拿到不同的映射，同一个框会被画到两个位置。
+    """
+    if mapping is not _AUTO_MAPPING:
+        return mapping
+    from display_mapping import display_mapping
+    try:
+        return display_mapping()
+    except Exception:
+        return None
+
+
 def paint_layer(width: int, height: int, panel_state: Optional[bool] = None,
-                config=None, skip_labels=(), skip_keys=()):
+                config=None, skip_labels=(), skip_keys=(),
+                mapping=_AUTO_MAPPING, overrides=None, status=None):
     """画出一整屏的叠加层（RGBA，背景全透明）——纯函数，方便离线检查。
+
+    区域框是**客户区相对坐标**，mapping（display_mapping.DisplayMapping）负责
+    换算成屏幕坐标。不传时自动探测炉石客户区；显式传 None 则不换算（离线渲染
+    与测试用，框按桌面坐标画）。
+
+    overrides：``{区域 key: 屏幕坐标框}``，直接用给定坐标画（校准窗口用它把
+    自己 screen 口径的框画出来，避免往返换算被夹取破坏）。
 
     skip_keys  ：这些 key 的区域不在这层里画（校准窗口让当前目标由它自己的
                  高亮那张单独画，避免同一个框叠两次）。
     skip_labels：这些 key 的区域只画框、不画标签（标签底紧贴框边时会被看成
                  第二个框）。
+    status     ：当前校准目标自己的实时判定（见 hint_lines）；不传 = 不画那一行，
+                 输出与以前逐字节相同。
     """
     from PIL import Image, ImageDraw
 
+    mapping = auto_mapping(mapping)
+
     canvas = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
     draw_region_boxes(canvas, config, skip_labels=skip_labels,
-                      skip_keys=skip_keys)
-    draw_state_probe_points(canvas)
+                      skip_keys=skip_keys, mapping=mapping,
+                      overrides=overrides)
+    draw_state_probe_points(canvas, mapping=mapping)
 
     draw = ImageDraw.Draw(canvas)
-    lines = hint_lines(panel_state)
+    mapping_text = mapping.debug_text() if mapping is not None else \
+        "客户区未知（炉石未运行）：框按桌面坐标绘制"
+    # 跟踪状态并进同一行：不额外增加提示条高度（提示条是居中卡片，变高会往下
+    # 压到区域框上）。
+    try:
+        from display_mapping import tracker_stats
+        tracker_text = tracker_stats().get("text", "")
+    except Exception:
+        tracker_text = ""
+    if tracker_text:
+        mapping_text = f"{mapping_text} · {tracker_text}"
+    lines = hint_lines(panel_state, mapping_text, status)
     fonts = [label_font(line["size"]) for line in lines]
 
     pad_x, pad_y, gap = 18, 12, 6
@@ -338,17 +403,26 @@ def paint_layer(width: int, height: int, panel_state: Optional[bool] = None,
     return canvas
 
 
-def panel_state(config=None, detector=None) -> Optional[bool]:
+def panel_state(config=None, detector=None, mapping=None) -> Optional[bool]:
     """截一小块推荐区域，看看绿框里现在有没有盒子面板（判断不了返回 None）。
 
     叠加层与校准工具共用：顶部提示条与「已检测到盒子面板」都看这个返回值。
+    推荐 ROI 是客户区相对坐标，先经 mapping 换算成屏幕坐标再截。
     """
+    from display_mapping import box_to_screen, display_mapping
+
     detect = detector or panel_visible
     try:
         from PIL import ImageGrab
         regions = screenshot_regions(config)
         roi = next(r for r in regions if r["key"] == "recommendation")["box"]
-        crop = ImageGrab.grab(bbox=tuple(roi), all_screens=False)
+        if mapping is None:
+            mapping = display_mapping()
+        screen_roi = box_to_screen(roi, mapping)
+        if screen_roi[2] - screen_roi[0] < 4 or screen_roi[3] - screen_roi[1] < 4:
+            return None
+        crop = ImageGrab.grab(bbox=tuple(int(v) for v in screen_roi),
+                              all_screens=False)
         return bool(detect(crop))
     except Exception:
         return None
@@ -414,7 +488,6 @@ class RegionBoxOverlay:
         """截一小块推荐区域，看看绿框里现在有没有盒子面板（判断不了返回 None）。"""
         return panel_state(self._config() if config is None else config,
                            self._detector)
-
     def _config(self):
         if self._config_provider is not None:
             try:

@@ -104,6 +104,9 @@ class FullBoardMagneticTests(unittest.TestCase):
         with (
             patch.object(hearthstone_click, "Controller", return_value=mouse),
             patch.object(hearthstone_click, "rand_sleep"),
+            # 拖动端点要经 display_mapping 换算成屏幕坐标；注入"读不到客户区"，
+            # 断言就用客户区相对坐标（不受测试机窗口位置/尺寸影响）。
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
         ):
             drag(
                 card_index=2,

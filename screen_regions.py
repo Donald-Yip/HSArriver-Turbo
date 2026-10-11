@@ -11,7 +11,8 @@
 * ``build_region_preview()`` —— 截一张当前屏幕、画上所有框，给浏览器看。
 
 用户据此一眼确认三件事：
-    1. 分辨率 / 缩放对不对——框的整体位置和整屏大小是否和 1920×1080 吻合；
+    1. 区域框有没有跟着炉石客户区走——框的整体位置与客户区（基准 1920×1080）
+       是否吻合（卡片上看得到客户区尺寸与屏幕偏移）；
     2. 盒子 UI 有没有摆正——盒子的「打法参考A」面板是否正好落在绿框
        （推荐区域 recommendation_roi）里；
     3. 换牌「确认」按钮、AI胜率浮动条这些区域有没有对偏。
@@ -60,6 +61,21 @@ AI_WIN_RATE_WIDE_REGION = expand_box(AI_WIN_RATE_REGION, AI_WIN_RATE_WIDE_MARGIN
 POST_GAME_START_BUTTON_REGION = (1325, 865, 1475, 935)
 POST_GAME_START_FALLBACK_REGION = (1250, 845, 1550, 945)
 POST_GAME_RANK_REGION = (1230, 180, 1385, 225)
+# 段位框的统一配色（校准目标 + 预览区域共用，避免两处各写一份十六进制）。
+RANK_COLOR = "#c9a3e8"
+
+# 界面识别（battle_entry）用的两个框，必须与 battle_entry.MAIN_MENU_BATTLE_DEFAULT /
+# DECK_GRID_DEFAULT 一致（test_screen_regions.py 会导入 battle_entry 校验，
+# 防止两边改岔 —— 与 AI 胜率区域那条规矩一样）。
+#   * MAIN_MENU_BATTLE_REGION：「传统对战」**四个字**（不是整条银条）；
+#   * DECK_GRID_REGION：选择套牌界面 9 个卡组的整块区域（脚本按 3×3 均分）。
+MAIN_MENU_BATTLE_REGION = (832, 317, 1091, 344)
+DECK_GRID_REGION = (366, 210, 1089, 858)
+MAIN_MENU_BATTLE_COLOR = "#f0c04a"
+DECK_GRID_COLOR = "#8fd3e8"
+# 文字框可以很薄：校准窗口的缩放手柄默认不允许小于 MIN_SIZE(60)，这里放行到 20，
+# 否则 259×27 的「传统对战」框根本拖不出来（只能改配置文件）。
+MAIN_MENU_BATTLE_MIN_SIZE = 20
 
 # 可用校准工具拖拽并保存到 ui_config.json 的区域（校准目标登记表）。
 # key 与屏幕叠加层的区域 key 一致；config_key 是 ui_config.json 的顶层键，
@@ -82,6 +98,24 @@ CALIBRATION_TARGETS = (
      "label": "结算「开始」按钮", "short": "开始按钮", "color": "#7fd4c1",
      "default": POST_GAME_START_BUTTON_REGION,
      "hint": "框住每局结束时底部的「开始」按钮：检测它是否出现，并用框中心点击"},
+    {"key": "rank", "config_key": "post_game_rank_roi",
+     "label": "段位数字（名次）", "short": "段位", "color": RANK_COLOR,
+     "default": POST_GAME_RANK_REGION,
+     "hint": "框住结算界面右上角的段位数字：有数字=已上传说，数字就是名次"},
+    # 下面两个是「界面识别」用的（battle_entry）：认出界面才决定点什么。
+    {"key": "main_menu_battle", "config_key": "main_menu_battle_roi",
+     "label": "主界面「传统对战」（识别+点击）", "short": "传统对战",
+     "color": MAIN_MENU_BATTLE_COLOR,
+     "default": MAIN_MENU_BATTLE_REGION,
+     "min_size": MAIN_MENU_BATTLE_MIN_SIZE,
+     "hint": "框住主界面的「传统对战」四个字（贴字就行，不用框银条）："
+             "脚本在框 ±40px 内用这四个字的图案找它，认到就点认到的位置"},
+    {"key": "deck_grid", "config_key": "deck_grid_roi",
+     "label": "选择套牌 9 个卡组（3×3）", "short": "9 个卡组",
+     "color": DECK_GRID_COLOR,
+     "default": DECK_GRID_REGION,
+     "hint": "框住选择套牌界面的 9 个卡组整块区域：脚本按 3×3 均分得到 9 个"
+             "点击点，只有名牌上有字的格子才会被点"},
 )
 
 # get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
@@ -182,16 +216,30 @@ def screenshot_regions(config=None) -> list[dict]:
          "width": 1, "label_below": True,
          "note": "主区域读不到时放宽再读一次，偏一点也能兜住"},
         # 下面两个只在「对局结算」阶段使用（打完一局后的界面）：
-        # 「开始」按钮可校准（点击点取框中心），段位框只读、画出来供对照。
+        # 「开始」按钮与段位数字**都可校准**（段位框读用户校准值，用来读名次）。
         {"key": "post_game_start", "color": "#7fd4c1",
          "label": "结算「开始」按钮（每局结束等它出现）",
          "box": by_key["post_game_start"]["box"],
          "config_key": "post_game_start_roi",
          "note": "检测它有没有出现，并用框中心点击它；按钮挪位置了就把这个框拖过去"},
-        {"key": "rank", "color": "#c9a3e8",
+        {"key": "rank", "color": RANK_COLOR,
          "label": "段位数字（上传说后读取，用于按段位停止）",
-         "box": POST_GAME_RANK_REGION,
-         "note": "每局结束读一次：有数字=已上传说（数字即名次），空白=还没上传说"},
+         "box": by_key["rank"]["box"],
+         "config_key": "post_game_rank_roi",
+         "note": "每局结束读一次：有数字=已上传说（数字即名次），空白=还没上传说；"
+                 "读数偏了就把这个框拖到名次数字上"},
+        # 下面两个是「界面识别」画出来的：认出界面才决定点什么，所以也要能一眼看到。
+        {"key": "main_menu_battle", "color": MAIN_MENU_BATTLE_COLOR,
+         "label": "主界面「传统对战」（认出它就点它）",
+         "box": by_key["main_menu_battle"]["box"],
+         "config_key": "main_menu_battle_roi",
+         "note": "框住那四个字：认到「传统对战」= 在主界面，脚本点认到的文字位置"},
+        {"key": "deck_grid", "color": DECK_GRID_COLOR,
+         "label": "选择套牌 9 个卡组（3×3 均分 = 9 个点击点）",
+         "box": by_key["deck_grid"]["box"],
+         "config_key": "deck_grid_roi",
+         "note": "整块框住 9 个卡组即可，脚本自己按 3×3 均分；"
+                 "只有名牌上有字的格子才会被点"},
     ]
 
 
@@ -284,11 +332,24 @@ def _expected(config) -> tuple[int, int, int]:
 
 # ---------------------------------------------------------------- 预览图
 def draw_region_boxes(image, config=None, scale: float = 1.0,
-                      skip_labels=(), skip_keys=()) -> list[dict]:
-    """在 PIL 图像上画出所有截图区域框 + 标签，并回填 in_bounds。
+                      skip_labels=(), skip_keys=(), mapping=None,
+                      bounds=None, overrides=None) -> list[dict]:
+    """在 PIL 图像上画出所有截图区域框 + 标签，并回填 in_bounds / screen_box。
 
     网页里的区域框预览图与屏幕上叠加的「校准」框共用这一份绘制逻辑，
     保证两处画出来的框完全一致。scale 是图像相对屏幕的缩放倍数。
+
+    区域框是**客户区相对坐标**（基准 1920×1080）；mapping 是把它们换算成屏幕
+    坐标的换算器（display_mapping.DisplayMapping）。传 None 时不换算——预览图
+    里就会把框画到错误的位置，所以真实调用都应传实际映射。
+
+    overrides：``{区域 key: 屏幕坐标框}``，**跳过 config/换算**直接用给定坐标画。
+    校准窗口用它把自己的框（screen 口径）直接画出来，避免
+    "屏幕 → 客户区相对 → 屏幕"往返时被负数夹取破坏（切换目标时框会跳的根因）。
+
+    bounds 是"判定框算不算有效"的屏幕范围（(0, 0, 屏宽, 屏高)），默认取图像
+    尺寸。**预览会等比缩小图像**，所以判断越界必须用屏幕范围而不是图像尺寸，
+    否则窗口在屏幕右下角时每个框都会被误报成"超出屏幕"。
 
     skip_keys：这些 key 的区域**整个不画**。校准窗口用它让"当前正在拖的区域"
     由 `_draw_active_target()` 单独画一遍——否则同一个框会被画两次（差 1px、
@@ -298,6 +359,7 @@ def draw_region_boxes(image, config=None, scale: float = 1.0,
     每个 region dict 会带回 label_drawn，方便调用方与测试判断。
     """
     from PIL import ImageColor, ImageDraw
+    from display_mapping import box_to_screen
 
     draw = ImageDraw.Draw(image)
     try:
@@ -307,28 +369,48 @@ def draw_region_boxes(image, config=None, scale: float = 1.0,
     font = _font(16)
     small = _font(13)
     width, height = image.size
+    if bounds is None:
+        bounds = (0, 0, width, height)
+    limit_left, limit_top, limit_right, limit_bottom = (int(v) for v in bounds)
     skip_labels = set(skip_labels or ())
     skip_keys = set(skip_keys or ())
+    overrides = dict(overrides or {})
     regions = screenshot_regions(config)
     for region in regions:
         region["label_drawn"] = False
         left, top, right, bottom = region["box"]
-        in_bounds = (0 <= left < right <= width and 0 <= top < bottom <= height)
+        if region["key"] in overrides:
+            # 调用方直接给屏幕坐标（校准窗口）：不再折算，避免往返丢精度。
+            screen_box = tuple(int(v) for v in overrides[region["key"]])
+        else:
+            screen_box = box_to_screen(region["box"], mapping)
+        region["screen_box"] = screen_box
+        s_left, s_top, s_right, s_bottom = screen_box
+        in_bounds = (limit_left <= s_left < s_right <= limit_right
+                     and limit_top <= s_top < s_bottom <= limit_bottom)
         region["in_bounds"] = in_bounds
         if not in_bounds:
             continue
         if region["key"] in skip_keys:
             continue
         color = ImageColor.getrgb(region["color"])
-        x0, y0 = int(left * scale), int(top * scale)
-        x1, y1 = int(right * scale), int(bottom * scale)
+        x0, y0 = int(s_left * scale), int(s_top * scale)
+        x1, y1 = int(s_right * scale), int(s_bottom * scale)
         draw.rectangle((x0, y0, x1, y1), outline=color,
                        width=int(region.get("width", 3)))
         if region["key"] in skip_labels:
             continue
-        label = (f"{region['label']} {left},{top},{right},{bottom}"
+        # 标签同时给出两个口径：客户区相对坐标（配置里存的就是它）与换算后的
+        # 屏幕坐标。窗口不在原点时，"框画在哪"看后者，"配置对不对"看前者。
+        client_text = f"{left},{top},{right},{bottom}"
+        if tuple(screen_box) != (left, top, right, bottom):
+            position_text = (f"{client_text} → 屏幕"
+                             f"{s_left},{s_top},{s_right},{s_bottom}")
+        else:
+            position_text = client_text
+        label = (f"{region['label']} {position_text}"
                  if font is not None else
-                 f"{region['key']} {left},{top},{right},{bottom}")
+                 f"{region['key']} {position_text}")
         text_draw = small if small is not None else font
         try:
             text_box = draw.textbbox((0, 0), label, font=text_draw)
@@ -357,21 +439,34 @@ def draw_region_boxes(image, config=None, scale: float = 1.0,
     return regions
 
 
-def draw_state_probe_points(image, scale: float = 1.0) -> list[dict]:
-    """把阶段判定点画成黄色十字准星（同样是预览图与屏幕叠加层共用）。"""
+def draw_state_probe_points(image, scale: float = 1.0, mapping=None,
+                            bounds=None) -> list[dict]:
+    """把阶段判定点画成黄色十字准星（同样是预览图与屏幕叠加层共用）。
+
+    判定点与区域框同口径（客户区相对坐标）；mapping 负责换算成屏幕坐标，
+    传 None 时不换算（点会画偏，真实调用都应传实际映射）。bounds 同
+    `draw_region_boxes`：判断越界用屏幕范围，不用（可能被缩小的）图像尺寸。
+    """
     from PIL import ImageColor, ImageDraw
+    from display_mapping import to_screen
 
     draw = ImageDraw.Draw(image)
     width, height = image.size
+    if bounds is None:
+        bounds = (0, 0, width, height)
+    limit_left, limit_top, limit_right, limit_bottom = (int(v) for v in bounds)
     color = ImageColor.getrgb("#f7d97e")
     probes = state_probe_points()
     for probe in probes:
         px, py = probe["point"]
-        in_bounds = 0 <= px < width and 0 <= py < height
+        screen_x, screen_y = to_screen(px, py, mapping)
+        probe["screen_point"] = (screen_x, screen_y)
+        in_bounds = (limit_left <= screen_x < limit_right
+                     and limit_top <= screen_y < limit_bottom)
         probe["in_bounds"] = in_bounds
         if not in_bounds:
             continue
-        cx, cy = int(px * scale), int(py * scale)
+        cx, cy = int(screen_x * scale), int(screen_y * scale)
         draw.line((cx - 9, cy, cx + 9, cy), fill=color, width=2)
         draw.line((cx, cy - 9, cx, cy + 9), fill=color, width=2)
         draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), outline=color, width=2)
@@ -382,16 +477,25 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
                          screen_metrics: Optional[Callable] = None,
                          panel_detector: Optional[Callable] = None,
                          jpeg_quality: int = 82,
-                         max_width: int = 1920) -> dict:
+                         max_width: int = 1920,
+                         mapping_provider: Optional[Callable] = None) -> dict:
     """截一张整屏、画上所有截图区域框，返回可直接给前端 <img> 用的结果。
 
     返回的 checks 与「环境自检」用同一套 ok/warn/fail 结构，前端一套渲染逻辑。
+
+    **分辨率不再是判定项**：坐标换算层会跟着客户区尺寸与窗口位置走，任何桌面
+    分辨率都能跑。这里只做信息展示，真正的判定项是"换算能不能用"——客户区必须
+    接近 16:9（非等比换算会把画面拉歪）且不能太小到装不下盒子面板。
+
+    mapping_provider 供测试注入假映射（默认用 display_mapping.display_mapping）。
     """
     from PIL import Image, ImageColor, ImageDraw
 
     grabber = grabber or _default_grabber
     screen_metrics = screen_metrics or _default_screen_metrics
     panel_detector = panel_detector or _default_panel_detector
+    if mapping_provider is None:
+        from display_mapping import display_mapping as mapping_provider
 
     image = grabber()
     if image is None:
@@ -405,6 +509,10 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
         screen_width, screen_height, dpi = screen_metrics()
     except Exception:
         pass
+    try:
+        mapping = mapping_provider()
+    except Exception:
+        mapping = None
 
     # 4K 屏的整屏 JPEG 太大，超宽时等比缩小后再画（框坐标同步缩放）。
     scale = min(1.0, float(max_width) / float(actual_width or 1))
@@ -420,44 +528,78 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
         pass
     checks: list[dict] = []
 
-    # --- 分辨率 / 缩放
-    if (actual_width, actual_height) == (expected_width, expected_height):
-        checks.append(_check("resolution", "屏幕分辨率", STATUS_OK,
-                             f"{actual_width}×{actual_height}"))
-    else:
+    # --- 客户区信息（只展示，不判定）
+    from display_mapping import mapping_info, tracker_stats
+    info = mapping_info(mapping)
+    try:
+        tracker = tracker_stats()
+    except Exception:
+        tracker = {}
+    if mapping is None:
         checks.append(_check(
-            "resolution", "屏幕分辨率", STATUS_FAIL,
-            f"{actual_width}×{actual_height}（要求 {expected_width}×{expected_height}）",
-            "脚本的点击坐标按 1920×1080 硬编码：请把 Windows 分辨率设为 "
-            f"{expected_width}×{expected_height}，炉石用全屏模式（别用最大化窗口）。"))
+            "client", "炉石客户区", STATUS_WARN,
+            f"读不到（炉石未运行或窗口不可用）；屏幕 {screen_width or actual_width}"
+            f"×{screen_height or actual_height}",
+            "坐标换算依赖客户区几何：没开炉石时预览框会画在桌面坐标上，属正常。",
+            required=False))
+    else:
+        checks.append(_check("client", "炉石客户区", STATUS_OK, info["text"]))
+    if tracker:
+        # 窗口位置实时跟踪是否在生效：窗口移动后所有框是否立刻跟着走，就看这项。
+        checks.append(_check("tracker", "窗口位置跟踪", STATUS_OK,
+                             tracker.get("text", ""), "", required=False))
     if dpi:
         if dpi == expected_dpi:
             checks.append(_check("dpi", "显示缩放（DPI）", STATUS_OK,
                                  f"{dpi}（{round(dpi / 96 * 100)}%）"))
         else:
+            # 不再当致命错误：换算是按物理像素做的，只是非 100% 缩放下
+            # 物理/逻辑像素会分裂，容易被别的东西搞乱，所以给提示。
             checks.append(_check(
-                "dpi", "显示缩放（DPI）", STATUS_FAIL,
-                f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-                "显示设置 → 缩放改成 100%：不是 100% 时截图和点击会整体偏移。"))
+                "dpi", "显示缩放（DPI）", STATUS_WARN,
+                f"{dpi}（{round(dpi / 96 * 100)}%，建议 100%）",
+                "显示设置 → 缩放建议改成 100%：不是 100% 时物理/逻辑像素会分裂。",
+                required=False))
+
+    # --- 换算可用性：客户区比例与尺寸（这两条才是真正的判定）
+    if mapping is not None:
+        if not mapping.compatible():
+            checks.append(_check(
+                "client-aspect", "客户区比例", STATUS_FAIL,
+                f"客户区 {mapping.width}×{mapping.height} 不是 16:9",
+                "坐标按比例换算要求客户区接近 16:9（基准 1920×1080）："
+                "请用全屏或 16:9 的窗口尺寸，否则点击会横向拉偏。"))
+        if mapping.too_small():
+            checks.append(_check(
+                "client-size", "客户区尺寸", STATUS_FAIL,
+                f"客户区 {mapping.width}×{mapping.height} 太小",
+                "盒子面板是固定像素的独立窗口，炉石窗口太小会把它挤出屏幕："
+                "请把窗口调大（客户区至少 960×540）。"))
 
     # --- 逐个区域：是否在屏幕内 + 画框
-    regions = draw_region_boxes(image, config, scale=scale)
+    # 越界判定用**屏幕**范围（图像可能已被等比缩小，用图像尺寸会误报）。
+    screen_bounds = (0, 0, max(actual_width, screen_width or actual_width),
+                     max(actual_height, screen_height or actual_height))
+    regions = draw_region_boxes(image, config, scale=scale, mapping=mapping,
+                                bounds=screen_bounds)
     out_of_bounds = [r for r in regions if not r.get("in_bounds")]
     for region in out_of_bounds:
-        left, top, right, bottom = region["box"]
+        screen_box = region.get("screen_box") or region["box"]
         # 区域跑到屏幕外 = 截图会被裁掉、点击也点不到，属于致命问题。
         checks.append(_check(
             f"bounds-{region['key']}", f"区域范围：{region['label']}", STATUS_FAIL,
-            f"[{left},{top},{right},{bottom}] 超出屏幕 {actual_width}×{actual_height}",
-            "这个区域会被裁掉/点不到：请校正分辨率与缩放，或重新校准区域。"))
+            f"客户区相对 {list(region['box'])} → 屏幕 {list(screen_box)} "
+            f"超出屏幕 {actual_width}×{actual_height}",
+            "这个区域会被裁掉/点不到：请确认炉石窗口在屏幕内，或重新校准区域。"))
 
     # --- 状态判定点
-    probes = draw_state_probe_points(image, scale=scale)
+    probes = draw_state_probe_points(image, scale=scale, mapping=mapping,
+                                     bounds=screen_bounds)
 
     # --- 绿框里到底有没有盒子面板（决定要不要「移动盒子 UI」）
     recommendation = next((r for r in regions if r["key"] == "recommendation"), None)
     if recommendation is not None and recommendation.get("in_bounds"):
-        left, top, right, bottom = recommendation["box"]
+        left, top, right, bottom = recommendation["screen_box"]
         try:
             crop = image.crop((int(left * scale), int(top * scale),
                                int(right * scale), int(bottom * scale)))
@@ -494,6 +636,9 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
                    "height": screen_height or actual_height, "dpi": dpi},
         "expected": {"width": expected_width, "height": expected_height,
                      "dpi": expected_dpi},
+        "client": info.get("client"),
+        "mapping": info,
+        "tracker": tracker,
         "regions": regions,
         "points": probes,
         "checks": checks,
@@ -510,7 +655,14 @@ def main() -> int:
     result = build_region_preview()
     data = result["image"].split(",", 1)[1]
     out.write_bytes(base64.b64decode(data))
-    print(f"区域框预览已保存：{out}（{result['width']}×{result['height']}）")
+    print(f"区域框预览已保存：{out}（屏幕 {result['width']}×{result['height']}）")
+    mapping = result.get("mapping") or {}
+    if mapping.get("available"):
+        print(f"  客户区 {mapping['client']['width']}×{mapping['client']['height']} "
+              f"@屏幕{tuple(mapping['screen_origin'])} "
+              f"缩放{mapping['scale'][0]:.2f}×{mapping['scale'][1]:.2f}")
+    else:
+        print("  客户区：读不到（炉石未运行），框按桌面坐标绘制")
     for item in result["checks"]:
         print(f"  [{item['status']}] {item['label']}：{item['detail']}")
     return 0 if result["ok"] else 1

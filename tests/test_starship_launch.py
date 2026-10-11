@@ -5,7 +5,7 @@
 - 新增明确发射指令「发射N号位星舰」（也接受「操作N号位星舰」「发射我方N号位星舰」）；
 - 盒子把发射写成「操作N号位随从攻击」且没有目标行时，只要那张卡是星舰也走发射；
   带目标的星舰攻击仍按普通攻击处理，避免把已发射星舰的攻击误当成再次发射；
-- 执行：点场上星舰 → 等 0.8s（组件面板要画出来）→ 点「发射」按钮（客户区坐标换算）。
+- 执行：点场上星舰 → 等 0.8s（组件面板要画出来）→ 点「发射」按钮（客户区相对坐标）。
 """
 
 import unittest
@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import click as hearthstone_click
+import display_mapping
 from manual_controller import (
     ClickExecutor,
     LaunchStarshipAction,
@@ -281,16 +282,16 @@ class StarshipExecutionTests(unittest.TestCase):
 
 
 class StarshipLaunchClickTests(unittest.TestCase):
-    """发射按钮坐标：1920x1080 客户区校准点 (1070,920)，按客户区等比换算。"""
+    """发射按钮坐标：客户区相对 (1070,920)，换算交给 click.left_click 统一做。"""
 
     def setUp(self):
         self.clicks = []
+        # 真实映射来自客户区几何；测试里统一注入假映射，避免碰真窗口。
+        display_mapping.clear_mapping_cache()
         self._patches = [
             patch.object(hearthstone_click, "get_HS_hwnd", return_value=101),
-            patch.object(hearthstone_click.win32gui, "GetClientRect",
-                         return_value=(0, 0, 1920, 1080)),
-            patch.object(hearthstone_click.win32gui, "ClientToScreen",
-                         side_effect=lambda _hwnd, point: point),
+            patch.object(hearthstone_click, "_display_mapping",
+                         return_value=None),
             patch.object(hearthstone_click, "left_click",
                          side_effect=lambda x, y: self.clicks.append((x, y))),
             patch.object(hearthstone_click, "rand_sleep"),
@@ -301,6 +302,7 @@ class StarshipLaunchClickTests(unittest.TestCase):
     def tearDown(self):
         for item in self._patches:
             item.stop()
+        display_mapping.clear_mapping_cache()
 
     def test_reference_layout_clicks_the_calibrated_point(self):
         hearthstone_click.click_launch_starship()
@@ -308,29 +310,36 @@ class StarshipLaunchClickTests(unittest.TestCase):
         self.assertEqual([hearthstone_click.STARSHIP_LAUNCH_REF_POS],
                          self.clicks)
 
-    def test_scales_with_the_client_area_and_window_offset(self):
-        with (
-            patch.object(hearthstone_click.win32gui, "GetClientRect",
-                         return_value=(0, 0, 1280, 720)),
-            patch.object(hearthstone_click.win32gui, "ClientToScreen",
-                         side_effect=lambda _hwnd, point: (point[0] + 100,
-                                                           point[1] + 50)),
-        ):
+    def test_client_relative_position_is_passed_to_left_click(self):
+        """left_click 收到的是**客户区相对**坐标（换算由它负责）。"""
+        with patch.object(hearthstone_click, "_display_mapping",
+                          return_value=None):
             hearthstone_click.click_launch_starship()
 
-        self.assertEqual([(100 + round(1280 * 1070 / 1920),
-                           50 + round(720 * 920 / 1080))], self.clicks)
+        self.assertEqual([(1070, 920)], self.clicks)
+
+    def test_conversion_is_applied_at_the_click_export(self):
+        """换算出口在 left_click：给一个带偏移/缩放的映射，落点相应变化。"""
+        # setUp 里把 left_click 换成了记录器；这个用例要验证真正的换算，
+        # 所以先撤掉那些 patch，直接观察 click_button 收到的屏幕坐标。
+        patch.stopall()
+        mapping = display_mapping.DisplayMapping(
+            hwnd=101, client=(0, 0, 1920, 1080),
+            screen_left=960, screen_top=551)
+
+        with (
+            patch.object(hearthstone_click, "rand_sleep"),
+            patch.object(hearthstone_click, "click_button") as click_button,
+        ):
+            hearthstone_click.left_click(1070, 920, mapping=mapping)
+
+        x, y = click_button.call_args[0][:2]
+        # left_click 会加 ±2/3px 拟人抖动，所以只验证"基准点 + 窗口偏移"。
+        self.assertAlmostEqual(960 + 1070, x, delta=3)
+        self.assertAlmostEqual(551 + 920, y, delta=3)
 
     def test_missing_window_is_refused_without_clicking(self):
         with patch.object(hearthstone_click, "get_HS_hwnd", return_value=0):
-            with self.assertRaises(ValueError):
-                hearthstone_click.click_launch_starship()
-
-        self.assertEqual([], self.clicks)
-
-    def test_invalid_client_area_is_refused_without_clicking(self):
-        with patch.object(hearthstone_click.win32gui, "GetClientRect",
-                          return_value=(0, 0, 0, 0)):
             with self.assertRaises(ValueError):
                 hearthstone_click.click_launch_starship()
 

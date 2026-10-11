@@ -550,6 +550,21 @@ def ChoosingHeroAction():
             return FSM_CHOOSING_HERO
     except Exception as exc:
         warn_print(f"选择套牌界面段位检测失败（忽略，继续匹配）：{exc}")
+
+    # 上分闸门之后、点「开始」之前：按 ui_config.json 的 battle_entry.deck_index
+    # 选卡组（没配置就跳过，保持"你手选哪副就用哪副"的历史行为）。放在这里的三个
+    # 原因：① 主界面路径与"打完一局回来"都会经过这里；② 闸门命中时上面已经 return，
+    # 不会白选；③ 点「开始」的时机/语义完全没变。选之前会验"这一格确实像卡组"，
+    # 不像就一格都不点（避免在别的界面上乱点）。
+    try:
+        import battle_entry
+        picked = battle_entry.select_deck_if_configured(
+            logger=lambda text: info_print(f"[SYS] {text}"))
+        if not picked.get("ok") and not picked.get("skipped"):
+            warn_print(f"自动选卡组未完成：{picked.get('error')}")
+    except Exception as exc:
+        warn_print(f"自动选卡组失败（忽略，继续匹配）：{exc}")
+
     click.run_hearthstone_action(click.match_opponent)
     time.sleep(1)
     return FSM_MATCHING
@@ -913,7 +928,8 @@ def player_name_state() -> dict:
 #   * _POST_GAME_START_BUTTON_ROI ：结算界面底部「开始」按钮的默认框，
 #     用户可以校准（ui_config.json 的 post_game_start_roi），点击点取框中心；
 #   * _POST_GAME_START_FALLBACK_ROI：检测「开始」的兜底框（框被拖小后仍能认出）；
-#   * _POST_GAME_RANK_ROI         ：段位数字（没上传说时这里是空白）。
+#   * _POST_GAME_RANK_ROI         ：段位数字的默认框（没上传说时这里是空白），
+#     同样可以校准（ui_config.json 的 post_game_rank_roi）。
 # 推进结算界面点哪儿：**中间那两个点**（`click.ERROR_REPORT_POINTS` =
 # (1100,820) + (960,650)，原来用于错误弹窗/断线提示），每轮各点一次；
 # 第三个点（「开始」按钮正中心）只在检测到「开始」之后的收尾里点。右边那些
@@ -958,13 +974,14 @@ _FULLWIDTH_DIGITS = str.maketrans(
 def _config_roi(key: str, default) -> tuple:
     """读用户校准过的区域（ui_config.json 顶层 [left,top,right,bottom]）。
 
-    非法/缺失时回退 default，保证自动化永远有一个可用的框。
+    坐标是**客户区相对**口径（见 display_mapping），允许负值（盒子面板可以挂在
+    炉石客户区之外）。非法/缺失时回退 default，保证自动化永远有一个可用的框。
     """
     try:
         box = getattr(recommendation_config, key, None)
         if box is not None:
             left, top, right, bottom = (int(v) for v in box)
-            if 0 <= left < right and 0 <= top < bottom:
+            if left < right and top < bottom:
                 return (left, top, right, bottom)
     except Exception:
         pass
@@ -972,7 +989,16 @@ def _config_roi(key: str, default) -> tuple:
 
 
 def _grab_region(box, scale: float = 1.0):
-    """截取屏幕区域并返回放大后的 BGR ndarray；依赖缺失/截图失败返回 None。"""
+    """截取屏幕区域并返回放大后的 BGR ndarray；依赖缺失/截图失败返回 None。
+
+    box 是**客户区相对坐标**（基准 1920×1080）：这里先经 display_mapping 换算成
+    屏幕坐标再截——炉石窗口不在屏幕原点时，不换算就会框到别的地方去。
+    客户区比基准小时框内文字像素也会变小，按同一比例把放大倍数补水回去，
+    保证送给 OCR 的字号与"客户区正好 1920×1080"时一致。
+    **窗口移动的原子性**：抓图约 100ms，期间窗口被拖动就会截到别的位置。这里先
+    读一次新鲜几何（窗口一动就失效，见 window_tracker）→ 抓 ROI → 复测；只有
+    复测发现"真的移动过了"才退回 `capture_region` 重抓（少见路径）。
+    """
     try:
         import cv2
         import numpy as np
@@ -980,8 +1006,37 @@ def _grab_region(box, scale: float = 1.0):
     except Exception:
         return None
     try:
-        rgb = np.asarray(ImageGrab.grab(bbox=tuple(int(v) for v in box),
-                                        all_screens=False))
+        from display_mapping import box_to_screen, display_mapping
+        import window_tracker as wt
+        wt.ensure_started()
+
+        mapping = display_mapping()
+        screen_box = box_to_screen(box, mapping)
+        if screen_box[2] - screen_box[0] < 2 or screen_box[3] - screen_box[1] < 2:
+            # 被窗口边界夹没了：截出来也没有意义，直接当作失败。
+            return None
+
+        def _grab(region):
+            return np.asarray(ImageGrab.grab(
+                bbox=tuple(int(v) for v in region), all_screens=False))
+
+        started = time.time()
+        rgb = _grab(screen_box)
+        if wt.moved_since(started):
+            # 抓图期间窗口动过：这一帧与几何对不上了 → 走原子重抓（少见路径）。
+            rgb = None
+        if rgb is None:
+            from display_mapping import capture_region
+            rgb, _fresh = capture_region(
+                grabber=_grab_region_client_grabber(), region=box,
+                region_is_client=True)
+            if rgb is None:
+                return None
+
+        if mapping is not None:
+            smallest = min(mapping.scale_x, mapping.scale_y) or 1.0
+            if smallest < 1.0:
+                scale = float(scale) / smallest
         img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         if scale and scale != 1.0:
             img = cv2.resize(img, None, fx=scale, fy=scale,
@@ -989,6 +1044,19 @@ def _grab_region(box, scale: float = 1.0):
         return img
     except Exception:
         return None
+
+
+def _grab_region_client_grabber():
+    """给 `capture_region` 用的抓图器：按屏幕框截一块。"""
+    def grab(region):
+        try:
+            import numpy as np
+            from PIL import ImageGrab
+            return np.asarray(ImageGrab.grab(
+                bbox=tuple(int(v) for v in region), all_screens=False))
+        except Exception:
+            return None
+    return grab
 
 
 def _ocr_lines(box, scale: float, tag: str):
@@ -1091,7 +1159,8 @@ def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
     """
     result = {"number": None, "legend": False, "raw": None,
               "empty": False, "blank": False, "bright": -1}
-    img = _grab_region(_POST_GAME_RANK_ROI, _POST_GAME_OCR_SCALE)
+    box = _post_game_rank_box()
+    img = _grab_region(box, _POST_GAME_OCR_SCALE)
     blank = _region_is_blank(img)
     result["blank"] = blank
     result["bright"] = _rank_bright_pixels(img)
@@ -1100,7 +1169,7 @@ def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
         # 真正截到图且亮像素太少时只是 empty，同样交给调用方决定重试几次。
         result["empty"] = img is not None
         return result
-    lines = _ocr_lines(_POST_GAME_RANK_ROI, _POST_GAME_OCR_SCALE, "rank")
+    lines = _ocr_lines(box, _POST_GAME_OCR_SCALE, "rank")
     if lines is None:
         return result
     for line in lines:
@@ -1244,6 +1313,16 @@ def _post_game_start_box() -> tuple:
     return _config_roi("post_game_start_roi", _POST_GAME_START_BUTTON_ROI)
 
 
+def _post_game_rank_box() -> tuple:
+    """段位数字的读取框：优先用用户校准的 post_game_rank_roi。
+
+    段位数字的位置随分辨率/窗口位置变化（且不同界面布局下会偏），所以和其它
+    区域一样允许在校准窗口里拖（`screen_regions` 的 "rank" 目标）。
+    配置缺失/非法时回退代码默认值（_POST_GAME_RANK_ROI）。
+    """
+    return _config_roi("post_game_rank_roi", _POST_GAME_RANK_ROI)
+
+
 def post_game_start_point() -> tuple:
     """点「开始」按钮用的坐标：校准框的正中心（默认正好 (1400,900)）。
 
@@ -1309,9 +1388,11 @@ def confirm_button_present() -> bool:
     except Exception:
         return False
     try:
-        left, top, right, bottom = recommendation_config.mulligan_confirm_roi
+        from display_mapping import box_to_screen, display_mapping
+        box = recommendation_config.mulligan_confirm_roi
+        screen_box = box_to_screen(box, display_mapping())
         rgb = np.asarray(ImageGrab.grab(
-            bbox=(left, top, right, bottom), all_screens=False))
+            bbox=tuple(int(v) for v in screen_box), all_screens=False))
         img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
         evidence = mulligan_reader.backend.recognize(
             img, f"confirm-{time.time():.3f}", "confirm")
@@ -1401,20 +1482,15 @@ def read_ai_win_rate():
 
     浮动条字号很小，先放大再识别；主区域读不到时用放宽的兜底区域再试一次，
     避免因为浮动条位置/宽度略有差异而整回合读不到。
+
+    区域是客户区相对坐标，交给 _grab_region 统一换算到屏幕（含窗口偏移），
+    所以与 _grab_region 的放大补偿共用一套逻辑。
     """
-    try:
-        import cv2
-        import numpy as np
-        from PIL import ImageGrab
-    except Exception:
-        return None
     for index, box in enumerate(_ai_win_rate_regions()):
+        img = _grab_region(box, _AI_WIN_RATE_SCALE)
+        if img is None:
+            continue
         try:
-            rgb = np.asarray(ImageGrab.grab(bbox=box, all_screens=False))
-            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-            img = cv2.resize(img, None, fx=_AI_WIN_RATE_SCALE,
-                             fy=_AI_WIN_RATE_SCALE,
-                             interpolation=cv2.INTER_CUBIC)
             evidence = mulligan_reader.backend.recognize(
                 img, f"winrate-{index}-{time.time():.3f}", "winrate")
         except Exception:
@@ -1707,37 +1783,55 @@ def GoBackHSAction():
 
 
 def MainMenuAction():
+    """主界面 → 认出「传统对战」→ 点它 → 等到「开始」（= 已进选择套牌界面）。
+
+    识别交给 battle_entry：**认不出来只点画面中心**（关掉挡住弹窗/公告），到超时
+    就走错误处理 —— 不再像以前那样每 5 秒盲点一次「传统对战」（那会在别的界面上
+    乱点）。点「开始」仍然由 ChoosingHeroAction 负责，因为**上分停止**那道闸门
+    必须在点「开始」之前跑，顺序反了就会在到了目标段位后照样排队。
+    """
     print_out()
 
     time.sleep(3)
 
-    while True:
-        if quitting_flag or stop_after_current_game:
-            sys.exit(0)
+    import battle_entry
+    result = battle_entry.enter_battle(
+        click_start=False,
+        should_abort=lambda: bool(quitting_flag or stop_after_current_game),
+        logger=lambda text: sys_print(f"[SYS] {text}"))
+    if result.get("ok"):
+        return FSM_CHOOSING_HERO
+    if result.get("stage") == "aborted":
+        sys.exit(0)
 
-        click.run_hearthstone_action(click.enter_battle_mode)
-        time.sleep(5)
-
-        state = get_screen.get_state()
-
-        # 重新连接对战之类的
-        if state == FSM_BATTLING:
-            ok = update_log_state()
-            if ok and log_state.available:
-                return FSM_BATTLING
-        if state == FSM_CHOOSING_HERO:
-            return FSM_CHOOSING_HERO
+    # 进不去：仍然按老逻辑看一眼"是不是其实已经在对局里"（断线重连之类）。
+    warn_print(f"进入对战未完成：{result.get('message')}")
+    state = get_screen.get_state()
+    if state == FSM_BATTLING:
+        ok = update_log_state()
+        if ok and log_state.available:
+            return FSM_BATTLING
+    if state == FSM_CHOOSING_HERO:
+        return FSM_CHOOSING_HERO
+    return FSM_ERROR
 
 
 def WaitMainMenu():
+    """等到主界面（认出「传统对战」）为止；认不出只点画面中心，绝不盲点按钮。
+
+    进入本状态时炉石通常刚被拉起来（画面还在加载），所以这里等的是"主界面画出来
+    了没有"，而不是"点得够不够多"。
+    """
     print_out()
-    wait_main_menu_count = 0
-    while get_screen.get_state() != FSM_MAIN_MENU:
-        click.run_hearthstone_action(click.enter_battle_mode)
-        time.sleep(5)
-        wait_main_menu_count += 1
-        if wait_main_menu_count >= 5:
-            break
+
+    import battle_entry
+    result = battle_entry.wait_for_main_menu(
+        should_abort=lambda: bool(quitting_flag or stop_after_current_game),
+        logger=lambda text: sys_print(f"[SYS] {text}"))
+    if result.get("ok"):
+        return FSM_MAIN_MENU
+    warn_print(f"等待主界面未完成：{result.get('message')}")
+    # 等不到也继续走主界面流程：那一步自己会再识别一次，认不出来只会点中心。
     return FSM_MAIN_MENU
 
 

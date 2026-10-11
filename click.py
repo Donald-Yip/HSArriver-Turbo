@@ -12,6 +12,8 @@ from constants.constants import *
 from print_info import *
 from get_screen import *
 from config import DEFAULT_HUMAN_LIKE, human_like_settings
+from display_mapping import to_screen as _to_screen
+from display_mapping import display_mapping as _display_mapping
 
 
 #测试不同分辨率的点击效果，因为屏幕截取未支持不同分辨率，失败了
@@ -123,10 +125,15 @@ HAND_HOVER_SIZES = (3, 8)    # 手牌张数未知，按常见张数取卡位
 
 
 def center_mouse(mouse=None):
-    """Move the pointer to the neutral reset point without clicking."""
+    """Move the pointer to the neutral reset point without clicking.
+
+    MOUSE_RESET_POS 是客户区相对坐标（基准 1920×1080），这里换算成屏幕坐标；
+    炉石没开、拿不到客户区映射时原样使用（与改造前一致）。
+    """
     if mouse is None:
         mouse = Controller()
-    mouse.position = MOUSE_RESET_POS
+    mouse.position = _to_screen(MOUSE_RESET_POS[0], MOUSE_RESET_POS[1],
+                                _display_mapping())
 
 
 def _random_hand_hover_point(last=None):
@@ -157,11 +164,14 @@ def human_like_pause(mouse=None, settings=None):
     sys_print(f"[SYS] 活人感 延时 {total:.1f}s 后（手牌区随机悬停等待）")
     deadline = time.monotonic() + total
     last = None
+    mapping = _display_mapping()
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         point = _random_hand_hover_point(last)
+        # 悬停点同样是客户区相对坐标，落到屏幕上要先换算。
+        point = _to_screen(point[0], point[1], mapping)
         mouse.position = point
         last = point
         hover = random.uniform(cfg["hover_min"], cfg["hover_max"])
@@ -206,7 +216,8 @@ def hover_opponent_minion(oppo_index, oppo_num, mouse=None, settings=None,
         duration = random.uniform(
             float(cfg.get("minion_hover_min", DEFAULT_HUMAN_LIKE["minion_hover_min"])),
             float(cfg.get("minion_hover_max", DEFAULT_HUMAN_LIKE["minion_hover_max"])))
-    mouse.position = opponent_minion_hover_point(oppo_index, oppo_num)
+    mouse.position = _to_screen(*opponent_minion_hover_point(oppo_index, oppo_num),
+                                _display_mapping())
     sys_print(f"[SYS] 活人感 延时 {duration:.1f}s 后（悬停对手新随从）")
     time.sleep(max(0.0, duration))
     center_mouse(mouse)
@@ -248,8 +259,11 @@ def _send_physical_click(mouse, x, y, button):
 
 
 def click_button(x, y, button, require_hearthstone=True):
-    # x = position_x(x)
-    # y = position_y(y)
+    """在**屏幕坐标** (x, y) 上按下/松开按钮。
+
+    这是"屏幕坐标出口"：调用方传进来的必须已经是屏幕坐标。客户区相对坐标
+    请走 left_click / right_click（它们负责换算），别在这里再换一次。
+    """
     hearthstone_hwnd = get_HS_hwnd() if require_hearthstone else 0
     mouse = Controller()
     rand_sleep(0.1)
@@ -268,13 +282,21 @@ def click_button(x, y, button, require_hearthstone=True):
     _send_physical_click(mouse, x, y, button)
 
 
-def left_click(x, y, require_hearthstone=True):
+def left_click(x, y, require_hearthstone=True, mapping=None):
+    """点客户区相对坐标 (x, y)（基准 1920×1080）。
+
+    抖动在**客户区相对坐标**里做：±2px 的拟人幅度不随窗口缩放变化。
+    换算集中在 click_button（屏幕坐标出口），所以 click_button 的调用方
+    传的必须是屏幕坐标。mapping 供测试注入，默认取实时客户区映射。
+    """
     x += random.randint(-2, 3)
     y += random.randint(-2, 3)
+    x, y = _to_screen(x, y, mapping if mapping is not None else _display_mapping())
     click_button(x, y, Button.left, require_hearthstone)
 
 
-def right_click(x, y, require_hearthstone=True):
+def right_click(x, y, require_hearthstone=True, mapping=None):
+    x, y = _to_screen(x, y, mapping if mapping is not None else _display_mapping())
     click_button(x, y, Button.right, require_hearthstone)
 
 
@@ -402,12 +424,13 @@ def drag_card_to_board_entity(card_index, card_num, entity_index, entity_num):
     assert 0 <= entity_index < entity_num <= 7
 
     mouse = Controller()
-    mouse.position = (HAND_CARD_X[card_num][card_index], 1000)
+    mapping = _display_mapping()
+    mouse.position = _to_screen(HAND_CARD_X[card_num][card_index], 1000, mapping)
     rand_sleep(0.1)
     mouse.press(Button.left)
     try:
         board_x = 960 - (entity_num - 1) * 70 + entity_index * 140
-        mouse.position = (board_x - 25, 600)
+        mouse.position = _to_screen(board_x - 25, 600, mapping)
         rand_sleep(0.1)
     finally:
         mouse.release(Button.left)
@@ -463,21 +486,17 @@ TIMELINE_OPTION_POS = {
 
 
 def choose_timeline(card_id):
-    """客户端区坐标换算后点时间线按钮（回溯 TIME_000tb / 维持 TIME_000ta）。"""
+    """点时间线按钮（回溯 TIME_000tb / 维持 TIME_000ta）。
+
+    坐标是**客户区相对**的；换算统一交给 left_click → click_button，避免
+    这里再手工 GetClientRect/ClientToScreen 换算一次（重复实现会漏掉偏移）。
+    """
     if card_id not in TIMELINE_OPTION_POS:
         raise ValueError("Unknown timeline option")
-    hwnd = get_HS_hwnd()
-    if not hwnd:
+    if not get_HS_hwnd():
         raise ValueError("Hearthstone window unavailable")
-    left, top, right, bottom = win32gui.GetClientRect(hwnd)
-    if right <= left or bottom <= top:
-        raise ValueError("Hearthstone client area unavailable")
-    px, py = TIMELINE_OPTION_POS[card_id]
-    x, y = win32gui.ClientToScreen(hwnd, (
-        left + round((right - left) * px / 1920),
-        top + round((bottom - top) * py / 1080)))
     rand_sleep(OPERATE_INTERVAL)
-    left_click(x, y)
+    left_click(*TIMELINE_OPTION_POS[card_id])
 
 
 def click_timeline_undo():
@@ -491,30 +510,20 @@ def click_timeline_keep():
 
 
 # 星舰「发射」按钮：展开的组件面板右侧（Cancel 旁边）。参考截图是 1920x1080
-# 客户区，按钮中心 ≈ (1070, 920)；这里按客户区尺寸等比换算再交给 ClientToScreen
-# 加上窗口位置偏移，避免窗口边框/标题栏让落点整体偏掉。
+# 客户区，按钮中心 ≈ (1070, 920)——属于客户区相对坐标，换算由 left_click 统一
+# 处理（含窗口偏移与客户区缩放）。
 STARSHIP_LAUNCH_REF_POS = (1070, 920)
-STARSHIP_LAUNCH_REF_SIZE = (1920, 1080)
 
 
 def click_launch_starship():
     """点开组件面板里的「发射」按钮。
 
-    找不到炉石窗口或客户区无效时直接报错，不做盲目点击。
+    找不到炉石窗口时直接报错，不做盲目点击。
     """
-    hwnd = get_HS_hwnd()
-    if not hwnd:
+    if not get_HS_hwnd():
         raise ValueError("Hearthstone window unavailable")
-    left, top, right, bottom = win32gui.GetClientRect(hwnd)
-    if right <= left or bottom <= top:
-        raise ValueError("Hearthstone client area unavailable")
-    ref_x, ref_y = STARSHIP_LAUNCH_REF_POS
-    ref_w, ref_h = STARSHIP_LAUNCH_REF_SIZE
-    x, y = win32gui.ClientToScreen(hwnd, (
-        left + round((right - left) * ref_x / ref_w),
-        top + round((bottom - top) * ref_y / ref_h)))
     rand_sleep(OPERATE_INTERVAL)
-    left_click(x, y)
+    left_click(*STARSHIP_LAUNCH_REF_POS)
 
 
 def drag_card_to_deck():
@@ -527,8 +536,8 @@ def drag_card_to_deck():
     mouse.press(Button.left)
     try:
         rand_sleep(0.1)
-        # 我方牌库中心点(1920x1080 实测，用户量得 1635,640)。
-        mouse.position = (1635, 640)
+        # 我方牌库中心点（客户区相对坐标，1920x1080 实测：1635,640）。
+        mouse.position = _to_screen(1635, 640, _display_mapping())
         rand_sleep(DECK_DROP_HOLD_INTERVAL)
     finally:
         mouse.release(Button.left)

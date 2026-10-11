@@ -4,6 +4,23 @@ from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import ValidationResult
 
 
+def _client_size_matches(frame, config) -> bool:
+    """这一帧的客户区尺寸是否与当前一致（证据新鲜度）。
+
+    分辨率不再是判定门槛：客户区几何由 display_mapping 换算，任何桌面分辨率
+    都能跑。这里只确认"这帧是不是按当前客户区截的"。
+    `client_size is None`（旧证据 / 测试构造）时跳过校验。
+    """
+    client_size = getattr(frame, "client_size", None)
+    if client_size is None:
+        return True
+    try:
+        return tuple(int(v) for v in client_size) == tuple(
+            int(v) for v in config.desktop_size)
+    except Exception:
+        return False
+
+
 class ConsumedActionStore:
     def __init__(self):
         self._keys = set()
@@ -47,7 +64,7 @@ class RecommendationValidator:
             return ValidationResult.reject("current_ocr_frame")
         if current_ocr.normalized_text != proposed.normalized_instruction:
             return ValidationResult.reject("recommendation_changed")
-        if current_frame.desktop_size != self.config.desktop_size:
+        if not _client_size_matches(current_frame, self.config):
             return ValidationResult.reject("desktop_size")
         if current_frame.dpi != self.config.desktop_dpi:
             return ValidationResult.reject("dpi")

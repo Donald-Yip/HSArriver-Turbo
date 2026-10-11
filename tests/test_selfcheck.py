@@ -240,7 +240,10 @@ class RealEnvironmentTests(unittest.TestCase):
     def test_environment_items_are_present(self):
         keys = {i["key"] for i in self.result["items"]}
 
-        self.assertLessEqual({"admin", "resolution", "dpi", "log-root"}, keys)
+        # 分辨率不再是自检项（坐标换算层会跟随客户区尺寸/窗口位置）；
+        # 取而代之的是「客户区几何」。
+        self.assertLessEqual({"admin", "client", "dpi", "log-root"}, keys)
+        self.assertNotIn("resolution", keys)
 
 
 if __name__ == "__main__":

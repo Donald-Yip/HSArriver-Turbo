@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import display_mapping
 import log_overlay
 import region_overlay
 import web_ui
@@ -164,7 +165,7 @@ class HintTests(unittest.TestCase):
 
 class PaintLayerTests(unittest.TestCase):
     def test_layer_is_transparent_where_nothing_is_drawn(self):
-        layer = region_overlay.paint_layer(400, 300, None)
+        layer = region_overlay.paint_layer(400, 300, None, mapping=None)
 
         self.assertEqual("RGBA", layer.mode)
         self.assertEqual((400, 300), layer.size)
@@ -178,11 +179,29 @@ class PaintLayerTests(unittest.TestCase):
             recommendation_roi=(10, 40, 110, 240),
             mulligan_confirm_roi=(200, 300, 300, 360))
 
-        layer = region_overlay.paint_layer(500, 400, None, config)
+        # mapping=None：不换算，框就按客户区相对坐标画（不受测试机窗口影响）。
+        layer = region_overlay.paint_layer(500, 400, None, config, mapping=None)
 
         # 绿框（recommendation）的左边框应当是不透明的绿色像素
         pixel = layer.getpixel((10, 140))
         self.assertEqual((99, 199, 111, 255), tuple(pixel))
+
+    def test_layer_offsets_boxes_when_the_client_origin_moves(self):
+        """客户区在 (960,551) 时，框要整体画到偏移后的位置。"""
+        config = SimpleNamespace(
+            desktop_size=(1920, 1080), desktop_dpi=96,
+            recommendation_roi=(10, 40, 110, 240),
+            mulligan_confirm_roi=(200, 300, 300, 360))
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1080),
+            screen_left=960, screen_top=551)
+
+        layer = region_overlay.paint_layer(2000, 1600, None, config,
+                                           mapping=mapping)
+
+        self.assertEqual((99, 199, 111, 255),
+                         tuple(layer.getpixel((10 + 960, 140 + 551))))
+        self.assertEqual(0, layer.getpixel((10, 140))[3])   # 旧位置不再有框
 
     def test_panel_state_is_none_when_the_grab_fails(self):
         def broken_grab(*_args, **_kwargs):
@@ -191,6 +210,38 @@ class PaintLayerTests(unittest.TestCase):
         overlay = region_overlay.RegionBoxOverlay(runner=lambda: None)
         with patch("PIL.ImageGrab.grab", side_effect=broken_grab):
             self.assertIsNone(overlay._panel_state())
+
+
+class AutoMappingTests(unittest.TestCase):
+    """回归：`auto_mapping()` **不传参**必须自动探测客户区几何。
+
+    背景（用户报告"校准窗口不随炉石移动"的直接原因之一）：这里曾经写成
+    `def auto_mapping(mapping=None)`，于是"不传参"和"显式传 None"完全无法区分，
+    `auto_mapping()` 直接返回 None = 不换算 —— 校准窗口永远拿不到客户区几何，
+    所有框都画在配置的原始坐标上，拖动炉石时一个都不跟着动。
+    """
+
+    def test_no_argument_auto_detects_the_client_geometry(self):
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1080), screen_left=958, screen_top=320)
+        with patch("display_mapping.display_mapping", return_value=mapping):
+            detected = region_overlay.auto_mapping()
+
+        self.assertIs(mapping, detected, "不传参时必须自动探测，不能返回 None")
+
+    def test_explicit_none_means_no_conversion(self):
+        self.assertIsNone(region_overlay.auto_mapping(None))
+
+    def test_explicit_mapping_is_used_verbatim(self):
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1080), screen_left=1, screen_top=2)
+
+        self.assertIs(mapping, region_overlay.auto_mapping(mapping))
+
+    def test_probe_failure_returns_none_instead_of_raising(self):
+        with patch("display_mapping.display_mapping",
+                   side_effect=RuntimeError("没有窗口")):
+            self.assertIsNone(region_overlay.auto_mapping())
 
 
 class OverlayButtonTests(unittest.TestCase):

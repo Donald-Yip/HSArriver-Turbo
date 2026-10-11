@@ -76,6 +76,9 @@ class HoverOpponentMinionTests(unittest.TestCase):
                          side_effect=lambda s: self.slept.append(s)),
             patch.object(hearthstone_click, "sys_print",
                          side_effect=lambda line: self.printed.append(line)),
+            # 悬停点要经 display_mapping 换算成屏幕坐标；注入"读不到客户区"，
+            # 断言就用客户区相对坐标（不受测试机窗口位置/尺寸影响）。
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
         ]
         for item in self._patches:
             item.start()

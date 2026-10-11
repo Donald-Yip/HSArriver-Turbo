@@ -28,3 +28,14 @@ image.png
 !cards.json
 
 reasonix.toml
+
+# hsctl 生成的「最高权限」计划任务启动器（每台机器路径不同，不该进仓库）
+log/hs_serve_elevated.cmd
+# 本机/临时产物
+.tmp-tests/
+.workbuddy/
+log/
+out.jpg
+snapshot_live.jpg
+__pycache__/
+pytest-cache-files-*

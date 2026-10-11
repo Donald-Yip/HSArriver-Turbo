@@ -347,8 +347,84 @@ def _hearthstone_item() -> dict:
                  "没开也没关系：点「开始运行」会先拉起战网和炉石。", False, purpose)
 
 
+def _client_mapping_items(config) -> list[dict]:
+    """客户区几何检查（**不再检测绝对分辨率**）。
+
+    坐标换算层（display_mapping）会跟着客户区尺寸与窗口屏幕位置走，所以
+    "屏幕是不是 1920×1080"已经不是判据——4K、2K、1080p 都能跑。这里只做：
+
+    * 客户区信息（永远只展示，不拦）；
+    * 客户区比例（非 16:9 才 FAIL：等比换算会把画面横向拉偏）；
+    * 客户区尺寸（小到装不下固定像素的盒子面板才 FAIL）；
+    * 炉石被遮挡（WARN：坐标不受影响，但截屏内容不是炉石）。
+
+    炉石没运行时全部退化为提示，不阻塞（没开游戏本来就该能过自检）。
+    """
+    purpose = "客户区几何决定点击/截图的坐标换算"
+    try:
+        import display_mapping
+    except Exception:
+        return []
+
+    try:
+        mapping = display_mapping.display_mapping()
+    except Exception:
+        mapping = None
+
+    items: list[dict] = []
+
+    # 窗口位置实时跟踪：**无论炉石有没有运行都展示**（窗口最小化/没开时正是
+    # 需要确认"跟踪到底在不在工作"的时候）。
+    try:
+        from display_mapping import tracker_stats
+        info = tracker_stats()
+        items.append(_item("window-tracker", "窗口位置跟踪", STATUS_OK,
+                           info.get("text", ""), "", False,
+                           "窗口移动后点击/截图坐标能否立刻跟着走"))
+    except Exception:
+        pass
+
+    if mapping is None:
+        width, height = _current_screen_size()
+        screen_text = (f"{width}×{height}" if width and height else "读取失败")
+        items.append(_item(
+            "client", "炉石客户区", STATUS_WARN, f"读不到（炉石未运行）；屏幕 {screen_text}",
+            "坐标换算依赖客户区几何；启动炉石后重跑自检即可看到实际客户区。",
+            False, "窗口不在屏幕原点时按客户区换算点击/截图坐标"))
+        return items
+
+    items.append(_item("client", "炉石客户区", STATUS_OK, mapping.debug_text(),
+                       "", False, purpose))
+
+    if not mapping.compatible():
+        items.append(_item(
+            "client-aspect", "客户区比例", STATUS_FAIL,
+            f"{mapping.width}×{mapping.height} 不是 16:9",
+            "坐标按比例换算要求客户区接近 16:9（基准 1920×1080）："
+            "请用全屏或 16:9 的窗口尺寸，否则点击会横向拉偏。",
+            True, purpose))
+    if mapping.too_small():
+        items.append(_item(
+            "client-size", "客户区尺寸", STATUS_FAIL,
+            f"{mapping.width}×{mapping.height} 太小",
+            "盒子面板是固定像素的独立窗口，炉石窗口太小会把它挤出屏幕："
+            "请把窗口调大（客户区至少 960×540）。", True, purpose))
+
+    try:
+        from get_screen import get_HS_hwnd, is_allowed_hearthstone_foreground
+        hwnd = int(get_HS_hwnd())
+        if hwnd and not is_allowed_hearthstone_foreground(hwnd):
+            items.append(_item(
+                "foreground", "炉石窗口在前台", STATUS_WARN, "被其它窗口遮挡",
+                "坐标换算与遮挡无关，仍会点对位置；但截图/OCR 会拍到遮挡窗口，"
+                "运行时请把炉石留在最前面。", False, "截图区域是否拍到炉石画面"))
+    except Exception:
+        pass
+    return items
+
+
 def environment_items(config=None) -> list[dict]:
-    """管理员权限 / 分辨率 / 缩放 / 炉石窗口 / 日志目录 / OCR 模型。"""
+    """管理员权限 / 客户区几何（含缩放）/ 炉石窗口 / 日志目录 / OCR 模型。"""
     config = config if config is not None else _config_handle()
 
     if _is_admin():
@@ -361,41 +437,25 @@ def environment_items(config=None) -> list[dict]:
             "请以管理员身份运行：右键命令提示符 → 以管理员身份运行 → python web_ui.py。",
             True, "鼠标/键盘点击能否生效的前提")
 
-    expected_w, expected_h = _expected_desktop_size(config)
-    width, height = _current_screen_size()
-    purpose = "脚本点击坐标按这个分辨率硬编码"
-    if width == 0 and height == 0:
-        screen = _item("resolution", "屏幕分辨率", STATUS_WARN, "读取失败", "",
-                       False, purpose)
-    elif (width, height) == (expected_w, expected_h):
-        screen = _item("resolution", "屏幕分辨率", STATUS_OK, f"{width}×{height}",
-                       "", True, purpose)
-    else:
-        screen = _item(
-            "resolution", "屏幕分辨率", STATUS_FAIL,
-            f"{width}×{height}（要求 {expected_w}×{expected_h}）",
-            "脚本的点击坐标按 1920×1080 硬编码：请把 Windows 分辨率设为 "
-            f"{expected_w}×{expected_h}，并用炉石全屏模式（不要用最大化窗口）。",
-            True, purpose)
-
     expected_dpi = _expected_dpi(config)
     dpi = _current_dpi()
-    purpose = "缩放不是 100% 时截图与点击会整体偏移"
+    purpose = "缩放不是 100% 时物理像素与逻辑像素会分裂"
     if dpi == 0:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_WARN, "读取失败", "",
                         False, purpose)
     elif dpi == expected_dpi:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_OK,
-                        f"{dpi}（{round(dpi / 96 * 100)}%）", "", True, purpose)
+                        f"{dpi}（{round(dpi / 96 * 100)}%）", "", False, purpose)
     else:
+        # 不再当致命错误：换算是按物理像素做的，这里只提醒可能引起坐标分裂。
         scaling = _item(
-            "dpi", "显示缩放（DPI）", STATUS_FAIL,
-            f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-            "显示设置 → 缩放改成 100%：缩放不是 100% 时截图和点击都会整体偏移。",
-            True, purpose)
+            "dpi", "显示缩放（DPI）", STATUS_WARN,
+            f"{dpi}（{round(dpi / 96 * 100)}%，建议 100%）",
+            "显示设置 → 缩放建议改成 100%：不是 100% 时物理像素与逻辑像素会分裂，"
+            "截图与点击可能对不上。", False, purpose)
 
-    return [admin, screen, scaling, _hearthstone_item(),
-            _log_dir_item(), _ocr_model_item()]
+    return ([admin] + _client_mapping_items(config) + [scaling]
+            + [_hearthstone_item(), _log_dir_item(), _ocr_model_item()])
 
 
 # ---------------------------------------------------------------- 总入口

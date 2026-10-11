@@ -141,6 +141,39 @@ class ReadRankRegionTests(unittest.TestCase):
             self.assertIsNone(
                 FSM_action.read_rank_region(min_confidence=0.5)["number"])
 
+    def test_the_calibrated_rank_box_is_what_gets_read(self):
+        """回归：段位数字必须从**用户校准过的**框里读（用户报告它没法校准）。"""
+        grabbed = []
+
+        def grab(box, scale=1.0):
+            grabbed.append(tuple(box))
+            return object()
+
+        def ocr(box, scale, tag):
+            grabbed.append(tuple(box))
+            return lines(("4321", 0.9))
+
+        saved = FSM_action.recommendation_config
+        try:
+            FSM_action.recommendation_config = SimpleNamespace(
+                post_game_rank_roi=(1200, 170, 1400, 230))
+            with (
+                patch.object(FSM_action, "_grab_region", side_effect=grab),
+                patch.object(FSM_action, "_region_is_blank", return_value=False),
+                patch.object(FSM_action, "_ocr_lines", side_effect=ocr),
+            ):
+                reading = FSM_action.read_rank_region()
+
+            self.assertEqual(4321, reading["number"])
+            self.assertEqual([(1200, 170, 1400, 230)] * 2, grabbed,
+                             "截图与 OCR 都要用校准后的框")
+            # 配置缺失时回退代码默认值。
+            FSM_action.recommendation_config = None
+            self.assertEqual(FSM_action._POST_GAME_RANK_ROI,
+                             FSM_action._post_game_rank_box())
+        finally:
+            FSM_action.recommendation_config = saved
+
 
 class PureRankTextTests(unittest.TestCase):
     def test_only_bare_numbers_pass(self):

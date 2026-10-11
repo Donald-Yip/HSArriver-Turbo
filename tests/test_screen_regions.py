@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+import display_mapping
 import region_overlay
 import screen_regions
 
@@ -33,7 +34,7 @@ class RegionRegistryTests(unittest.TestCase):
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
             ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide",
-             "post_game_start", "rank"],
+             "post_game_start", "rank", "main_menu_battle", "deck_grid"],
             [region["key"] for region in self.regions])
 
     def test_boxes_come_from_the_config(self):
@@ -97,17 +98,58 @@ class CalibrationTargetTests(unittest.TestCase):
         targets = screen_regions.calibration_targets(make_config())
 
         self.assertEqual(["recommendation", "mulligan_confirm", "win_rate",
-                          "post_game_start"],
+                          "post_game_start", "rank",
+                          "main_menu_battle", "deck_grid"],
                          [target["key"] for target in targets])
         self.assertEqual(
             ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi",
-             "post_game_start_roi"],
+             "post_game_start_roi", "post_game_rank_roi",
+             "main_menu_battle_roi", "deck_grid_roi"],
             [target["config_key"] for target in targets])
         for target in targets:
             self.assertTrue(target["label"])
             self.assertTrue(target["short"])
             self.assertTrue(target["hint"])
             self.assertRegex(target["color"], r"^#[0-9a-fA-F]{6}$")
+
+    def test_interface_recognition_boxes_match_battle_entry(self):
+        """界面识别的两个框必须与 battle_entry 的默认值一致（防止两边改岔）。
+
+        与 AI 胜率区域那条规矩一样：坐标只应有一个出处，改了一边另一边会红。
+        """
+        import battle_entry
+
+        self.assertEqual(battle_entry.MAIN_MENU_BATTLE_DEFAULT,
+                         screen_regions.MAIN_MENU_BATTLE_REGION)
+        self.assertEqual(battle_entry.DECK_GRID_DEFAULT,
+                         screen_regions.DECK_GRID_REGION)
+        # 文字框可以很薄：它的缩放下限必须小于框高，否则手柄拖不出来
+        target = next(t for t in screen_regions.calibration_targets(make_config())
+                      if t["key"] == "main_menu_battle")
+        height = target["box"][3] - target["box"][1]
+        self.assertLess(target["min_size"], height)
+
+    def test_the_rank_box_is_calibratable(self):
+        """用户反馈"段位数字无法校准"：它必须是可拖、可保存的目标。"""
+        targets = screen_regions.calibration_targets(make_config())
+        rank = next(t for t in targets if t["key"] == "rank")
+
+        self.assertEqual("post_game_rank_roi", rank["config_key"])
+        self.assertEqual(screen_regions.POST_GAME_RANK_REGION, rank["box"])
+        regions = screen_regions.screenshot_regions(make_config())
+        preview = next(r for r in regions if r["key"] == "rank")
+        self.assertEqual("post_game_rank_roi", preview["config_key"])
+
+    def test_calibrated_rank_box_wins_over_the_default(self):
+        targets = screen_regions.calibration_targets(
+            make_config(post_game_rank_roi=(1200, 170, 1400, 230)))
+        regions = screen_regions.screenshot_regions(
+            make_config(post_game_rank_roi=(1200, 170, 1400, 230)))
+
+        box = next(t["box"] for t in targets if t["key"] == "rank")
+        preview = next(r["box"] for r in regions if r["key"] == "rank")
+        self.assertEqual((1200, 170, 1400, 230), box)
+        self.assertEqual((1200, 170, 1400, 230), preview)
 
     def test_calibrated_post_game_start_box_wins_over_the_default(self):
         targets = screen_regions.calibration_targets(
@@ -190,6 +232,9 @@ class RegionPreviewTests(unittest.TestCase):
         kwargs.setdefault("grabber", make_grabber())
         kwargs.setdefault("screen_metrics", lambda: (1920, 1080, 96))
         kwargs.setdefault("panel_detector", lambda crop: True)
+        # 注入"读不到客户区"的映射：默认用例只关心截图/画框/检查项本身，
+        # 不该受测试机上是否正跑着炉石影响（真机上 window 几何随时会变）。
+        kwargs.setdefault("mapping_provider", lambda: None)
         return screen_regions.build_region_preview(**kwargs)
 
     @staticmethod
@@ -213,28 +258,76 @@ class RegionPreviewTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         statuses = {check["key"]: check["status"] for check in result["checks"]}
-        self.assertEqual("ok", statuses["resolution"])
         self.assertEqual("ok", statuses["dpi"])
         self.assertEqual("ok", statuses["panel"])
 
     def test_all_regions_are_inside_the_screen(self):
         result = self.preview()
 
-        # 4 个可校准/兜底区域 + 每局结束用的「开始」按钮 / 段位两个只读框
-        self.assertEqual(6, len(result["regions"]))
+        # 7 个可校准目标 + AI胜率兜底框（共 8 个区域）；数量跟着注册表走，
+        # 别写死数字，否则加一个目标就要来改一次。
+        self.assertEqual(len(screen_regions.CALIBRATION_TARGETS) + 1,
+                         len(result["regions"]))
         self.assertTrue(all(r["in_bounds"] for r in result["regions"]))
 
-    def test_wrong_resolution_is_reported_as_a_failure(self):
-        result = self.preview(grabber=make_grabber(size=(1280, 720)),
-                              screen_metrics=lambda: (1280, 720, 144))
+    def test_resolution_is_no_longer_a_failure(self):
+        """换了分辨率不再判失败：客户区几何由 display_mapping 换算。
+
+        3840×2160 的屏幕（不是配置里的 1920×1080）在改造前会直接判 FAIL；
+        现在只有 DPI 提示（warn），且整个预览仍然通过。
+        """
+        result = self.preview(grabber=make_grabber(size=(3840, 2160)),
+                              screen_metrics=lambda: (3840, 2160, 144),
+                              max_width=3840)
 
         statuses = {check["key"]: check["status"] for check in result["checks"]}
-        self.assertEqual("fail", statuses["resolution"])
-        self.assertEqual("fail", statuses["dpi"])
+        self.assertNotIn("resolution", statuses)
+        self.assertEqual("warn", statuses["dpi"])
+        self.assertNotIn("client-aspect", statuses)
+        self.assertTrue(result["ok"], result["checks"])
+        dpi = next(c for c in result["checks"] if c["key"] == "dpi")
+        self.assertFalse(dpi["required"])
+        self.assertIn("100%", dpi["hint"])
+
+    def test_missing_client_mapping_is_only_a_hint(self):
+        result = self.preview()
+
+        client = next(c for c in result["checks"] if c["key"] == "client")
+        self.assertEqual("warn", client["status"])
+        self.assertFalse(client["required"])
+        self.assertTrue(result["ok"])
+
+    def test_client_mapping_is_reported_and_boxes_follow_it(self):
+        """客户区在 (960,551)：框与判定点都要整体偏过去。"""
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1080),
+            screen_left=960, screen_top=551)
+        result = self.preview(
+            grabber=make_grabber(size=(3840, 2160)),
+            screen_metrics=lambda: (3840, 2160, 96),
+            max_width=3840,
+            mapping_provider=lambda: mapping)
+
+        self.assertEqual({"width": 1920, "height": 1080}, result["client"])
+        self.assertTrue(result["mapping"]["available"])
+        self.assertEqual([960, 551], result["mapping"]["screen_origin"])
+        region = next(r for r in result["regions"] if r["key"] == "win_rate")
+        self.assertEqual((110, 8, 270, 48), region["box"])           # 客户区相对
+        self.assertEqual((1070, 559, 1230, 599), region["screen_box"])
+        probe = result["points"][0]
+        self.assertEqual((2050, 1621), probe["screen_point"])
+
+    def test_bad_client_aspect_is_a_failure(self):
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1200), screen_left=0, screen_top=0)
+        result = self.preview(
+            grabber=make_grabber(size=(1920, 1200)),
+            screen_metrics=lambda: (1920, 1200, 96),
+            mapping_provider=lambda: mapping)
+
+        statuses = {check["key"]: check["status"] for check in result["checks"]}
+        self.assertEqual("fail", statuses["client-aspect"])
         self.assertFalse(result["ok"])
-        resolution = next(c for c in result["checks"]
-                          if c["key"] == "resolution")
-        self.assertIn("1920×1080", resolution["hint"])
 
     def test_region_outside_the_screen_is_flagged(self):
         result = self.preview(config=make_config(
@@ -350,8 +443,10 @@ class RegionBoxDrawingTests(unittest.TestCase):
         self.assertEqual((1325, 865, 1475, 935), region["box"])
 
     def test_other_regions_are_still_drawn(self):
+        # mapping=None：不换算，框按客户区相对坐标画（测试机窗口位置不影响）。
         layer = region_overlay.paint_layer(
-            1920, 1080, None, self.config, skip_keys=("post_game_start",))
+            1920, 1080, None, self.config, skip_keys=("post_game_start",),
+            mapping=None)
 
         # 绿框（推荐面板）顶边必须还在：跳过只针对当前目标
         self.assertGreater(layer.getpixel((100, 200))[3], 0)

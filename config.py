@@ -132,9 +132,9 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
 # ---------------------------------------------------------------- 上分停止条件（可选）
-# 每局对战结束后读一次结算界面的段位数字（屏幕坐标 1230,180 - 1385,225；
+# 每局对战结束后读一次结算界面的段位数字（客户区相对坐标 1230,180 - 1385,225；
 # 未上传说时该处没有数字），命中条件就把「本局结束后停止」置位，让自动化
-# 在回到非对局状态时干净退出。
+# 在回到非对局状态时干净退出。段位框可在校准窗口里拖（post_game_rank_roi）。
 #   enabled       : 是否启用。默认 False（需用户在 Web 手动开启）。
 #   mode          : "legend"        上传说即停；
 #                   "legend_number" 上到传说某个名次（数字 <= legend_number）就停。
@@ -312,6 +312,94 @@ def save_overlay_setting(key: str, value) -> dict:
     return {**DEFAULT_OVERLAY, **section}
 
 
+# ---------------------------------------------------------------- 进入对战
+# ui_config.json 的 battle_entry 段（「一键进入对战」的行为参数）。
+#   deck_index: 自动选择的卡组序号 1-9（None = 不自动选，保持历史行为）。
+#               不默认开的原因：只按名牌文字判断，认不出「卡牌不足」的卡组，
+#               选错卡组会直接开始一局错的。要用时自己指定一个可用格子。
+#   check_interval_seconds: 等界面时"识别一次 / 点一次中心"的间隔。
+#   *_timeout_seconds: 等主界面 / 等选择套牌界面的超时，超时就退出（绝不盲点）。
+DEFAULT_BATTLE_ENTRY = {
+    "deck_index": None,
+    "check_interval_seconds": 3.0,
+    "main_menu_timeout_seconds": 180.0,
+    "deck_select_timeout_seconds": 90.0,
+}
+_BATTLE_ENTRY_FLOAT_KEYS = ("check_interval_seconds", "main_menu_timeout_seconds",
+                            "deck_select_timeout_seconds")
+
+
+def battle_entry_settings() -> dict:
+    """读取 ui_config.json 的 battle_entry 段（缺字段/写坏时回退默认值）。
+
+    每次调用都重新读盘：这样 `hsctl deck 8` 改完，下一局就生效，不用重启脚本。
+    """
+    cfg = dict(DEFAULT_BATTLE_ENTRY)
+    data = _load_ui_config().get("battle_entry")
+    if not isinstance(data, dict):
+        return cfg
+    raw = data.get("deck_index")
+    if raw is None or str(raw).strip() == "":
+        cfg["deck_index"] = None
+    else:
+        try:
+            index = int(raw)
+        except (TypeError, ValueError):
+            index = 0
+        cfg["deck_index"] = index if 1 <= index <= 9 else None
+    for key in _BATTLE_ENTRY_FLOAT_KEYS:
+        if data.get(key) is None:
+            continue
+        try:
+            value = float(data[key])
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            cfg[key] = value
+    return cfg
+
+
+def save_battle_entry_setting(key: str, value) -> dict:
+    """把 battle_entry 段里的某一项写进 ui_config.json（只改这一段）。
+
+    `deck_index=None` 表示"不自动选卡组"（写回 null）。
+    非法值抛 ValueError，让接口层把话说清楚，而不是悄悄写成默认值。
+    """
+    if key not in DEFAULT_BATTLE_ENTRY:
+        raise KeyError(f"未知的 battle_entry 配置项：{key}")
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    section = data.get("battle_entry")
+    section = dict(section) if isinstance(section, dict) else {}
+    if key == "deck_index":
+        if value is None or str(value).strip() == "":
+            section[key] = None
+        else:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                raise ValueError("卡组序号必须是 1-9 的整数（或留空表示不自动选）")
+            if not 1 <= index <= 9:
+                raise ValueError("卡组序号必须是 1-9（选择套牌界面当前页只有 9 格）")
+            section[key] = index
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} 必须是数字")
+        if number <= 0:
+            raise ValueError(f"{key} 必须大于 0")
+        section[key] = number
+    data["battle_entry"] = section
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {**DEFAULT_BATTLE_ENTRY, **section}
+
+
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。
 # 原先 0.2s 且连续两次 EOF 才返回，静止时每轮阻塞 0.4s；缩短后主循环对
@@ -348,32 +436,105 @@ OCR_MODEL_ROOT = os.environ.get("HS_OCR_MODEL_ROOT") or os.path.normpath(
 # 一起加即可。
 _USER_BOX_KEYS = ("recommendation_roi", "mulligan_confirm_roi",
                   "ai_win_rate_roi", "ai_win_rate_wide_roi",
-                  "post_game_start_roi")
+                  "post_game_start_roi", "post_game_rank_roi",
+                  # 界面识别（battle_entry）：主界面「传统对战」文字框、
+                  # 选择套牌界面的 9 个卡组网格框。
+                  "main_menu_battle_roi", "deck_grid_roi")
 
 
-def _user_box(key: str) -> Optional[tuple[int, int, int, int]]:
-    """读取 ui_config.json 顶层某个区域键（值为 [left, top, right, bottom]）。
+def _roi_declared_client(data: dict) -> bool:
+    """ui_config.json 是否**可信地**声明了 ROI 是客户区相对坐标。
 
-    校准工具 calibrate_roi.py 把桌面上拖拽的结果写入该文件；这里在每次创建
-    配置时应用（打包版/源码版路径一致：应用目录=本文件所在目录）。
+    文件里的 ``roi_frame`` 只是一个声明；它还可能是假的（详见
+    `display_mapping.roi_frame_is_credible`：在炉石最小化时按保存，存下来的其实
+    是屏幕坐标）。所以这里不光看标记，还要验证每个框都落在客户区坐标的可能
+    范围内，否则整份配置按"屏幕坐标"处理。
+    """
+    if str(data.get("roi_frame") or "").strip().lower() != "client":
+        return False
+    try:
+        from display_mapping import roi_frame_is_credible
+    except Exception:
+        return True          # 拿不到判定逻辑时尊重文件里的声明
+    boxes = [data[key] for key in _USER_BOX_KEYS if key in data]
+    if not boxes:
+        return True
+    return bool(roi_frame_is_credible(boxes))
+
+
+_ROI_FRAME_WARNED = False
+
+
+def _interpret_roi(box, declared_client: bool, default):
+    """把配置里的一个框解释成**客户区相对坐标**（口径见 display_mapping）。
+
+    `default` 是代码默认值：与它完全相同的值说明用户没校准过这一项（默认值本来
+    就是客户区相对口径），`interpret_roi_box` 会原样返回。
+    """
+    global _ROI_FRAME_WARNED
+    try:
+        from display_mapping import display_mapping, interpret_roi_box
+        mapping = display_mapping()
+        converted = interpret_roi_box(box, mapping,
+                                      declared_client=declared_client,
+                                      default=default)
+    except Exception:
+        return box
+    if tuple(converted) != tuple(box) and not _ROI_FRAME_WARNED:
+        # 只提示一次：每局都会重建配置，反复刷屏没有意义。
+        _ROI_FRAME_WARNED = True
+        print("[配置] ui_config.json 里的 ROI 没有「客户区相对」标记（或标记不可信），"
+              "已按**屏幕坐标**换算成客户区相对坐标 —— 框仍跟着炉石窗口走；"
+              "用校准工具按一次 S 保存即固定该口径。")
+    return converted
+
+
+def _user_box(key: str, default=None) -> Optional[tuple[int, int, int, int]]:
+    """读取 ui_config.json 顶层某个区域键，返回**客户区相对坐标**。
+
+    校准工具 calibrate_roi.py 把拖拽的结果写入该文件；这里在每次创建配置时
+    应用（打包版/源码版路径一致：应用目录=本文件所在目录）。
     未配置或格式非法时返回 None，调用方继续用代码默认值。
 
-    返回格式：(left, top, right, bottom)，必须满足 left<right && top<bottom。
+    坐标口径（详见 display_mapping 的模块文档）：**客户区相对**（基准 1920×1080），
+    不是屏幕坐标；窗口不在屏幕原点/不是 1920×1080 时由 display_mapping 换算。
+    允许**负值**——盒子面板是独立窗口，可以挂在炉石客户区左上角之外，按 ≥0
+    夹取会把框挤成空框，反而更糟。这里只校验 left<right && top<bottom。
+
+    `default` 是该字段的代码默认值（用于识别"用户没校准过这一项"），以及
+    老配置/口径不可信时按屏幕坐标换算的依据，见 `display_mapping.interpret_roi_box`。
     """
     try:
         cfg_path = ROOT / "ui_config.json"
         data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
         vals = tuple(int(v) for v in data.get(key))
-        if len(vals) == 4 and 0 <= vals[0] < vals[2] and 0 <= vals[1] < vals[3]:
-            return vals
+        if len(vals) != 4 or not (vals[0] < vals[2] and vals[1] < vals[3]):
+            return None
+    except Exception:
+        return None
+    return _interpret_roi(vals, _roi_declared_client(data), default)
+
+
+def _code_default(key: str):
+    """某个 ROI 字段的**代码默认值**（从 RecommendationConfig 的字段定义读）。
+
+    单独取值是为了让下面两个便捷函数与 `__post_init__` 用同一套口径判断，
+    而不是各自复制一份默认值（复制迟早会改岔）。
+    """
+    try:
+        field = RecommendationConfig.__dataclass_fields__.get(key)
+        if field is not None:
+            return field.default
     except Exception:
         pass
     return None
 
 
 def _user_roi() -> Optional[tuple[int, int, int, int]]:
-    """读取用户校准的推荐区域（ui_config.json 的 recommendation_roi）。"""
-    return _user_box("recommendation_roi")
+    """读取用户校准的推荐区域（ui_config.json 的 recommendation_roi，客户区相对）。"""
+    return _user_box("recommendation_roi", _code_default("recommendation_roi"))
 
 
 def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
@@ -382,7 +543,8 @@ def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
     用于换牌阶段检测“确认”按钮是否在场：按钮在 → 可安全执行换牌并点击确认；
     按钮不在 → 面板未就绪或已提交，不盲目点击。格式同 recommendation_roi。
     """
-    return _user_box("mulligan_confirm_roi")
+    return _user_box("mulligan_confirm_roi",
+                     _code_default("mulligan_confirm_roi"))
 
 
 # 可通过 ui_config.json 的 delays 段覆盖的延时字段白名单。
@@ -490,6 +652,26 @@ class RecommendationConfig:
     # 可通过 ui_config.json 的 post_game_start_roi 覆盖（校准工具写入）。
     post_game_start_roi: tuple[int, int, int, int] = (1325, 865, 1475, 935)
 
+    # 结算界面右上角的段位名次数字区域（每局结束读一次，用于按段位停止）。
+    # 未上传说时这里是空白（靠"亮像素太少"跳过 OCR）；上了传说后框内是名次
+    # 数字本身。不同分辨率/窗口位置下这个位置会偏，所以**可校准**：
+    # 可通过 ui_config.json 的 post_game_rank_roi 覆盖（校准窗口里能拖）。
+    post_game_rank_roi: tuple[int, int, int, int] = (1230, 180, 1385, 225)
+
+    # ------------------------------------------------------------ 界面识别
+    # 主界面「传统对战」**文字**框：脚本在框内（±5px）找「传统对战」这四个字的
+    # 图案（灰度 NCC，实测真值 1.000、旁边同款银条的「酒馆战棋」只有 0.44），
+    # 认到就点**框中心**。所以框要贴着那四个字拖，不用框整条银条。
+    # 皮肤/补丁改了字的颜色或反色时，用 `hsctl ui --learn` 按当前框从当前画面重裁。
+    # 可通过 ui_config.json 的 main_menu_battle_roi 覆盖（校准工具写入）。
+    main_menu_battle_roi: tuple[int, int, int, int] = (832, 317, 1091, 344)
+
+    # 选择套牌界面的 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点
+    # （实测列 486/729/968、行 318/534/750，每格约 226×198），并逐个检查格子里
+    # 有没有"名牌白字"——只有像卡组的那一格才会被点，避免在别的界面上乱点。
+    # 可通过 ui_config.json 的 deck_grid_roi 覆盖（校准工具写入）。
+    deck_grid_roi: tuple[int, int, int, int] = (366, 210, 1089, 858)
+
     # ------------------------------------------------------------------ 第一回合额外延时
     # 第一回合开始时会有一批"开局生效的全局卡"（如黑暗主教本尼迪塔斯 SW_448
     # 触发 TriggerKeyword=START_OF_GAME_KEYWORD），它们要跑入场/效果动画，导致
@@ -539,8 +721,10 @@ class RecommendationConfig:
     def __post_init__(self) -> None:
         # 用户可覆盖项依次应用（代码默认 < ui_config.json）：
         # 1) 校准工具写入的各区域 ROI；2) 各延时。
+        # 传当前值作为 default：与它相同的配置项说明用户没校准过（也就谈不上
+        # 换算），且老配置/口径不可信时用它判断"这个框是不是屏幕坐标"。
         for key in _USER_BOX_KEYS:
-            box = _user_box(key)
+            box = _user_box(key, getattr(self, key))
             if box is not None:
                 object.__setattr__(self, key, box)
         # 用户可在 ui_config.json 的 delays 段覆盖延时（默认采用上游时序）。

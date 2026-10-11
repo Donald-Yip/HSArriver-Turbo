@@ -56,8 +56,8 @@ class RegionsApiTests(unittest.TestCase):
     def test_api_regions_logs_a_failed_check(self):
         preview = {"ok": False, "image": "data:image/jpeg;base64,AAA",
                    "width": 1280, "height": 720, "regions": [], "points": [],
-                   "checks": [{"key": "resolution", "label": "屏幕分辨率",
-                               "status": "fail", "detail": "1280×720（要求 1920×1080）",
+                   "checks": [{"key": "client-aspect", "label": "客户区比例",
+                               "status": "fail", "detail": "客户区 1280×800 不是 16:9",
                                "hint": "", "required": True}],
                    "generated_at": "2026-01-01T00:00:00"}
         logged = []
@@ -70,11 +70,16 @@ class RegionsApiTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual("WARN", logged[0][0])
-        self.assertIn("1280×720", logged[0][1])
+        self.assertIn("1280×800", logged[0][1])
 
-    def test_healthy_preview_is_logged_as_sys(self):
+    def test_healthy_preview_is_logged_with_the_client_geometry(self):
+        """分辨率不再是判据之后，日志报的是客户区几何。"""
         preview = {"ok": True, "image": "data:image/jpeg;base64,AAA",
-                   "width": 1920, "height": 1080,
+                   "width": 3840, "height": 2160,
+                   "client": {"width": 1920, "height": 1080},
+                   "mapping": {"available": True,
+                               "client": {"width": 1920, "height": 1080},
+                               "screen_origin": [960, 551]},
                    "regions": [{"key": "recommendation"}], "points": [],
                    "checks": [], "generated_at": "2026-01-01T00:00:00"}
         logged = []
@@ -86,7 +91,26 @@ class RegionsApiTests(unittest.TestCase):
             web_ui.api_regions()
 
         self.assertEqual("SYS", logged[0][0])
+        self.assertIn("客户区 1920×1080", logged[0][1])
+        self.assertIn("(960, 551)", logged[0][1])
+
+    def test_healthy_preview_without_hearthstone_falls_back_to_screen_size(self):
+        preview = {"ok": True, "image": "data:image/jpeg;base64,AAA",
+                   "width": 1920, "height": 1080,
+                   "mapping": {"available": False},
+                   "regions": [], "points": [],
+                   "checks": [], "generated_at": "2026-01-01T00:00:00"}
+        logged = []
+
+        with patch.object(web_ui.screen_regions, "build_region_preview",
+                          return_value=dict(preview)), \
+                patch.object(web_ui, "_log",
+                             side_effect=lambda level, msg: logged.append((level, msg))):
+            web_ui.api_regions()
+
+        self.assertEqual("SYS", logged[0][0])
         self.assertIn("1920×1080", logged[0][1])
+        self.assertIn("炉石未运行", logged[0][1])
 
 
 class RegionsPageTests(unittest.TestCase):

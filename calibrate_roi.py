@@ -8,7 +8,7 @@
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
   * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-四个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
+七个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
 | # | 目标 | 写入 ui_config.json | 对齐方法 |
 | --- | --- | --- | --- |
@@ -16,10 +16,26 @@
 | 2 | 换牌「确认」按钮（蓝） | `mulligan_confirm_roi` | 框住换牌界面的确认按钮 |
 | 3 | 盒子「AI胜率」浮动条（橙） | `ai_win_rate_roi` | 框住左上角 AI胜率浮动条（兜底区域自动跟着外扩） |
 | 4 | 结算「开始」按钮（青绿） | `post_game_start_roi` | 框住每局结束底部的「开始」按钮：脚本用它判断结算界面点完没有，并点它的正中心 |
+| 5 | 段位数字（淡紫） | `post_game_rank_roi` | 框住结算界面右上角的段位名次数字：有数字=已上传说，数字就是名次 |
+| 6 | 主界面「传统对战」（金） | `main_menu_battle_roi` | **贴住那四个字**（不用框整条银条）：脚本在框 ±40px 内用这四个字的图案找它，认到就点认到的位置 |
+| 7 | 选择套牌 9 个卡组（天蓝） | `deck_grid_roi` | 框住 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
+
+目标 6/7 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
+（`框内文字匹配 1.00（阈值 0.80），对准了` / `9 格里 9 格有卡组名牌文字`），
+用的就是脚本运行时**同一个**判定函数，所以"这里说对、脚本说不对"不会发生。
+目标 6 是文字框（259×27），所以它的缩放下限单独放宽到 20px（见 `min_size`）。
+
+**框跟着炉石窗口走**：所有框都以"客户区相对坐标"为准（基准 1920×1080），
+每一帧按当前窗口位置/尺寸重新推导屏幕位置。所以：
+
+  * 拖动/缩放炉石窗口时，7 个框**实时跟着走**，不需要重新校准；
+  * 保存时写入的是客户区相对坐标（`roi_frame="client"`），换个分辨率也不会偏；
+  * 老配置（没有 `roi_frame` 标记）第一次打开时会自动判断每个框的口径并打印出来，
+    按一次 **S** 保存即升级成新格式。
 
 操作：
   * 拖框的边框可整体移动，拖右下角手柄可调整大小；
-  * 目标条里列出四个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
+  * 目标条里列出七个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
   * 目标条底部两个按钮：**左「保存全部区域 (S)」、右「退出 (Esc)」**，
     都有悬停高亮；键盘 **S** 保存、**Esc** 退出同样有效；
   * 说明文字在卡片内自动换行（金色标题段 = 做什么，暗淡说明段 = 怎么做），
@@ -48,11 +64,14 @@ from types import SimpleNamespace
 from PIL import Image, ImageColor, ImageDraw
 
 from region_overlay import (
-    LayeredWindow, MSG, PM_REMOVE, USER32, label_font, paint_layer, panel_state,
+    LayeredWindow, MSG, PM_REMOVE, USER32, auto_mapping, label_font,
+    paint_layer, panel_state,
 )
 from screen_regions import (
-    AI_WIN_RATE_WIDE_MARGIN, CALIBRATION_TARGETS, calibration_targets,
-    expand_box,
+    AI_WIN_RATE_REGION, AI_WIN_RATE_WIDE_MARGIN, CALIBRATION_TARGETS,
+    DECK_GRID_REGION, MAIN_MENU_BATTLE_REGION,
+    POST_GAME_RANK_REGION, POST_GAME_START_BUTTON_REGION,
+    calibration_targets, expand_box,
 )
 
 # ---------------------------------------------------------------- Win32
@@ -115,11 +134,11 @@ HINT_FONT_SIZE = 13
 HINT_LINE_H = 17
 HINT_MAX_LINES = 3
 INFO_LINE_H = 18
-# 基础高度：标题 + 目标行 + 4 行信息（当前目标 / 说明 / 坐标 / 保存状态）
+# 基础高度：标题 + 目标行 + 5 行信息（当前目标 / 说明 / 屏幕位置 / 坐标 / 保存状态）
 # + 按钮行。说明换行后会由 CalibrationSession._card_height() 按实际行数加高。
 CARD_H = (CARD_PAD + 20 + 8          # 标题
           + len(CALIBRATION_TARGETS) * ROW_H + 6   # 目标行
-          + 4 * INFO_LINE_H + 8      # 当前目标 / 说明 / 坐标 / 保存状态
+          + 5 * INFO_LINE_H + 8      # 当前目标 / 说明 / 屏幕位置 / 坐标 / 保存状态
           + SAVE_BTN_H + CARD_PAD)
 
 
@@ -190,9 +209,42 @@ def _rgba(hex_color: str, alpha: int = 255) -> tuple[int, int, int, int]:
     return (red, green, blue, alpha)
 
 
+# 校准工具写盘时记录的坐标口径版本号。
+#   * ROI_FRAME_CLIENT：客户区相对坐标（基准 1920×1080）——正常保存写这个；
+#   * ROI_FRAME_SCREEN：屏幕坐标——只有在读不到客户区几何（炉石没开/最小化）
+#     时才可能写出来，因为那时换算是恒等的，存下来的其实是屏幕坐标。
+#     诚实地标成 screen（而不是谎报 client）是防止"框整体跑偏"的关键。
+# 读取与解释这个标记由 config.RecommendationConfig + display_mapping 负责
+# （见 display_mapping.interpret_roi_box / roi_frame_is_credible）；本模块只在
+# 保存时写它，以及用 `_stored_roi_frame()` 诊断当前配置是什么口径。
+# **ROI 键的白名单只有一份**：config._USER_BOX_KEYS（不要在这里再抄一份）。
+ROI_FRAME_CLIENT = "client"
+ROI_FRAME_SCREEN = "screen"
+
+
 def _user_config_path() -> Path:
     """与 RecommendationConfig 读取位置一致：应用目录下的 ui_config.json。"""
     return Path(__file__).resolve().parent / "ui_config.json"
+
+
+def _stored_roi_frame() -> str:
+    """ui_config.json 里 ROI 用的坐标系（诊断/自检用）。
+
+    * ``"client"``（校准工具正常保存后写入）：客户区相对坐标（基准 1920×1080）；
+    * 缺省 / ``"screen"`` / 其它：ROI 是**屏幕坐标**（老配置的原语义，或"炉石
+      没开时按了保存"留下的）。
+
+    **口径解释不在这里做**（否则同一份数据会被解释两次、偏移算两遍）：
+    真正把值解释成客户区相对坐标的是
+    `config.RecommendationConfig` → `display_mapping.interpret_roi_box`，它还会
+    验证这个标记可不可信（见 `display_mapping.roi_frame_is_credible`）。
+    """
+    try:
+        data = json.loads(_user_config_path().read_text(encoding="utf-8"))
+        value = str(data.get("roi_frame") or "").strip().lower()
+        return ROI_FRAME_CLIENT if value == ROI_FRAME_CLIENT else ROI_FRAME_SCREEN
+    except Exception:
+        return ROI_FRAME_SCREEN
 
 
 def _load_config():
@@ -208,17 +260,35 @@ class CalibrationSession:
     """屏幕上的交互式校准窗口：每个登记的目标都能拖、都能存。"""
 
     def __init__(self, selftest: bool = False, ocr_enabled: bool = True,
-                 start_key: str = ""):
+                 start_key: str = "", mapping_provider=None,
+                 config_provider=None):
         self.selftest = bool(selftest)
         self.ocr_enabled = bool(ocr_enabled) and not self.selftest
         self.running = True
         self.window: LayeredWindow | None = None
         self.width = 0
         self.height = 0
+        # 客户区几何来源（供测试注入）；None = 用 region_overlay.auto_mapping 探测。
+        self._mapping_provider = mapping_provider
+        # 目标框来源（供测试注入）：None = 读 config.RecommendationConfig。
+        self._config_provider = config_provider
 
-        config = _load_config()
-        self.targets = [dict(target, box=list(target["box"]))
-                        for target in calibration_targets(config)]
+        # 每个目标有两个口径（见 _sync_boxes）：
+        #   * client_box：**唯一权威**，ui_config.json 里存的就是它（客户区相对，
+        #     基准 1920×1080）；窗口移动/缩放时靠它重新推导屏幕位置；
+        #   * box       ：本帧的屏幕坐标（描边/拖框/命中的口径），每帧由
+        #     _sync_boxes() 从 client_box 推导，拖框时反向写回。
+        # 口径解释（老配置的屏幕坐标、"谎报 client"的坏配置……）**全部由
+        # config.RecommendationConfig 负责**（见 display_mapping.interpret_roi_box）：
+        # 校准工具拿到的值已经是客户区相对坐标，**绝不能再解释一次**，否则同一个
+        # 偏移会被算两遍（框会整体错位）。
+        self.targets = self._read_targets()
+        # 每帧用的屏幕框是否已经跟着最新几何推导过（见 _box_frame_sig）。
+        self._box_frame_sig = None
+        # 打开窗口时读不到客户区几何 → 那一刻配置里的老坐标没法换算；等几何可用
+        # 时补读一次（用户还没动过任何框的前提下，见 _sync_boxes）。
+        self._reload_pending = self._mapping() is None
+        self._edited = False
         self.active_index = 0
         if start_key:
             for index, target in enumerate(self.targets):
@@ -227,6 +297,9 @@ class CalibrationSession:
                     break
 
         self.panel_state = None
+        # 当前目标自己的实时判定（只有"靠识别界面"的目标会填，见
+        # _check_active_target）：显示在顶部提示条里，拖框时当场看准没准。
+        self.target_status = None
         self.drag = None              # None | ("move", dx, dy) | ("resize",)
         # 鼠标在哪个按钮/目标行上（只为高亮，不影响其它逻辑）。
         self.hover = None             # None | ("save", None) | ("exit", None)
@@ -256,12 +329,113 @@ class CalibrationSession:
     def select(self, index: int) -> None:
         if 0 <= index < len(self.targets) and index != self.active_index:
             self.active_index = index
+            # 换了目标，上一个目标的判定结果就不再适用（下次定时检查会重算）。
+            self.target_status = None
             self.dirty = True
             print(f"[校准] 当前目标：{self.active['label']}"
                   f"（{self.active['config_key']}）")
 
     def cycle(self, step: int = 1) -> None:
         self.select((self.active_index + step) % len(self.targets))
+
+    def _active_min_size(self) -> int:
+        """当前目标允许的最小边长（注册表没写就用全局 MIN_SIZE）。
+
+        「传统对战」是个 259×27 的**文字**框：用统一的 MIN_SIZE(60) 收，右下角
+        手柄根本拖不出这么薄的框（只剩改配置文件一条路）。所以注册表里允许给单个
+        目标声明 `min_size` —— 和当初"AI 胜率浮动条只有 160×40"是同一类问题。
+        """
+        try:
+            value = int(self.active.get("min_size") or MIN_SIZE)
+        except Exception:
+            return MIN_SIZE
+        return max(4, value)
+
+    # ------------------------------------------------------------ 实时判定
+    # 活动目标是"靠识别界面"的那些时，用**与运行时同一个函数**算一次分显示出来。
+    # 校准窗口说"对准了"、脚本却说不准，是最难查的一类问题 —— 所以这里绝不另写
+    # 一份判定逻辑（判定只住在 battle_entry 里）。
+    _TEXT_CHECK_KINDS = {"main_menu_battle": "traditional"}
+
+    def _check_active_target(self) -> None:
+        """重算当前目标的实时判定（只有识别类目标有内容，其它置 None）。"""
+        key = self.active["key"]
+        kind = self._TEXT_CHECK_KINDS.get(key)
+        if kind is None and key != "deck_grid":
+            self.target_status = None
+            return
+        try:
+            import battle_entry
+        except Exception as exc:
+            self.target_status = {"text": f"界面识别不可用：{exc}", "ok": False}
+            return
+        try:
+            if key == "deck_grid":
+                self.target_status = self._check_deck_grid(battle_entry)
+            else:
+                self.target_status = self._check_text_target(battle_entry, kind)
+        except Exception as exc:
+            self.target_status = {"text": f"判定失败：{exc}", "ok": False}
+
+    def _check_text_target(self, battle_entry, kind: str) -> dict:
+        """文字目标：抓"框 ± 搜索半径"，用运行时的匹配函数算分。"""
+        import cv2
+        import numpy as np
+
+        template, reason = battle_entry.load_template(kind)
+        if template is None:
+            text = battle_entry.REASON_TEXT.get(reason, reason or "模板不可用")
+            return {"text": text, "ok": False}
+        radius = int(battle_entry.SEARCH_RADIUS)
+        left, top, right, bottom = (int(v) for v in self.active["box"])
+        crop = self._grab_crop((left - radius, top - radius,
+                                right + radius, bottom + radius))
+        if crop is None:
+            return {"text": "抓不到这块画面（框跑到屏幕外了？）", "ok": False}
+        patch = cv2.cvtColor(np.asarray(crop), cv2.COLOR_RGB2GRAY)
+        score, _offset = battle_entry.match_score(patch, template, radius)
+        ok = score >= battle_entry.NCC_MIN
+        return {"text": (f"框内文字匹配 {score:.2f}"
+                         f"（阈值 {battle_entry.NCC_MIN:.2f}）"
+                         + ("，对准了" if ok else "，还没对上：把框拖到字上")),
+                "ok": ok}
+
+    def _check_deck_grid(self, battle_entry) -> dict:
+        """9 个格子里有几个像卡组（名牌有白字）——阈值与运行时同一套常量。"""
+        import numpy as np
+
+        left, top, right, bottom = (int(v) for v in self.active["box"])
+        crop = self._grab_crop((left, top, right, bottom))
+        if crop is None:
+            return {"text": "抓不到这块画面（框跑到屏幕外了？）", "ok": False}
+        pixels = np.asarray(crop).astype(np.int16)
+        height, width = pixels.shape[:2]
+        reference_h = (battle_entry.DECK_GRID_DEFAULT[3]
+                       - battle_entry.DECK_GRID_DEFAULT[1]) or 1
+        # 客户区不是基准尺寸时框内像素也跟着缩放，阈值按面积比例补回去。
+        scale = (height / float(reference_h)) or 1.0
+        half_band = max(4, int(battle_entry.DECK_PLATE_BAND * scale))
+        threshold = battle_entry.DECK_PLATE_MIN_PIXELS * scale * scale
+        found = 0
+        for row in range(battle_entry.DECK_ROWS):
+            for col in range(battle_entry.DECK_COLS):
+                y0, y1 = int(height * row / 3), int(height * (row + 1) / 3)
+                x0, x1 = int(width * col / 3), int(width * (col + 1) / 3)
+                center_y = (y0 + y1) // 2
+                strip = pixels[max(0, center_y - half_band):center_y + half_band,
+                               x0:x1]
+                if strip.size == 0:
+                    continue
+                if float(strip.mean()) > battle_entry.DECK_PLATE_MAX_MEAN:
+                    continue        # 这条带是亮的：不是名牌（白屏/还没渲染）
+                high = strip.max(axis=2)
+                low = strip.min(axis=2)
+                if int(np.count_nonzero((low > 185)
+                                       & ((high - low) < 55))) >= threshold:
+                    found += 1
+        return {"text": (f"9 格里 {found} 格有卡组名牌文字"
+                         f"（≥{battle_entry.DECK_MIN_SLOTS_FOUND} 才算卡组界面）"),
+                "ok": found >= battle_entry.DECK_MIN_SLOTS_FOUND}
 
     # ------------------------------------------------------------ 布局/命中
     def _card_height(self) -> int:
@@ -321,7 +495,8 @@ class CalibrationSession:
                            ("exit", self._exit_rect(width, height))):
             if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
                 return (name, None)
-        left, top, right, bottom = self.active["box"]
+        # 当前目标的框与鼠标事件同口径（都是屏幕上量出来的坐标），直接比较。
+        left, top, right, bottom = (int(v) for v in self.active["box"])
         if (right + 2 <= sx <= right + 2 + HANDLE
                 and bottom + 2 <= sy <= bottom + 2 + HANDLE):
             return ("corner", None)
@@ -387,7 +562,8 @@ class CalibrationSession:
                 self.hover = hover
                 self.dirty = True
             return
-        left, top, right, bottom = self.active["box"]
+        # 鼠标给的是屏幕坐标，而框本身也是屏幕上量出来的坐标：直接写入。
+        left, top, right, bottom = (int(v) for v in self.active["box"])
         if self.drag[0] == "move":
             _, dx, dy = self.drag
             box_width, box_height = right - left, bottom - top
@@ -397,47 +573,17 @@ class CalibrationSession:
             new_bottom = new_top + box_height
         else:  # resize（右下角手柄）
             new_left, new_top = left, top
-            new_right = min(width, max(left + MIN_SIZE, sx))
-            new_bottom = min(height, max(top + MIN_SIZE, sy))
+            new_right = min(width, max(left + self._active_min_size(), sx))
+            new_bottom = min(height, max(top + self._active_min_size(), sy))
         self.active["box"] = [new_left, new_top, new_right, new_bottom]
+        # 屏幕框是拖动时的即时口径，但它不是权威数据：每次改动都回写成
+        # 客户区相对坐标，窗口移动后 _sync_boxes() 才能把它带回去。
+        self._write_back_client(self.active)
         self.dirty = True
 
     # ------------------------------------------------------------ 保存
-    def _boxes_to_save(self) -> dict:
-        boxes = {}
-        for target in self.targets:
-            key = target["config_key"]
-            boxes[key] = self._clamp(target["box"])
-            if key == "ai_win_rate_roi":
-                # AI胜率兜底区域永远跟着主区域外扩，不给用户单独拖。
-                boxes["ai_win_rate_wide_roi"] = list(
-                    expand_box(boxes[key], AI_WIN_RATE_WIDE_MARGIN))
-        return boxes
-
-    def save(self, flash: bool = False) -> bool:
-        boxes = self._boxes_to_save()
-        path = _user_config_path()
-        try:
-            cfg = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(cfg, dict):
-                cfg = {}
-        except Exception:
-            cfg = {}
-        cfg.update(boxes)
-        try:
-            path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
-                            encoding="utf-8")
-        except OSError as exc:
-            print(f"[校准] 保存失败：{exc}")
-            return False
-        if flash:
-            self.saved_flash_until = time.time() + 1.5
-        self.dirty = True
-        print(f"[校准] 已保存 {len(boxes)} 个区域 -> {path}")
-        for key, box in boxes.items():
-            print(f"[校准]   {key} = {tuple(box)}")
-        print("[校准] 重开对局生效（不覆盖名字/日志目录/延时等其它配置）")
-        return True
+    # `_boxes_to_save()` / `save()` 见下面「坐标口径 / 实时跟随」一节：保存要先把
+    # 各框按当前客户区几何同步（见 `_sync_boxes`），所以和它们放在一起。
 
     # ------------------------------------------------------------ OCR
     def _grab_crop(self, box):
@@ -516,11 +662,181 @@ class CalibrationSession:
                          daemon=True).start()
 
     # ------------------------------------------------------------ 渲染
-    def _preview_config(self):
-        """把「正在拖的框」包成 config，交给 paint_layer 画成实时的叠加层。"""
-        boxes = {target["config_key"]: tuple(target["box"])
+    def _mapping(self):
+        """本帧使用的客户区几何（测试可注入；不传则自动探测炉石客户区）。"""
+        if self._mapping_provider is not None:
+            try:
+                return self._mapping_provider()
+            except Exception:
+                return None
+        # 实时跟踪：窗口一动，缓存立刻失效 → 拖动窗口时框实时跟着走。
+        try:
+            import window_tracker
+            window_tracker.ensure_started()
+        except Exception:
+            pass
+        return auto_mapping()
+
+    # -------------------------------------------------- 坐标口径 / 实时跟随
+    def _read_targets(self) -> list[dict]:
+        """从配置读一遍目标框，统一成**客户区相对坐标 + 屏幕坐标**两份。
+
+        `calibration_targets()` 给的值已经是客户区相对坐标 —— 口径解释（老配置的
+        屏幕坐标、坏掉的 `roi_frame` 标记……）由 `config.RecommendationConfig`
+        调 `display_mapping.interpret_roi_box` 完成，**这里不再解释**：同一份数据
+        解释两次＝把窗口偏移算两遍，框会整体错位。
+        """
+        config = (self._config_provider() if self._config_provider is not None
+                  else _load_config())
+        targets = []
+        for target in calibration_targets(config):
+            target = dict(target)
+            target["client_box"] = list(int(v) for v in target["box"])
+            target["box"] = list(target["client_box"])
+            targets.append(target)
+        return targets
+
+    def _reload_targets(self) -> None:
+        """重新读一遍配置里的目标框（保留当前选中的目标）。
+
+        只用于一种边界情况：**打开校准窗口时炉石还没显示**（读不到客户区几何，
+        那一刻配置里的老坐标没法换算），之后炉石显示出来了 —— 这时补读一次，
+        框才会落到正确位置。用户一旦动过框就不再补读，免得把他的调整冲掉。
+        """
+        active_key = self.active["key"] if self.targets else ""
+        self.targets = self._read_targets()
+        self.active_index = 0
+        for index, target in enumerate(self.targets):
+            if target["key"] == active_key:
+                self.active_index = index
+                break
+        self._box_frame_sig = None
+        self.dirty = True
+
+    @staticmethod
+    def _mapping_signature(mapping):
+        """客户区几何的指纹（位置 + 尺寸）：变了就要重新推导屏幕框。"""
+        if mapping is None:
+            return None
+        return (int(mapping.screen_left), int(mapping.screen_top),
+                int(mapping.width), int(mapping.height))
+
+    def _sync_boxes(self, mapping=None) -> None:
+        """按当前客户区几何重算每个目标的**屏幕框**（每帧画之前调一次）。
+
+        这是"框跟着炉石窗口实时移动"的关键：`client_box` 不动，屏幕框每帧跟着
+        几何走。几何指纹没变时是空操作（一次元组比较，可以按帧调用）。
+        """
+        if self._reload_pending and mapping is not None and not self._edited:
+            self._reload_pending = False
+            self._reload_targets()
+            print("[校准] 炉石客户区已可读：重新读取了一遍配置里的区域坐标。")
+        sig = self._mapping_signature(mapping)
+        if sig is None and self._box_frame_sig is not None:
+            # 炉石最小化/关掉了：保持最后一次的位置，别让框塌到屏幕左上角。
+            return
+        if sig == self._box_frame_sig:
+            return
+        self._box_frame_sig = sig
+        from display_mapping import box_to_screen
+        for target in self.targets:
+            screen_box = list(box_to_screen(target["client_box"], mapping))
+            if screen_box != list(target["box"]):
+                target["box"] = screen_box
+                self.dirty = True
+
+    def _write_back_client(self, target, mapping=None) -> None:
+        """拖框/保存后把**屏幕框**回写成 `client_box`（权威口径）。
+
+        拖动时以屏幕框为准（鼠标事件就是屏幕坐标），只在每次改动后回写一次；
+        反过来"客户区 → 屏幕"在非整数缩放下有 floor/ceil 的 1px 漂移，反复
+        往返会积累误差，所以方向固定为"屏幕 → 客户区"。
+        `clamp=False`：框可以被拖到炉石窗口外面（负的客户区坐标是合法的），
+        这样它跟着窗口走时仍然对得上。
+        """
+        from display_mapping import box_from_screen
+        if mapping is None:
+            mapping = self._mapping()
+        target["client_box"] = list(
+            box_from_screen(tuple(int(v) for v in target["box"]), mapping,
+                            clamp=False))
+        self._edited = True
+
+    # -------------------------------------------------- 保存
+    def _boxes_to_save(self, mapping=None) -> dict:
+        boxes = {}
+        mapping = self._mapping() if mapping is None else mapping
+        self._sync_boxes(mapping)
+        from display_mapping import box_from_screen
+        for target in self.targets:
+            key = target["config_key"]
+            # 先把屏幕框收进屏幕内（不然存下来的是屏幕外的死框），再换算成
+            # **客户区相对坐标** —— ui_config.json 统一存这个口径。
+            screen_box = self._clamp(target["box"])
+            target["box"] = list(screen_box)
+            target["client_box"] = list(
+                box_from_screen(screen_box, mapping, clamp=False))
+            boxes[key] = list(target["client_box"])
+            if key == "ai_win_rate_roi":
+                # AI胜率兜底区域永远跟着主区域外扩，不给用户单独拖。
+                boxes["ai_win_rate_wide_roi"] = list(
+                    expand_box(boxes[key], AI_WIN_RATE_WIDE_MARGIN))
+        return boxes
+
+    def save(self, flash: bool = False) -> bool:
+        mapping = self._mapping()
+        boxes = self._boxes_to_save(mapping)
+        path = _user_config_path()
+        try:
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception:
+            cfg = {}
+        cfg.update(boxes)
+        if mapping is None:
+            # 没有客户区几何时换算退化成恒等：这次存下来的其实是**屏幕坐标**，
+            # 绝不能标成 client（否则下次炉石一显示，所有框都会被整体偏移一次）。
+            # 老用户踩过这个坑：标记是 client、值是屏幕坐标 → 框全跑偏还拖不动。
+            print("[校准] 警告：读不到炉石客户区（未运行/最小化），这次按**屏幕坐标**"
+                  "保存（不写 client 标记）。请开着炉石重新校准一次并按 S，"
+                  "否则窗口移动后位置会偏。")
+            cfg["roi_frame"] = ROI_FRAME_SCREEN
+        else:
+            # 记下坐标口径：保存后所有 ROI 都是客户区相对坐标，下次读取不用再猜。
+            cfg["roi_frame"] = ROI_FRAME_CLIENT
+        try:
+            path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+        except OSError as exc:
+            print(f"[校准] 保存失败：{exc}")
+            return False
+        if mapping is None:
+            # 没有客户区几何时换算退化成恒等，「客户区相对」其实等于屏幕坐标：
+            # 现在能用，但窗口一挪就对不上，必须明确告诉用户。
+            print("[校准] 警告：读不到炉石客户区（未运行/最小化），坐标按无偏移"
+                  "保存。请开着炉石重新校准一次，否则窗口移动后位置会偏。")
+        if flash:
+            self.saved_flash_until = time.time() + 1.5
+        self.dirty = True
+        print(f"[校准] 已保存 {len(boxes)} 个区域 -> {path}")
+        for key, box in boxes.items():
+            print(f"[校准]   {key} = {tuple(box)}")
+        print("[校准] 重开对局生效（不覆盖名字/日志目录/延时等其它配置）")
+        return True
+
+    def _preview_config(self, mapping=None):
+        """把「正在拖的框」包成 config（**客户区相对口径**）。
+
+        给 `panel_state`（截推荐区域判定盒子面板）等仍然按"客户区相对 + mapping"
+        取值的消费者用。**直接用权威的 `client_box`**，不做屏幕→客户区的往返
+        换算：绘制叠加层走 `overrides`（屏幕坐标），两条路径各自从同一份权威
+        数据出发，就不会出现"切换目标时其他框跳位置"。
+        """
+        boxes = {target["config_key"]: tuple(target.get("client_box")
+                                             or target["box"])
                  for target in self.targets}
-        main = boxes.get("ai_win_rate_roi", (110, 8, 270, 48))
+        main = boxes.get("ai_win_rate_roi", AI_WIN_RATE_REGION)
         return SimpleNamespace(
             desktop_size=(self.width or 1920, self.height or 1080),
             desktop_dpi=96,
@@ -529,7 +845,19 @@ class CalibrationSession:
                                            (860, 810, 1060, 890)),
             ai_win_rate_roi=main,
             ai_win_rate_wide_roi=expand_box(main, AI_WIN_RATE_WIDE_MARGIN),
+            post_game_start_roi=boxes.get("post_game_start_roi",
+                                          POST_GAME_START_BUTTON_REGION),
+            post_game_rank_roi=boxes.get("post_game_rank_roi",
+                                         POST_GAME_RANK_REGION),
+            main_menu_battle_roi=boxes.get("main_menu_battle_roi",
+                                           MAIN_MENU_BATTLE_REGION),
+            deck_grid_roi=boxes.get("deck_grid_roi", DECK_GRID_REGION),
         )
+
+    def _screen_boxes(self):
+        """当前所有目标的**屏幕坐标**框（绘制叠加层直接用）。"""
+        return {target["key"]: tuple(int(v) for v in target["box"])
+                for target in self.targets}
 
     def render(self, width: int, height: int):
         """画出一整屏 RGBA：所有区域框 + 提示条 + 当前目标高亮 + 目标条/预览。
@@ -538,14 +866,26 @@ class CalibrationSession:
         否则同一个框会被画两次（两次描边差 1px，外圈偏暗），看起来像"一个区域
         有两个框"；它的标签也不画（坐标在屏幕正中央的目标条里已经有了，标签底
         又会紧贴框边）。
+
+        **一帧只取一次几何**：先按当前客户区几何把所有目标框同步成屏幕坐标
+        （`_sync_boxes`，窗口一动就重算 → 框实时跟着窗口走），然后两条绘制路径
+        （`paint_layer` 的 overrides 与 `_draw_active_target`）共用同一批屏幕坐标。
         """
         active_key = self.active["key"]
+        # 一帧只解析一次：两条绘制路径共用，绝不允许各自取。
+        mapping = self._mapping()
+        # 窗口移动/缩放后立刻重算屏幕框（帧内只算一次，之后是空操作）。
+        self._sync_boxes(mapping)
+        # 叠加层里所有框都用各自的**屏幕坐标**直接画（overrides），当前目标由
+        # _draw_active_target 用同一批坐标画粗框 —— 两条路径天然落点一致。
         layer = paint_layer(width, height, self.panel_state,
-                            self._preview_config(),
-                            skip_keys=(active_key,))
+                            self._preview_config(mapping),
+                            skip_keys=(active_key,), mapping=mapping,
+                            overrides=self._screen_boxes(),
+                            status=self.target_status)
         draw = ImageDraw.Draw(layer)
-        self._draw_active_target(draw, width, height)
-        self._draw_card(draw, width, height)
+        self._draw_active_target(draw, width, height, mapping)
+        self._draw_card(draw, width, height, mapping)
         self._draw_preview(draw, width, layer)
         return layer
 
@@ -556,13 +896,19 @@ class CalibrationSession:
             return
         draw.text(xy, text, fill=color, font=font)
 
-    def _draw_active_target(self, draw, width: int, height: int) -> None:
+    def _draw_active_target(self, draw, width: int, height: int,
+                            mapping=None) -> None:
         """把当前目标画成粗框 + 右下角手柄。
 
         坐标写在正中央的目标条里，不在框旁边飘字：左上角的
         「AI胜率」浮动条贴着屏幕顶边，飘字要么出屏、要么压住别的框。
+
+        **不换算**：`self.active["box"]` 在 `render()` 里已经被 `_sync_boxes()`
+        按当前几何换算成屏幕坐标，`paint_layer` 那条路径用的也是**同一批**屏幕
+        坐标（overrides）—— 两条路径天然落在同一批像素上。这里若再换算一次就
+        等于把窗口偏移算了两遍，表现就是"切换目标时其他框的位置变了"。
         """
-        left, top, right, bottom = self.active["box"]
+        left, top, right, bottom = (int(v) for v in self.active["box"])
         color = _rgba(self.active["color"])
         draw.rectangle((left, top, right, bottom), outline=color, width=3)
         # 右下角缩放手柄
@@ -574,7 +920,8 @@ class CalibrationSession:
             if x < hx1 and y < hy1:
                 draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
 
-    def _draw_card(self, draw, width: int, height: int) -> None:
+    def _draw_card(self, draw, width: int, height: int,
+                   mapping=None) -> None:
         """目标条：目标列表 + 当前目标高亮 + 说明（自动换行）+ 保存/退出按钮。
 
         说明文字以前是整句一行画出去，句子一长就穿出卡片（用户反馈）。现在：
@@ -641,18 +988,25 @@ class CalibrationSession:
             line_y += HINT_LINE_H
         # 说明行数不足 3 行时把底部信息顶到固定位置（卡片高度已经算过换行数）。
         line_y = (card_bottom - CARD_PAD - SAVE_BTN_H - 8
-                  - 2 * INFO_LINE_H)
+                  - 3 * INFO_LINE_H)
 
         box = target["box"]
+        # 第一行 = 现在框在**屏幕上**的位置（跟着炉石窗口实时变）；
+        # 第二行 = 权威的**客户区相对**坐标（存进 ui_config.json 的就是它，
+        #          窗口移动/换分辨率后它不变，所以它才是"校对准了没有"的依据）。
         self._draw_text(draw, (card_left + CARD_PAD, line_y),
-                        f"当前：{box[0]},{box[1]} → {box[2]},{box[3]}"
+                        f"屏幕：{box[0]},{box[1]} → {box[2]},{box[3]}"
                         f"（{box[2] - box[0]}×{box[3] - box[1]}）", 13, TEXT_MAIN)
+        self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
+                        self._client_box_line(target), 13, TEXT_DIM)
         if time.time() < self.saved_flash_until:
-            self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
+            self._draw_text(draw,
+                            (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),
                             "已保存，重开对局生效", 13, TEXT_OK)
         else:
-            self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
-                            "S 保存 · Esc 退出 · 空白处鼠标可穿透", 13, TEXT_DIM)
+            self._draw_text(draw,
+                            (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),
+                            self._client_line(mapping), 13, TEXT_DIM)
 
         # ---- 底部两个按钮：保存（金） / 退出（灰） ----------------------
         for name, text, base, hover in (
@@ -664,6 +1018,36 @@ class CalibrationSession:
             draw.rectangle(rect, fill=bg, outline=CARD_BORDER, width=1)
             self._draw_text(draw, (rect[0] + 12, rect[1] + 8), text, 15,
                             BUTTON_TEXT)
+
+    @staticmethod
+    def _client_line(mapping=None) -> str:
+        """一行客户区几何（给画在卡片底部的提示用）。"""
+        if mapping is None:
+            try:
+                from display_mapping import display_mapping
+                mapping = display_mapping()
+            except Exception:
+                mapping = None
+        if mapping is None:
+            return "客户区未知（炉石未运行）· S 保存 · Esc 退出"
+        return (f"客户区 {mapping.width}×{mapping.height} @屏幕"
+                f"({mapping.screen_left},{mapping.screen_top}) · S 保存 · Esc 退出")
+
+    def _client_box_line(self, target, mapping=None) -> str:
+        """一行"这个框的客户区相对坐标是多少"（存进 ui_config.json 的权威值）。
+
+        直接用 `client_box`（而不是把屏幕框换算回去）：屏幕框每帧都在跟着窗口
+        变，唯独客户区相对坐标是稳定的，用户校准时看的就是它。
+        """
+        client = target.get("client_box")
+        if client is None:
+            return "客户区：与上面相同"
+        client = tuple(int(v) for v in client)
+        screen = tuple(int(v) for v in target["box"])
+        if client == screen:
+            return "客户区：与上面相同"
+        return (f"客户区：{client[0]},{client[1]} → "
+                f"{client[2]},{client[3]}")
 
     def _draw_preview(self, draw, width: int, layer) -> None:
         left, top, right, bottom = self._preview_rect(width)
@@ -798,6 +1182,11 @@ class CalibrationSession:
                     state = panel_state(self._preview_config())
                     if state is not self.panel_state:
                         self.panel_state = state
+                        self.dirty = True
+                    # 当前目标自己的判定（只有识别类目标有）：拖框时当场看准没准。
+                    before = self.target_status
+                    self._check_active_target()
+                    if self.target_status != before:
                         self.dirty = True
                 # OCR 只在校准「推荐面板」时自动跑：拖别的框时别占满 CPU。
                 if (self.ocr_enabled and self.active["key"] == "recommendation"

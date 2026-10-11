@@ -2,12 +2,17 @@
 
 回归背景：旧的复位点 (480, 540) 每局结束后停在牌组选择界面第二行第一个卡组上，
 复位后偶发误选中卡组；用户最终指定屏幕左上角 (70, 60) 作为待命点。
+
+MOUSE_RESET_POS 是**客户区相对**坐标；落到屏幕上要经 click.left_click 同一条
+换算（客户区尺寸 + 窗口偏移）。这里统一注入空映射，验证"客户区为基准"的取值；
+换算本身由 test_display_mapping / test_starship_launch 覆盖。
 """
 
 import unittest
 from unittest.mock import patch
 
 import click as hearthstone_click
+import display_mapping
 
 RESET = (70, 60)
 
@@ -34,22 +39,48 @@ class RecordingMouse:
 
 
 class MouseResetPositionTests(unittest.TestCase):
+    def setUp(self):
+        display_mapping.clear_mapping_cache()
+
+    def tearDown(self):
+        display_mapping.clear_mapping_cache()
+
     def test_reset_position_is_the_safe_spot(self):
         self.assertEqual(RESET, hearthstone_click.MOUSE_RESET_POS)
 
     def test_center_mouse_only_moves_the_pointer(self):
         mouse = RecordingMouse()
 
-        with patch.object(hearthstone_click, "Controller", return_value=mouse):
+        with (
+            patch.object(hearthstone_click, "Controller", return_value=mouse),
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
+        ):
             hearthstone_click.center_mouse()
 
         self.assertEqual([("position", RESET)], mouse.events)
+
+    def test_center_mouse_follows_the_client_origin(self):
+        """客户区在 (960,551) 时，待命点也要整体跟着偏移。"""
+        mouse = RecordingMouse()
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, 1920, 1080),
+            screen_left=960, screen_top=551)
+
+        with (
+            patch.object(hearthstone_click, "Controller", return_value=mouse),
+            patch.object(hearthstone_click, "_display_mapping",
+                         return_value=mapping),
+        ):
+            hearthstone_click.center_mouse()
+
+        self.assertEqual([("position", (960 + 70, 551 + 60))], mouse.events)
 
     def test_park_mouse_moves_without_clicking(self):
         mouse = RecordingMouse()
 
         with (
             patch.object(hearthstone_click, "Controller", return_value=mouse),
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
             patch.object(hearthstone_click.time, "sleep"),
         ):
             hearthstone_click.park_mouse()
@@ -61,6 +92,7 @@ class MouseResetPositionTests(unittest.TestCase):
 
         with (
             patch.object(hearthstone_click, "Controller", return_value=mouse),
+            patch.object(hearthstone_click, "_display_mapping", return_value=None),
             patch.object(hearthstone_click.time, "sleep"),
         ):
             with hearthstone_click.hearthstone_action_session():
