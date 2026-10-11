@@ -31,6 +31,13 @@ description: 用 hsctl 命令行实时控制炉石传说自动化脚本（HSLege
    最多一行说明（档位 + 是否退化为整屏 + 时间）。详见 §7「实时画面」。
    只有图**不能**反映用户想问的东西时（例如他没在跑、图退化成桌面）才追加解释。
    这是铁律 1「先探活」的唯一例外 —— 抓图本身只读且会自查，连不上会返回退出码 3。
+9. **只用脚本固有命令，绝不自己造**。所有操作都走 `hsctl` 的现成子命令；
+   拿不准有什么命令、参数怎么写时，**当场查**：
+   `python hsctl.py --help`（全部命令）、`python hsctl.py <命令> --help`（该命令的参数）、
+   `docs/CLI.md`（完整参考）。禁止 agent 自己写轮询循环、sleep 等待、临时脚本去
+   模拟固有功能（如"打完这把停"必须用 `stop --after-game`，不要自建状态查询循环；
+   串行任务用 `queue run`，不要自己编排）。固有命令覆盖不了的需求，先问用户
+   是否要给脚本加功能，而不是绕过它。
 
 ## 1. 前置检查（每次会话开头）
 
@@ -132,6 +139,10 @@ Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Un
   但 ROI 已经在 `ui_config.json` 里时不用重校 —— 只要盒子的布局没变。
 
 ## 4. 命令速查
+
+> 本节只是常用摘录；**全集与参数以 `python hsctl.py --help` 和
+> `python hsctl.py <命令> --help` 为准**（argparse 自动生成，永远和代码同步），
+> 完整文档见 `docs/CLI.md`。还有个交互模式：`python hsctl.py repl`。
 
 ```bash
 # 观测
