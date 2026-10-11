@@ -249,6 +249,7 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 | `human-like [set …]` | 活人感：`--enabled/--no-enabled`、`--hand-hover/--no-hand-hover`、`--minion-hover/--no-minion-hover`、`--post-delay-min/-max`、`--hover-min/-max`、`--minion-hover-min/-max` |
 | `liveness [set …]` | 存活检测：`--enabled/--no-enabled`、`--warn`（秒）、`--stop`（秒） |
 | `concede [set …]` | 自动投降：`--enabled/--no-enabled`、`--threshold`（%）、`--rounds` |
+| `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
 | `rank-stop [set …]` | 上分停止：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N` |
 | `config [set …]` | 账号与日志目录：`--name`（含 `#编号`）、`--log-root`。带 `hot` 时会立刻注入运行中的日志读取器（`log_state.MY_NAME`），后续昵称判定即用新值 |
 

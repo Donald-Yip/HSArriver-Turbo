@@ -38,7 +38,7 @@
 
 ---
 
-## 🚀 安装（4 步）
+## 🚀 安装（5 步）
 
 ### 1. 装 Python 3.12
 到 <https://www.python.org/downloads/> 下载 **Python 3.12**，安装时**务必勾选 `Add python.exe to PATH`**。
@@ -70,6 +70,25 @@ python web_ui.py
 ### 4. 打开炉石 + 炉石盒子
 盒子用**简体中文**，左侧「推荐打法」面板要完整显示、不被别的窗口遮挡。
 
+### 5. 把环境固定下来（换机器 / 换 agent 必看）
+路径、解释器**因机器而异**，千万不要写死在代码或文档里。本机专属配置统一放
+`log/env.json`（**已被 `.gitignore` 忽略**，不会进仓库；仓库里只有占位符模板
+`env.example.json`）。会话第一条命令跑自诊，照它给的下一步做：
+
+```powershell
+python hsctl.py --json doctor          # 看 verdict：环境对不对 / 控制台在不在 / 下一步做什么
+python hsctl.py env discover           # 列出本机候选解释器（版本 + 依赖逐项校验，不写盘）
+python hsctl.py env pin "D:\miniconda3\envs\HTL\python.exe"   # 选定并保存（换成你自己的路径）
+python hsctl.py --json doctor          # 复验到 verdict=env_ok
+```
+
+解释器查找顺序是唯一权威的：`HS_PYTHON` 环境变量 → `log/env.json` → 当前解释器
+（校验通过才用）→ 自动探测候选。**任何** Python 跑 `hsctl` 时，若当前解释器不合格
+会自动重入到合格的那个；一个都不合格则退出码 `4`。所以 agent 不需要手工切环境。
+
+> 计划任务启动器用的解释器也以 `log/env.json` 为准，换机器只需重跑上面这 4 条，
+> 不用手改任何 `.cmd`。
+
 ---
 
 ## 🎮 使用（5 步）
@@ -83,7 +102,7 @@ python web_ui.py
 | 炉石日志目录 | 炉石安装目录下的 `Logs` 文件夹，例如 `D:\Hearthstone\Logs`。点旁边的 [检测] 可以验证 |
 
 ### 2. 校准盒子面板（只需一次）
-点「🎯 校准区域」卡片里的 **[📐 打开校准窗口（屏幕上）]**，把**绿框**拖到盒子「打法参考A」面板上，看到提示条变成绿色「已检测到盒子面板」即可，按 **S**（或点卡片底部的 **「保存全部区域」**）保存，五个区域一起存；点 **「退出」** 或按 **Esc** 关掉窗口。
+点「🎯 校准区域」卡片里的 **[📐 打开校准窗口（屏幕上）]**，把**绿框**拖到盒子「打法参考A」面板上，看到提示条变成绿色「已检测到盒子面板」即可，按 **S**（或点卡片底部的 **「保存全部区域」**）保存，12 个目标一起存；点 **「退出」** 或按 **Esc** 关掉窗口。
 
 ### 3. 看「🧪 环境自检」
 页面顶部那张卡片每项一行：✅ 达标、⚠️ 和推荐值不同（还能跑）、❌ 不满足（**必须先修**）。缺依赖会直接给 pip 命令。
@@ -133,12 +152,18 @@ python web_ui.py
 除了网页，还可以用 `hsctl` 从命令行**实时**控制脚本 —— 也正好是给 AI agent 用的入口：
 
 ```powershell
+python hsctl.py --json doctor       # 【每次会话第一条】自诊：环境 / 控制台 / 提权 / 下一步做什么
 python hsctl.py status              # 看状态（阶段 / 账号是否匹配 / 战绩 / 参数）
 python hsctl.py log -f              # 实时跟随日志（Ctrl+C 退出）
 python hsctl.py screenshot          # 抓一帧画面存成 PNG，返回路径（agent 看画面用）
 python hsctl.py ui                  # 现在在哪个界面（主界面 / 选择套牌）+ 匹配分
-python hsctl.py enter-battle --deck 8   # 一键进入对战：拉起炉石→点传统对战→选第 8 副
+python hsctl.py mode wild           # 手动切换对战模式：点右上角模式按钮 → 点狂野盾牌
+python hsctl.py deck 6              # 每局自动选第 6 副卡组（1-9；deck 0 关掉）
+python hsctl.py deck-click 6        # 秒级快选：直接点选择套牌界面第 6 格（不走状态机）
+python hsctl.py enter-battle        # 一键进入对战：拉起炉石 → 点传统对战 → 停在选择套牌界面
+python hsctl.py enter-battle --deck 6 --start   # 顺带选第 6 副，并点「开始」排队
 python hsctl.py start               # 开始对战
+python hsctl.py concede now         # 手动投降：立刻点「齿轮 → 认输」（运行中可用）
 python hsctl.py stop --after-game   # 打完本局再停
 python hsctl.py delays set pre_action_delay_seconds=5    # 运行中热改参数
 python hsctl.py serve start         # 后台拉起控制台（网页照旧可用）
@@ -178,6 +203,45 @@ python hsctl.py serve task-status     # 确认任务在、且勾了最高权限
 > 脚本本身**不需要**监听公网，控制台只绑 `127.0.0.1`（[`config.py`](config.py#L98)），请勿做端口转发。
 > 注意 WorkBuddy 的「完全访问权限」是它自己的确认层，**不等于** Windows 管理员权限。
 
+### 交给其他 AI agent 操控（WorkBuddy / DSH / Claude Code…）
+
+`hsctl` 是**零依赖**的薄客户端，任何能在**本机跑命令**的 agent 都能直接驱动脚本，
+不需要额外装库、不需要动脚本代码。给 agent 的最短闭环就四条：
+
+```powershell
+python hsctl.py --json doctor     # ① 会话第一条：拿到 verdict + next_steps
+# ② 照抄 next_steps 里的命令（通常 1-2 条，把环境/控制台修好）
+python hsctl.py --json doctor     # ③ 复验到 verdict=env_ok
+python hsctl.py --json status     # ④ 之后按需探活/干活
+```
+
+| 关键点 | 说明 |
+| --- | --- |
+| **先 `doctor` 再干别的** | 它一条命令同时回答：环境对不对、服务在不在跑、权限够不够、上一次为什么失败，并直接给出下一步该跑什么 |
+| **一律加 `--json`** | 机器可读、错误也走 stdout（退出码 `0/1/2/3/4` 可判断），agent 只读需要的字段，别整段回显 |
+| **别自造轮子** | 只用脚本固有命令；命令全集以 `python hsctl.py --help` 与 [`docs/CLI.md`](docs/CLI.md) 为准，不要写 `sleep`/轮询脚本去模拟已有功能 |
+| **截图不等于能看图** | `screenshot` 只抓图返回路径；**agent 不要自己读图判断界面**，把图发给用户目视确认（见 [`AGENTS.md`](AGENTS.md) §6） |
+| **解释器由脚本自管** | 本机合格的 Python 路径存在 `log/env.json`；跑错解释器时 `hsctl` 会自动重入到合格的那个，agent 不用手工切环境 |
+
+**典型编排**（照抄即可）：
+
+```powershell
+python hsctl.py --json doctor                          # 环境 + 控制台自诊
+python hsctl.py serve start --via-task                 # 没在跑就拉起来（不弹 UAC，需先装过计划任务）
+python hsctl.py --json status                          # 看 is_admin / name_match / 阶段
+python hsctl.py prepare                                # 开浮窗 + 切炉石前台（不开打）
+python hsctl.py mode wild                              # 需要时切模式
+python hsctl.py deck 6                                 # 需要时设自动选第 6 副
+python hsctl.py start                                  # 开打
+python hsctl.py log -f                                 # 跟随日志观察（或 --json status --watch 2）
+python hsctl.py concede now                            # 打不过：手动投降（运行中可用）
+python hsctl.py stop --after-game                      # 收工：打完本局再停
+```
+
+> 想让 agent 一次提交**多条**动作、断线也不影响？用待做命令队列：
+> `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "deck 6" "start"`。
+> 写法与支持的动作见 [`docs/CLI.md`](docs/CLI.md) 与 [`SKILL.md`](SKILL.md) §4。
+
 ---
 
 ## 🎯 校准截图区域
@@ -190,7 +254,9 @@ python hsctl.py serve task-status     # 确认任务在、且勾了最高权限
 | 浮窗 | 点 **「校准」**（再点一次收起） |
 | 命令行 | `python calibrate_roi.py` |
 
-**七个可校准目标**（**Tab** 切换，或直接点目标条里的一行；**S** 保存、**Esc** 退出）：
+**12 个可校准目标**（**Tab** 切换，或直接点目标条里的一行；**S** 保存、**Esc** 退出）。
+前 8 个是**区域框**（写入 `ui_config.json` 的 ROI 键），后 4 个是**点击点**（框中心=点击点，
+写入 `mode_click` 段）：
 
 | # | 框 | 写入 `ui_config.json` | 怎么对齐 |
 | --- | --- | --- | --- |
@@ -200,18 +266,27 @@ python hsctl.py serve task-status     # 确认任务在、且勾了最高权限
 | 4 | 🩵 青绿框 | `post_game_start_roi` | 框住每局结束底部的「开始」按钮——脚本**用框的正中心去点它** |
 | 5 | 🟪 紫框 | `post_game_rank_roi` | 框住每局结束右上角的**段位名次数字**（有数字=已上传说，数字就是名次；「上分停止」靠它） |
 | 6 | 🟨 金框 | `main_menu_battle_roi` | **贴住主界面「传统对战」那四个字**（不用框整条银条）：脚本在框 ±40px 内用这四个字的图案找它，认到就点认到的位置 |
-| 7 | 🩵 天蓝框 | `deck_grid_roi` | 框住选择套牌界面 **9 个卡组整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
+| 7 | 🩵 粉框 | `deck_select_title_roi` | 框住选择套牌界面顶部的「**选择套牌**」四个字——**认标题判界面，绝不能用右下角「开始」**（没选中卡组时「开始」不出现，只认它会陷入死循环） |
+| 8 | 🩵 天蓝框 | `deck_grid_roi` | 框住选择套牌界面 **9 个卡组整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
+| 9 | ✛ 模式按钮 | `mode_click.menu_open` | 框住选卡组界面**右上角的模式按钮**：点它弹出狂野/标准/休闲菜单（**框中心=点击点**） |
+| 10 | ✛ 狂野 | `mode_click.wild` | 框住弹出菜单**左边**的无限符号盾牌（狂野模式）：框中心=实际点击点 |
+| 11 | ✛ 标准 | `mode_click.standard` | 框住弹出菜单**中间**的圣甲虫盾牌（标准模式）：框中心=实际点击点（本机实测默认值偏高 100px，点不到就往下拖） |
+| 12 | ✛ 休闲 | `mode_click.casual` | 框住弹出菜单**右边**的太阳盾牌（休闲模式）：框中心=实际点击点 |
 
-> 目标 6/7 是**界面识别**用的（认出界面才决定点什么）。拖它们的时候顶部提示条会实时显示判定结果
+> 目标 6/7/8 是**界面识别**用的（认出界面才决定点什么）。拖它们的时候顶部提示条会实时显示判定结果
 > （`框内文字匹配 1.00（阈值 0.80），对准了` / `9 格里 9 格有卡组名牌文字`），用的是脚本运行时
-> **同一个**判定函数，所以不会出现"这里说对、脚本说不对"。目标 6 是文字框（259×27），缩放下限
-> 单独放宽到 20px，否则手柄根本拖不出这么薄的框。
+> **同一个**判定函数，所以不会出现"这里说对、脚本说不对"。目标 6/7 是文字框（传统对战 259×27、
+> 选择套牌标题 104×24），缩放下限单独放宽到 20px，否则手柄根本拖不出这么薄的框。
+>
+> 目标 9-12 是「手动切换对战模式」（`hsctl mode`）的落点：**框中心就是点击点**，改完**立即生效**，
+> 存进 `ui_config.json` 的 `mode_click` 段。想核对坐标又不点击：`python hsctl.py --json screenshot --points mode`
+> 会把四个点画成红十字标在截图上。
 
 > 目标条里当前目标会高亮（左侧一条目标色竖条），说明文字在卡片内**自动换行**（冒号前的标题段金色高亮），不会穿出卡片；底部两个按钮 **「保存全部区域 (S)」** 和 **「退出 (Esc)」** 都能用鼠标点，悬停会提亮（背景透明的部分仍然鼠标穿透）。
 
 > 屏幕上还会画出**只读**的参考框：🟥 红细框（AI胜率兜底区域）、✛ 黄十字（阶段判定点）。**框以外的画面鼠标穿透**，可以边看游戏边调。
 
-> **框会实时跟着炉石窗口走**：拖动/缩放炉石窗口时七个框一起动（不需要重新校准）。
+> **框会实时跟着炉石窗口走**：拖动/缩放炉石窗口时所有框一起动（不需要重新校准）。
 > 保存写入的是**客户区相对坐标**（`roi_frame: "client"`），换个分辨率/位置也不会偏。
 > 老配置第一次打开时会自动判断每个框的口径并把判断结果打印出来，按一次 **S** 即升级成新格式。
 
