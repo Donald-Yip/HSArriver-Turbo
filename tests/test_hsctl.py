@@ -11,10 +11,13 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import socket
+import tempfile
 import threading
 import unittest
 import unittest.mock
+import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -734,6 +737,71 @@ class ElevationTests(unittest.TestCase):
                                     "--wait", "1"])
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("触发计划任务失败", err)
+        self.assertIn("PowerShell", err)
+
+    # ---- schtasks 被策略拦掉 → PowerShell 兜底
+    def test_run_task_now_falls_back_to_powershell(self):
+        """有的机器把 schtasks.exe 列进黑名单：必须自动改走 Start-ScheduledTask。"""
+        calls = []
+
+        def fake_run(argv):
+            calls.append(argv)
+            if argv[0] == "schtasks":
+                return 1, "Access is denied."
+            return 0, ""
+
+        with unittest.mock.patch.object(hsctl, "_run_quiet",
+                                        side_effect=fake_run):
+            result = hsctl._run_task_now()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("powershell", result["mechanism"])
+        self.assertIn("schtasks", calls[0][0])
+        self.assertEqual("powershell", calls[1][0])
+        command = " ".join(calls[1])
+        self.assertIn("Start-ScheduledTask", command)
+        self.assertIn(hsctl.TASK_NAME, command)
+
+    def test_run_task_now_prefers_schtasks(self):
+        calls = []
+
+        def fake_run(argv):
+            calls.append(argv)
+            return 0, ""
+
+        with unittest.mock.patch.object(hsctl, "_run_quiet",
+                                        side_effect=fake_run):
+            result = hsctl._run_task_now()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual("schtasks", result["mechanism"])
+        self.assertEqual(1, len(calls))
+
+    def test_run_task_now_reports_both_failures(self):
+        with unittest.mock.patch.object(hsctl, "_run_quiet",
+                                        return_value=(1, "拦了")):
+            result = hsctl._run_task_now()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("schtasks", result["detail"])
+        self.assertIn("PowerShell", result["detail"])
+
+    def test_via_task_uses_the_powershell_fallback(self):
+        with unittest.mock.patch.object(
+                hsctl, "_task_state",
+                return_value={"exists": True, "highest": True}), \
+                unittest.mock.patch.object(
+                    hsctl, "_run_task_now",
+                    return_value={"ok": True, "mechanism": "powershell",
+                                  "detail": "schtasks 不可用"}), \
+                unittest.mock.patch.object(hsctl, "_wait_for_console",
+                                           return_value="http://127.0.0.1:8765"), \
+                unittest.mock.patch.object(hsctl, "_report_ready"):
+            code, out, _ = run_cli([*self.base, "serve", "start", "--via-task",
+                                    "--wait", "1"])
+
+        self.assertEqual(code, hsctl.EXIT_OK)
+        self.assertIn("PowerShell", out)
 
     # ---- install-task / uninstall-task / task-status
     def test_install_task_without_admin_prints_command_and_does_nothing(self):
@@ -924,6 +992,102 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 hsctl.main(["no-such-command"])
         self.assertEqual(ctx.exception.code, hsctl.EXIT_USAGE)
+
+
+class DoctorAndEnvTests(unittest.TestCase):
+    """`hsctl doctor` / `hsctl env`：跨机器环境的"自诊 + 保存"入口。
+
+    这两条命令是给别的 agent 用的：拿到 verdict 与 next_steps 后自己配置并保存，
+    所以这里锁住"输出字段 + 保存到本机 log/env.json"的行为。
+    """
+
+    def setUp(self):
+        self.console = _FakeConsole({"/api/status": dict(STATUS_FIXTURE),
+                                     "/api/selfcheck": {"ok": True, "result": {
+                                         "ok": True, "python": "3.12.14",
+                                         "executable": hsctl._normalize_python(
+                                             os.sys.executable)}}})
+        self.addCleanup(self.console.close)
+        self.base = ["--port", str(self.console.port)]
+        self.tmp = Path(tempfile.gettempdir()) / (
+            f"hs_doctor_{os.getpid()}_{uuid.uuid4().hex[:8]}")
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.env_file = self.tmp / "env.json"
+        self.patchers = [unittest.mock.patch.object(hsctl, "ENV_FILE",
+                                                    self.env_file),
+                         unittest.mock.patch.object(hsctl, "ROOT", self.tmp),
+                         unittest.mock.patch.object(hsctl, "_where_pythons",
+                                                    return_value=[])]
+        for item in self.patchers:
+            item.start()
+        self.addCleanup(lambda: [p.stop() for p in self.patchers])
+        os.environ.pop("HS_PYTHON", None)
+
+    def test_doctor_json_shape(self):
+        code, out, _ = run_cli(["--json", *self.base, "doctor"])
+
+        self.assertEqual(code, hsctl.EXIT_OK)
+        payload = json.loads(out)
+        for key in ("verdict", "this_python", "candidates", "console",
+                    "next_steps", "env_file", "env_template", "note"):
+            self.assertIn(key, payload)
+        self.assertTrue(payload["console"]["running"])
+        self.assertTrue(payload["console"]["url"].startswith("http://127.0.0.1:"))
+
+    def test_doctor_verdict_when_console_is_down(self):
+        dead_port = _free_port()
+        code, out, _ = run_cli(["--json", "--port", str(dead_port), "doctor"])
+
+        self.assertEqual(code, hsctl.EXIT_OK)
+        self.assertIn(json.loads(out)["verdict"],
+                      ("console_not_running", "env_ok_unsaved",
+                       "env_deps_missing", "env_no_valid_interpreter"))
+
+    def test_env_pin_saves_the_local_interpreter(self):
+        interpreter = str(self.tmp / ".venv" / "Scripts" / "python.exe")
+        Path(interpreter).parent.mkdir(parents=True, exist_ok=True)
+        Path(interpreter).write_text("", encoding="utf8")
+        record = {"ok": True, "executable": interpreter, "version": (3, 12, 14),
+                  "missing": [], "reason": "ok"}
+        with unittest.mock.patch.object(hsctl, "verify_python",
+                                        return_value=record):
+            code, out, _ = run_cli(["--json", "env", "pin", interpreter])
+
+        self.assertEqual(code, hsctl.EXIT_OK)
+        self.assertEqual(interpreter, json.loads(out)["interpreter"])
+        saved = json.loads(self.env_file.read_text(encoding="utf8"))
+        self.assertEqual(interpreter, saved["interpreter"])
+        self.assertEqual("hsctl env --pin", saved["source"])
+
+    def test_env_pin_rejects_bad_interpreter(self):
+        with unittest.mock.patch.object(
+                hsctl, "verify_python",
+                return_value={"ok": False, "executable": "X:/py.exe",
+                              "version": None, "missing": [],
+                              "reason": "缺依赖：pywin32"}):
+            code, _, err = run_cli(["env", "pin", "X:/py.exe"])
+
+        self.assertEqual(code, hsctl.EXIT_API)
+        self.assertIn("不合格", err)
+        self.assertIn("pywin32", err)
+        self.assertFalse(self.env_file.exists())
+
+    def test_env_discover_lists_candidates_with_verdicts(self):
+        candidate = str(self.tmp / "python.exe")
+        Path(candidate).write_text("", encoding="utf8")
+        record = {"ok": True, "executable": candidate, "version": (3, 12, 14),
+                  "missing": [], "reason": "ok"}
+        with unittest.mock.patch.object(hsctl, "discover_candidates",
+                                        return_value=[candidate]), \
+                unittest.mock.patch.object(hsctl, "verify_python",
+                                           return_value=record):
+            code, out, _ = run_cli(["--json", "env", "discover"])
+
+        self.assertEqual(code, hsctl.EXIT_OK)
+        payload = json.loads(out)
+        self.assertTrue(payload["candidates"][0]["ok"])
+        self.assertEqual(candidate, payload["candidates"][0]["path"])
 
 
 class HelpCoverageTests(unittest.TestCase):

@@ -26,6 +26,9 @@ image.png
 
 # cards.json 是核心数据文件，需要随仓库发布
 !cards.json
+# 解释器配置模板：只有占位符/说明，不含任何本机路径，必须入库
+# （实际生效的是本机专属的 log/env.json，被上面的 log/ 忽略）
+!env.example.json
 
 reasonix.toml
 
