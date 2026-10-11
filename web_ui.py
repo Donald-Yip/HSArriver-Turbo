@@ -2258,6 +2258,150 @@ def api_deck_click(body=None) -> dict:
     return dict(result)
 
 
+# ================================================================ 待做命令队列
+# 一次性提交多条命令，控制台后台线程按顺序执行。断线不影响；状态可查、可取消。
+_QUEUE_LOCK = threading.Lock()
+_QUEUE_STATE = {"running": False, "items": [], "current": -1,
+                "submitted_at": None, "finished_at": None, "message": ""}
+
+# step 字符串语法："动作 [参数...]"，参数支持 `key=value` 和裸整数（当 index/秒数）。
+# 例："stop mode=after_game" / "wait-stopped timeout=300" / "deck 1" / "deck-click 8"
+#     / "prepare" / "start" / "delay 5"
+_QUEUE_ACTIONS = {"stop", "wait_stopped", "deck", "deck_click", "prepare",
+                  "start", "delay"}
+
+
+def _queue_parse_step(text: str) -> dict:
+    """把一条 step 字符串解析成 {"action":..., "args": {...}}；不认识就抛 ValueError。"""
+    tokens = str(text).split()
+    if not tokens:
+        raise ValueError("空命令")
+    action = tokens[0].strip("-").replace("-", "_")
+    if action not in _QUEUE_ACTIONS:
+        raise ValueError(f"不认识的动作 {tokens[0]!r}（支持：{'/'.join(sorted(_QUEUE_ACTIONS))}）")
+    args = {}
+    for token in tokens[1:]:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            args[key.strip("-").replace("-", "_")] = value
+        else:
+            args["index"] = token if "index" not in args else args["index"]
+    return {"action": action, "args": args}
+
+
+def _queue_status_locked() -> dict:
+    return {"ok": True, "queue": dict(_QUEUE_STATE)}
+
+
+def _queue_wait(predicate, timeout: float, poll: float = 2.0) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(poll)
+    return predicate()
+
+
+def _queue_run_item(action: str, args: dict) -> dict:
+    """执行一条命令：尽量复用现有 api_* 处理器，保证与网页/CLI 行为一致。"""
+    if action == "stop":
+        return api_stop({"mode": str(args.get("mode") or "now")})
+    if action == "deck":
+        body = {"clear": True} if str(args.get("clear") or "").lower() in ("1", "true", "yes") \
+            else {"index": int(args.get("index"))}
+        return api_save_deck(body)
+    if action == "deck_click":
+        return api_deck_click({"index": int(args.get("index"))})
+    if action == "prepare":
+        return api_prepare({})
+    if action == "start":
+        return api_start({"keep_score": str(args.get("keep_score") or "").lower() in ("1", "true", "yes")})
+    if action == "delay":
+        seconds = min(300.0, max(0.0, float(args.get("index") or args.get("seconds") or 5)))
+        time.sleep(seconds)
+        return {"ok": True, "message": f"已等待 {seconds:g} 秒"}
+    if action == "wait_stopped":
+        timeout = float(args.get("timeout") or 600)
+        ok = _queue_wait(lambda: CTRL.automation_thread is None and not CTRL.starting, timeout)
+        if ok:
+            return {"ok": True, "message": "自动化已停止"}
+        return {"ok": False, "error": f"等自动化停止超时（{timeout:g} 秒）"}
+    return {"ok": False, "error": f"未实现的动作：{action}"}
+
+
+def api_queue_submit(body=None) -> dict:
+    """提交待做命令队列。body={"steps": ["stop mode=after_game", "wait-stopped", "deck 1", "start"]}。
+
+    队列在后台线程里按顺序执行；某一步失败就停下，剩下的标记 skipped。
+    提交时上一次队列还没跑完会被拒绝（先 `hsctl queue cancel` 或等它跑完）。
+    """
+    body = body or {}
+    steps = body.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return {"ok": False, "error": "steps 必须是非空字符串数组"}
+    try:
+        items = [_queue_parse_step(s) for s in steps]
+    except ValueError as exc:
+        return {"ok": False, "error": f"命令解析失败：{exc}"}
+    with _QUEUE_LOCK:
+        if _QUEUE_STATE["running"]:
+            return {"ok": False, "error": "上一次队列还在跑（用 /api/queue 看进度，或 /api/queue/cancel 取消）。"}
+        _QUEUE_STATE.update({"running": True, "current": -1, "finished_at": None,
+                             "submitted_at": datetime.now().isoformat(timespec="seconds"),
+                             "message": f"共 {len(items)} 条，执行中……",
+                             "items": [dict(it, status="pending", result=None) for it in items]})
+
+    def _worker():
+        for i, item in enumerate(_QUEUE_STATE["items"]):
+            with _QUEUE_LOCK:
+                if not _QUEUE_STATE["running"]:
+                    item["status"] = "cancelled"
+                    continue
+                _QUEUE_STATE["current"] = i
+                item["status"] = "running"
+            action, args = item["action"], item["args"]
+            _log("SYS", f"队列[{i + 1}/{len(_QUEUE_STATE['items'])}] 执行 {action} {args or ''}")
+            try:
+                result = _queue_run_item(action, args)
+            except Exception as exc:
+                result = {"ok": False, "error": f"{action} 执行异常：{exc}"}
+            item["result"] = result
+            item["status"] = "ok" if result.get("ok") else "failed"
+            _log("SYS" if result.get("ok") else "ERROR",
+                 f"队列[{i + 1}] {action}：{result.get('message') or result.get('error')}")
+            if not result.get("ok"):
+                with _QUEUE_LOCK:
+                    for rest in _QUEUE_STATE["items"][i + 1:]:
+                        rest["status"] = "skipped"
+                    _QUEUE_STATE.update({"running": False, "current": -1,
+                                         "finished_at": datetime.now().isoformat(timespec="seconds"),
+                                         "message": f"第 {i + 1} 步失败：{result.get('error')}"})
+                return
+        with _QUEUE_LOCK:
+            _QUEUE_STATE.update({"running": False, "current": -1,
+                                 "finished_at": datetime.now().isoformat(timespec="seconds"),
+                                 "message": "队列全部执行完成"})
+
+    threading.Thread(target=_worker, name="hs-queue", daemon=True).start()
+    return {"ok": True, "message": f"已提交 {len(items)} 条命令，按顺序执行。",
+            "queue": dict(_QUEUE_STATE)}
+
+
+def api_queue_get(body=None) -> dict:
+    with _QUEUE_LOCK:
+        return _queue_status_locked()
+
+
+def api_queue_cancel(body=None) -> dict:
+    with _QUEUE_LOCK:
+        if not _QUEUE_STATE["running"]:
+            return {"ok": False, "error": "没有正在执行的队列。"}
+        _QUEUE_STATE["running"] = False
+        _QUEUE_STATE["message"] = "已被用户取消（当前步跑完后停止）"
+    _log("WARN", "命令队列已被取消（取消在当前这一步跑完之后生效）。")
+    return {"ok": True, "message": "已请求取消队列（当前步跑完后停止）"}
+
+
 def api_restart_hearthstone(body=None):
     """CLI / agent 的「重启炉石」接口（复用浮窗按钮同一套流程）。
 
@@ -2545,6 +2689,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_ui_state(frame_name=q.get("frame", [""])[0]))
             elif path == "/api/enter_battle":
                 self._json(api_enter_battle_status())
+            elif path == "/api/queue":
+                self._json(api_queue_get())
             else:
                 self._json({"ok": False, "error": "未知接口"}, 404)
         except Exception as exc:
@@ -2582,6 +2728,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_enter_battle(body))
             elif path == "/api/deck_click":
                 self._json(api_deck_click(body))
+            elif path == "/api/queue":
+                self._json(api_queue_submit(body))
+            elif path == "/api/queue/cancel":
+                self._json(api_queue_cancel(body))
             elif path == "/api/restart_hearthstone":
                 self._json(api_restart_hearthstone(body))
             elif path == "/api/screenshot":

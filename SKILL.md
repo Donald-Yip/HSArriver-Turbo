@@ -153,6 +153,14 @@ python hsctl.py deck-click 8            # 快速选卡组：直接点第 8 格�
 python hsctl.py deck                    # 看自动选择的卡组序号
 python hsctl.py deck 8                  # 每局自动选第 8 副；hsctl deck --clear 关掉
 
+# 待做命令队列：一次提交多条，控制台后台按顺序执行（断线不影响，可查可取消）
+python hsctl.py queue run "stop mode=after_game" "wait-stopped" "deck 1" "start"
+python hsctl.py queue status            # 看每步进度（pending/running/ok/failed/skipped）
+python hsctl.py queue cancel            # 取消（当前步跑完后停止）
+#   支持的动作：stop [mode=after_game] / wait-stopped [timeout=秒] / deck 序号 /
+#   deck-click 序号 / prepare / start [keep_score=1] / delay 秒
+#   某一步失败即停，剩余 skipped；提交时整体校验语法，写错一条都不收
+
 # 对战
 python hsctl.py start [--keep-score]
 python hsctl.py resume                  # 续跑，战绩累加（不清零）
@@ -378,6 +386,13 @@ python hsctl.py serve task-status      # 看有没有现成的「最高权限」
    - 把 cmd 临时改成 `"<正确python>" hsctl.py serve stop`；
    - 触发任务（见下面的 shell 注意事项），等几秒，确认 `status` 连不上（退出码 3）；
    - 把 cmd 改回正常的 `serve start --wait 120`，再触发一次任务 → 控制台以正确解释器提权重启。
+   **血泪教训**：①用 `.bak` 备份/恢复轮换 cmd 极易把 stop 版残留成"当前版"，
+   下次重启时控制台被悄悄降级成非提权（表现为 admin 变 false）——每次改完
+   **必须 cat 核对文件内容**，确认最后一行是 `serve start --wait 120`；
+   ②shell 的 `printf` 会吃掉 `\U`/`\e` 转义写坏 cmd 路径，改这个文件一律用
+   编辑工具整文件写入，不要用 shell 字符串拼接；
+   ③如果自动化正卡在"对局结算"收尾，`serve stop` 会等它退完，看似没反应 ——
+   端口迟迟不释放时改用提权 `taskkill /F /PID <监听8765的pid>`（netstat -ano 查）。
 4. 重启后立刻 `status` 核对：`selfcheck.ok: true` 且 `is_admin: true`，再继续 §2 编排。
 
 **shell 注意事项（通用）**：在 Git Bash / POSIX shell 里，`schtasks /run /tn X`

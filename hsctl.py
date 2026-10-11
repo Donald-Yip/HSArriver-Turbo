@@ -591,6 +591,61 @@ def cmd_deck_click(args, ctx: Ctx) -> int:
     return _ok_message(ctx, payload)
 
 
+def cmd_queue(args, ctx: Ctx) -> int:
+    """待做命令队列：一次性提交多条命令，控制台按顺序执行（断线不影响）。
+
+    用法：
+      hsctl queue run "stop mode=after_game" "wait-stopped" "deck 1" "start"
+      hsctl queue status
+      hsctl queue cancel
+    支持：stop [mode=after_game|now] / wait-stopped [timeout=秒] /
+          deck 序号 | deck-click 序号 / prepare / start [keep_score=1] / delay 秒
+    某一步失败即停，剩余标记 skipped；提交前会整体校验语法，写错一条都不收。
+    """
+    sub = getattr(args, "queue_cmd", "status")
+    if sub == "status":
+        payload = ctx.get("/api/queue")
+        q = payload.get("queue") or {}
+        if ctx.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return EXIT_OK
+        print(f"running: {q.get('running')} | {q.get('message') or ''}")
+        for i, item in enumerate(q.get("items") or []):
+            mark = {"pending": "…", "running": "▶", "ok": "✓",
+                    "failed": "✗", "skipped": "－", "cancelled": "⊘"}.get(item.get("status"), "?")
+            print(f"  {mark} [{i + 1}] {item.get('action')} {item.get('args') or ''}")
+        return EXIT_OK
+    if sub == "cancel":
+        return _ok_message(ctx, ctx.post("/api/queue/cancel", {}))
+    # run：把剩余位置参数当 step 字符串提交
+    steps = list(getattr(args, "steps", []) or [])
+    if not steps:
+        print("用法：hsctl queue run \"stop mode=after_game\" \"wait-stopped\" \"deck 1\" \"start\"",
+              file=sys.stderr)
+        return EXIT_USAGE
+    payload = ctx.post("/api/queue", {"steps": steps})
+    if not payload.get("ok"):
+        return _fail(ctx, "api", payload.get("error") or "队列提交失败")
+    if ctx.json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(f"✓ {payload.get('message')}")
+    if getattr(args, "no_wait", False):
+        return EXIT_OK
+    # 轮询轻量进度接口直到跑完
+    while True:
+        q = (ctx.get("/api/queue") or {}).get("queue") or {}
+        if not q.get("running"):
+            if ctx.json:
+                print(json.dumps({"ok": True, "queue": q}, ensure_ascii=False))
+            else:
+                print(f"{'✅' if all(i.get('status') == 'ok' for i in q.get('items') or []) else '❌'} "
+                      f"{q.get('message')}")
+            return EXIT_OK if not q.get("items") or all(
+                i.get("status") == "ok" for i in q["items"]) else EXIT_API
+        time.sleep(2)
+
+
 def cmd_enter_battle(args, ctx: Ctx) -> int:
     """一键进入对战：拉起炉石 → 等主界面 → 点「传统对战」→ 选卡组 →（可选）点「开始」。
 
@@ -1703,6 +1758,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("index", type=int, metavar="序号",
                    help="第几个卡组（1-9，当前页）")
     p.set_defaults(handler=cmd_deck_click)
+    p = sub.add_parser("queue", parents=[common],
+                       help="待做命令队列：一次提交多条，控制台按顺序执行")
+    p.add_argument("queue_cmd", nargs="?", default="status",
+                   choices=["run", "status", "cancel"],
+                   help="run=提交并等待；status=看进度；cancel=取消")
+    p.add_argument("steps", nargs="*",
+                   help="run 时：一条条命令字符串，如 \"stop mode=after_game\" \"wait-stopped\" \"deck 1\" \"start\"")
+    p.add_argument("--no-wait", action="store_true",
+                   help="run 时只提交，不等队列跑完")
+    p.set_defaults(handler=cmd_queue)
 
     p = sub.add_parser("restart-hearthstone", parents=[common],
                        help="重启炉石（会结束进程并清空其日志目录，高风险）")
