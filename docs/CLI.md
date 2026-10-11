@@ -14,6 +14,33 @@ JSON」的翻译与结果渲染，不含任何自动化逻辑。所以它既能�
 
 ---
 
+## 0. agent 速查（一屏内看完）
+
+```bash
+python hsctl.py --json doctor     # ① 每次会话第一条：环境 + 控制台 + 下一步该执行什么
+# ② 照抄 next_steps 里的命令（通常 1-2 条）
+python hsctl.py --json doctor     # ③ 复验到 verdict=env_ok
+python hsctl.py --json status     # ④ 之后按需要探活/干活
+```
+
+| `doctor.verdict` | 意思 | 典型的 `next_steps` |
+| --- | --- | --- |
+| `env_ok` | 环境已保存且合格 | （空；看 `console`） |
+| `env_ok_unsaved` | 能用，但**还没保存**到本机 `log/env.json` | `hsctl env --pin "<路径>"` |
+| `env_deps_missing` | 找到 3.12 但缺包 | 已定位到该解释器的 pip 命令 |
+| `env_no_valid_interpreter` | 本机没有合格解释器 | conda/venv 建环境 → pip → `env --pin` |
+| `console_not_running` | 环境 OK，控制台没跑 | `hsctl serve start --via-task` |
+| `console_not_admin` | 在跑但没提权（点击不生效） | `serve stop` → `serve start --via-task` |
+| `env_wrong_interpreter` | 控制台跑在错的解释器上 | `env --pin` → `serve stop` → `serve start --via-task` |
+
+退出码：`0` 成功 ／ `1` 业务失败（读 `error`）／ `2` 参数错 ／ `3` 连不上控制台 ／
+`4` 环境不可用（先跑 `doctor`）。`--json` 下错误也走 **stdout**，便于只读 stdout 的 agent。
+
+跨项目的 agent 行为约定（一条命令一条决策、少废话、Git 纪律）见
+[`../AGENTS.md`](../AGENTS.md)。
+
+---
+
 ## 1. 快速开始
 
 ```powershell
@@ -59,6 +86,7 @@ python hsctl.py serve stop          # 先停自动化，再结束控制台进程
 | `1` | **业务失败**：控制台返回 `{"ok": false, "error": "..."}` | 读 error 决定重试还是改策略（例如"运行中，请先停止"） |
 | `2` | 参数用法错误 | 修正命令 |
 | `3` | **连不上控制台** | 先 `hsctl serve start` 或提示用户开脚本 |
+| `4` | **环境不可用**（没有合格的 Python 3.12 解释器 / 缺依赖） | 跑 `hsctl --json doctor`，照 `next_steps` 修（见 §5.6） |
 
 `--json` 放在命令前或后都有效（`hsctl --json status` ≡ `hsctl status --json`）。
 JSON 模式下：
@@ -93,11 +121,17 @@ python hsctl.py screenshot                       # 默认：炉石客户区
 python hsctl.py screenshot --kind full           # 整屏（看盒子/浮窗摆位）
 python hsctl.py screenshot --kind roi            # 盒子推荐面板 = OCR 真正看到的那块
 python hsctl.py screenshot --kind boxes          # 整屏 + 所有校准区域框
+python hsctl.py screenshot --points mode         # 客户区 + 「模式切换」四个点击点（红十字）
 python hsctl.py screenshot --max-width 1280      # 4K 屏建议缩一下再喂给模型
 python hsctl.py screenshot --open                # 抓完用系统看图打开
 python hsctl.py screenshot --watch --interval 2  # 持续抓，每次覆盖同一张（实时看）
 python hsctl.py --json screenshot                # 机器可读
 ```
+
+`--points mode` 只**画图**（不点击、不移动鼠标）：把 `hsctl mode` 实际会点的四个点
+（右上角模式按钮 + 狂野/标准/休闲三个盾牌）画成红十字并标上客户区坐标，
+用来核对坐标对不对、或者给用户看"脚本会点哪里"。返回里带 `mode_points`
+字段（每个点的 `client` 客户区坐标 / `image` 图内像素坐标）。
 
 返回的是**文件路径**（不是 base64），拿到之后直接读那张 PNG 就行：
 
@@ -252,17 +286,21 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 
 | 命令 | 说明 |
 | --- | --- |
-| `serve status` | 控制台是否在运行（含端口文件里的 pid / 启动时间） |
+| `serve status` | 控制台是否在运行（含端口文件里的 pid / 启动时间 / 解释器） |
 | `serve start [--browser] [--wait 60]` | 用 `--no-browser` 后台拉起 `web_ui.py`，等 `/api/status` 通了才返回；输出写 `log\cli_serve.log`；起不来会回显日志尾部 |
 | `serve start --elevate` | **请求提权**启动：弹 UAC 同意框（需要有人在电脑前点「是」） |
 | `serve start --via-task` | 通过已注册的「最高权限」计划任务启动：**不弹 UAC**，可无人值守 |
-| `serve stop [--force]` | **先**请求停止自动化并等它收尾，**再**结束进程；pid 的映像名不是 Python 时拒绝（`--force` 覆盖） |
+| `serve stop [--force] [--hard]` | **先**请求停止自动化，**再**让控制台**自己退出**（HTTP 自停通道，不需要提权）；自停不可用时才退回结束进程。`--hard` = 跳过自停直接 taskkill；pid 的映像名不是 Python 时拒绝（`--force` 覆盖） |
 | `serve restart [--browser] [--elevate\|--via-task]` | stop → start |
 | `serve install-task [--force]` | 注册「最高权限」计划任务（**需要管理员跑一次**） |
 | `serve task-status` | 看任务是否存在、是否真的勾了最高权限 |
 | `serve uninstall-task` | 删除该计划任务 |
 
 `--elevate` 与 `--via-task` 互斥；不指定就是普通的非提权后台启动。
+
+**触发计划任务**：优先 `schtasks /run`；**被本机策略拦掉时自动改用 PowerShell 的
+`Start-ScheduledTask`**（有的机器把 `schtasks.exe` 列进了程序黑名单）。
+`serve start --via-task` 的回话里会写明这次走的是哪条路。
 
 安全性：**端口上没人监听时，`serve stop` 只清理残留的端口文件，绝不去 kill 它记下的
 pid**（那个 pid 可能已被系统复用给别的进程）。
@@ -343,23 +381,66 @@ hsctl serve uninstall-task   # 不要了就删掉
 
 ### 5.5 提权控制台怎么停
 
-提权起来的控制台，**非提权 shell 结束不了它**（Windows 不允许低权限进程结束高权限
-进程，`os.kill` 和 `taskkill` 都会被拒）。这时：
+提权起来的控制台，**非提权进程结束不了它**（Windows 不允许低权限进程结束高权限
+进程，`os.kill` 和 `taskkill` 都会被拒）。所以控制台开了一条**自停通道**：
 
 ```powershell
-hsctl stop                  # 先停自动化 —— 走 HTTP，不需要提权，这步总是有效
-# 然后用管理员 PowerShell：
-hsctl serve stop
+hsctl serve stop            # 默认：先停自动化，再让控制台自己退出（不需要提权）
+hsctl serve stop --hard     # 跳过自停，直接 taskkill（提权起的那种要管理员 shell）
 ```
 
-`hsctl serve stop` 遇到这种情况会明确告诉你怎么做，而不是甩一个 `WinError 5`。
+自停通道的原理：`web_ui` 启动时随机生成一个 token 写进 `log/ui_port.txt`，
+`hsctl serve stop` 用这个 token POST `/api/serve/stop`；控制台校验通过后**自己**
+停自动化 → 清端口文件 → 退出进程。发起者不需要任何特权，agent / 手机 / 普通 shell 都能用。
+token 只在本机端口文件里（`log/` 不入库），且接口只回 `127.0.0.1`，网络上打进来停不掉。
+
+自停不可用时（老版本控制台、端口文件没有 token、进程卡死），才退回结束进程；
+那时如果报 `Access denied`，就用**管理员** PowerShell 跑 `hsctl serve stop --hard`。
+
+---
+
+### 5.6 换机器 / 换 Python：解释器自配置（`doctor` + `env`）
+
+**运行环境因机器而异**，所以本仓库**不把任何解释器路径写进代码或默认值**：
+代码只负责"找、验、存、用"，具体路径由每台机器自己保存。
+
+| 文件 | 是否入库 | 内容 |
+| --- | --- | --- |
+| [`env.example.json`](../env.example.json) | ✅ 进仓库 | 只有占位符与说明的模板（**不含任何本机路径**） |
+| `log/env.json` | ❌ 被 `log/` 忽略 | 本机实际生效的那一份：`interpreter` / `pinned_at` / `source` / `last_ok` |
+
+```powershell
+python hsctl.py --json doctor      # 一条命令：环境 + 控制台 + verdict + next_steps
+python hsctl.py env                # 当前解释器 / 已保存的解释器 / 来源
+python hsctl.py env --discover     # 列出本机候选解释器并逐个校验（不写盘）
+python hsctl.py env --pin "<python.exe 路径>"   # 校验并**保存**到 log/env.json
+python hsctl.py env --pin auto     # 自动选第一个合格候选
+```
+
+- **校验**：必须 Python **3.12.x**（3.13+ 装不上 OCR 轮子）且
+  `win32gui/cv2/numpy/PIL/paddleocr/paddle/psutil/keyboard/pynput/requests/click`
+  全部齐全。校验只 `find_spec`（**不 import**），所以不会把 paddle 拉起来。
+- **解析顺序**：`HS_PYTHON` 环境变量 → `log/env.json` → 当前解释器（校验通过才用）
+  → 候选探测（`CONDA_PREFIX` / `VIRTUAL_ENV` / 常见 conda 位置 / 仓库内 venv /
+  `where python`）。
+- **透明代理**：任何 agent 用任何 python 跑 `hsctl`，只要当前解释器不合格而本机有合格的，
+  `hsctl` 就 `os.execv` 重入过去（并顺手保存），退出码/输出原样传递。
+  `HSCTL_NO_PROXY=1` 关掉它；`HSCTL_REEXEC=1` 防死循环。一个都不合格 → 退出码 **4**。
+- **计划任务跟着走**：`serve install-task` 生成的启动器以 `log/env.json` 为准，
+  不会再出现"计划任务被硬编码成生成它时那个错误 Python"的老坑（原 §8.1 那套
+  手改 `log/hs_serve_elevated.cmd` 的应急流程已经不需要了）。
+
+**多个候选都合格**时 `doctor` 会把它们都列出来，**问你一次**要固定哪个，
+然后 `hsctl env --pin "<路径>"` 保存 —— 保存完再 `doctor` 复验到 `env_ok`。
 
 ---
 
 ## 6. 给 agent 的典型编排
 
 ```
-1. hsctl --json status            → 连不上（退出码 3）就先 hsctl serve start
+0. hsctl --json doctor             → 拿到 verdict + next_steps；先照它把环境/控制台修好
+                                     （env_ok_unsaved 就先 hsctl env --pin 保存本机解释器）
+1. hsctl --json status             → 连不上（退出码 3）就先 hsctl serve start
 2. 看 is_admin                     → false 时：hsctl serve task-status
                                      · 任务在 → hsctl serve start --via-task（不弹 UAC）
                                      · 任务不在 → hsctl serve install-task
@@ -371,7 +452,8 @@ hsctl serve stop
 7. 收工：hsctl stop --after-game（打完本局）或 hsctl stop
 ```
 
-配套的 agent 技能说明见 [`../SKILL.md`](../SKILL.md)。
+配套的 agent 技能说明见 [`../SKILL.md`](../SKILL.md)；跨项目的 agent 行为约定见
+[`../AGENTS.md`](../AGENTS.md)。
 
 ---
 
@@ -400,6 +482,8 @@ C:\...\HearthstoneLegendArriver-main\click.py     # ← 不是 site-packages
 
 所以任何基于 Click 的 CLI 在这里都会直接失败。`hsctl.py` 因此**只用标准库**
 （`argparse` + `urllib`），Python 3.9+ 都能跑，也不需要新增依赖。
+解释器探测/校验那一块同样只用标准库（`subprocess` + `importlib.util.find_spec`），
+所以**在错的解释器上也能先跑出诊断结论**，再把自己换到对的解释器上。
 
 `hsctl` 借用的只是那套 CLI 规范：子命令分组、`--json` 机器可读输出、`--help`
 自描述、裸命令进 REPL。
@@ -415,11 +499,14 @@ C:\...\HearthstoneLegendArriver-main\click.py     # ← 不是 site-packages
 | `hsctl status` 显示账号「未读到玩家名」 | 还没打过一局，日志里还没有玩家名 |
 | 改了延时但没感觉 | 看 `hsctl delays` 标的生效时机：`下次「开始对战」生效` / `需重启脚本进程` |
 | `serve stop` 说 pid 不是 Python 进程 | 端口文件过期或 pid 被复用；确认后加 `--force` |
-| `serve stop` 报「结束 pid 失败 / Access denied」 | 控制台是**提权**起的，非提权 shell 杀不掉它 —— 见 §5.5：先 `hsctl stop`，再用管理员 shell `serve stop` |
+| `serve stop` 报「结束 pid 失败 / Access denied」 | 正常情况下不该再出现（`serve stop` 走 HTTP 自停，不需要提权）。真出现时说明自停没成功：用**管理员** shell 跑 `hsctl serve stop --hard`，或直接关掉那个控制台窗口 |
 | `serve start --elevate` 说「提权被拒绝」 | UAC 框上点了「否」或超时取消（返回码 5）。无人值守请改用 `--via-task` |
 | `serve start --via-task` 说「计划任务还没注册」 | 先用管理员跑一次 `hsctl serve install-task` |
 | `serve task-status` 显示「最高权限：否」 | 任务没勾最高权限，起来仍是普通权限：`uninstall-task` 后重新 `install-task` |
 | 订了任务但自动化还是点不动 | 确认 `hsctl status` 里的 `is_admin` 是 `true`；不是就说明启动没走任务 |
+| 自检里依赖「全部同时 fail」 | 控制台跑在错的解释器上：`hsctl --json doctor` → 按 `next_steps`（`env --pin` → `serve stop` → `serve start --via-task`），见 §5.6 |
+| `hsctl` 直接退出码 4 | 本机没有合格的 Python 3.12 环境：`hsctl env --discover` 看候选与缺什么，再按 `doctor` 的 bootstrap 步骤建环境 |
+| 换了机器/换了 Python 后所有命令都不对 | 这是**预期**：解释器是每台机器各自保存的。`hsctl --json doctor` → `hsctl env --pin "<路径>"` → 复验，见 §5.6 |
 | JSON 解析失败 | 端口上跑的可能不是本脚本；`hsctl --json serve status` 看端口文件来源 |
 
 排查实机问题时可先看这几个文件：`ui_log_last.txt`（运行日志）、`log\ui_port.txt`

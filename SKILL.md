@@ -1,6 +1,6 @@
 ---
 name: hslegend-arriver
-description: 用 hsctl 命令行实时控制炉石传说自动化脚本（HSLegendArriver）。当用户要求「看脚本状态 / 要一张实时画面、截图、看看现在屏幕上是什么 / 认出现在在哪个界面 / 一键进入对战（点传统对战、选卡组、开始匹配）/ 从0冷启动（电脑刚开机、炉石和盒子都没开）/ 开始或停止对战 / 改延时或活人感等参数 / 追日志 / 定时 / 校准 / 重启炉石 / 用手机或 agent 远程指挥脚本」时使用。命令是 python hsctl.py <子命令>，输出支持 --json，退出码可判断成败；提权只能靠预注册的计划任务，agent 自己无法提权。用户要实时画面时直接用 hsctl screenshot 抓图返回，不要多话。界面识别只认文字（认不出就只点画面中心，绝不盲点按钮）。
+description: 用 hsctl 命令行实时控制炉石传说自动化脚本（HSLegendArriver）。当用户要求「看脚本状态 / 要一张实时画面、截图、看看现在屏幕上是什么 / 认出现在在哪个界面 / 一键进入对战（点传统对战、选卡组、开始匹配）/ 切换对战模式（狂野/标准/休闲）/ 从0冷启动（电脑刚开机、炉石和盒子都没开）/ 开始或停止对战 / 改延时或活人感等参数 / 追日志 / 定时 / 校准 / 重启炉石 / 停掉跑在管理员权限下的控制台 / 换机器换 Python 后环境不对、缺依赖、自检全 fail / 让另一个 agent 自己配置并保存本机解释器 / 用手机或 agent 远程指挥脚本」时使用。会话第一条命令固定是 python hsctl.py --json doctor（给出 verdict 与可直接执行的 next_steps；环境改动立即用 hsctl env --pin 保存到本机 log/env.json）。命令是 python hsctl.py <子命令>，输出支持 --json，退出码可判断成败（0 成功 / 1 业务失败 / 2 参数错 / 3 连不上 / 4 环境不可用）；提权只能靠预注册的计划任务，agent 自己无法提权，但停掉提权控制台不需要管理员（serve stop 走 HTTP 自停）。用户要实时画面时直接用 hsctl screenshot 抓图返回，不要多话。界面识别只认文字（认不出就只点画面中心，绝不盲点按钮）。
 ---
 
 # 用 hsctl 控制炉石自动化脚本
@@ -39,7 +39,34 @@ description: 用 hsctl 命令行实时控制炉石传说自动化脚本（HSLege
    串行任务用 `queue run`，不要自己编排）。固有命令覆盖不了的需求，先问用户
    是否要给脚本加功能，而不是绕过它。
 
+## 0.1 最短决策流程（照这个走，别绕）
+
+```bash
+python hsctl.py --json doctor      # ① 一条命令拿结论（环境 + 控制台 + 下一步）
+# ② 直接执行 next_steps 里给的命令（通常 1-2 条，原样照抄即可）
+python hsctl.py --json doctor      # ③ 复验（verdict 变成 env_ok）
+# ④ 只回报结论：≤3 行（做了什么 / 结果 / 需要用户做什么）
+```
+
+`doctor` 的 `verdict` 含义：
+
+| verdict | 含义 | 下一步（`next_steps` 里会给） |
+| --- | --- | --- |
+| `env_ok` | 环境已保存且合格，控制台状态见 `console` | 无事；直接干活 |
+| `env_ok_unsaved` | 环境**能用但还没保存**到本机 `log/env.json` | `hsctl env --pin "<路径>"` 保存（换 agent/换 shell 才不会再找错解释器） |
+| `env_deps_missing` | 找到 3.12 但缺包 | 照抄它的 pip 命令（已定位到具体解释器） |
+| `env_no_valid_interpreter` | 本机没有合格解释器 | conda/venv 建一个 → pip install → `env --pin` |
+| `console_not_running` | 环境 OK，控制台没跑 | `hsctl serve start --via-task` |
+| `console_not_admin` | 控制台在跑但没提权（点了没反应） | `serve stop` → `serve start --via-task` |
+| `env_wrong_interpreter` | 控制台跑在错的解释器上 | `env --pin` → `serve stop` → `serve start --via-task` |
+
+> **通用 agent 行为约定**（一条命令一条决策、少废话、别自建轮询、Git 纪律）见
+> [`AGENTS.md`](AGENTS.md)；本节只讲本项目特有的东西。
+
 ## 1. 前置检查（每次会话开头）
+
+**第一条命令永远是 `python hsctl.py --json doctor`**（见 §0.1）：它一次给出环境是否
+已保存、控制台在不在跑，以及该执行哪几条命令。下面这张表是它字段的细节参考。
 
 ```bash
 python hsctl.py --json status
@@ -145,6 +172,12 @@ Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Un
 > 完整文档见 `docs/CLI.md`。还有个交互模式：`python hsctl.py repl`。
 
 ```bash
+# 自诊 / 环境（**会话第一条命令就是 doctor**）
+python hsctl.py --json doctor           # 环境 + 控制台 + 下一步（verdict / next_steps）
+python hsctl.py env                     # 当前 / 已保存的解释器
+python hsctl.py env --discover          # 列出本机候选解释器 + 各自缺什么（不写盘）
+python hsctl.py env pin "<path|auto>"   # 校验并保存到本机 log/env.json
+
 # 观测
 python hsctl.py status [--watch 秒]
 python hsctl.py log [-n 50] [-f] [--interval 秒]
@@ -152,6 +185,7 @@ python hsctl.py selfcheck [--refresh]
 python hsctl.py regions                 # 截屏画区域框，只截图不点击
 python hsctl.py screenshot [--kind client|full|roi|boxes] [--max-width 1280]
                                         # 抓一帧存成 PNG，返回路径 → 你直接读那张图"看画面"
+python hsctl.py screenshot --points mode  # 同上，并把模式切换的四个点击点画成红十字（只截图）
 python hsctl.py ui                      # 现在在哪个界面（主界面/选择套牌）+ 匹配分
 python hsctl.py ui --frame              # 顺带存一帧图并打印路径（核对它看到了什么）
 python hsctl.py ui --learn              # 站到对应界面时重裁识别模板（皮肤/补丁改了字之后）
@@ -164,12 +198,16 @@ python hsctl.py deck-click 8            # 快速选卡组：直接点第 8 格�
 python hsctl.py deck                    # 看自动选择的卡组序号
 python hsctl.py deck 8                  # 每局自动选第 8 副；hsctl deck --clear 关掉
 
+# 切换对战模式（手动、同步约 2-3 秒：点右上角开模式菜单 → 点对应模式）
+python hsctl.py mode wild               # wild | standard | casual（或 狂野/标准/休闲）
+                                        # 前提：停在选择套牌界面、自动化未运行（详见下文）
+
 # 待做命令队列：一次提交多条，控制台后台按顺序执行（断线不影响，可查可取消）
-python hsctl.py queue run "stop mode=after_game" "wait-stopped" "deck 1" "start"
+python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 1" "start"
 python hsctl.py queue status            # 看每步进度（pending/running/ok/failed/skipped）
 python hsctl.py queue cancel            # 取消（当前步跑完后停止）
 #   支持的动作：stop [mode=after_game] / wait-stopped [timeout=秒] / deck 序号 /
-#   deck-click 序号 / prepare / start [keep_score=1] / delay 秒
+#   deck-click 序号 / mode wild|standard|casual / prepare / start [keep_score=1] / delay 秒
 #   某一步失败即停，剩余 skipped；提交时整体校验语法，写错一条都不收
 
 # 对战
@@ -206,10 +244,31 @@ python hsctl.py serve start --via-task           # 走「最高权限」计划�
 python hsctl.py serve install-task               # 注册该任务（需管理员跑一次）
 python hsctl.py serve task-status                # 任务在不在、勾没勾最高权限
 python hsctl.py serve uninstall-task             # 删掉该任务
-python hsctl.py serve stop                       # 先停自动化再结束进程
+python hsctl.py serve stop                       # 自停通道（不需要提权）；失败才退 taskkill
+python hsctl.py serve stop --hard                # 跳过自停，直接结束进程（提权时需管理员 shell）
 ```
 
 所有命令都接受 `--json`（放命令前或后都行）、`--port`、`--host`、`--timeout`。
+
+### 4.1 切换对战模式（`hsctl mode`）注意
+
+- **前提**：画面停在「选择套牌」界面（右上角模式按钮可见）、自动化未运行。
+  自动化 / 「进入对战」/ 命令队列任一在跑都会被拒绝（退出码 1，读 `error` 即知原因）。
+- **命令不校验当前界面**：站错界面调用可能误点别的 UI。执行完按 §7 惯例
+  主动补抓一张截图（新文件名）给用户核对模式是否切成功。
+- **点击坐标（2026-10 实机截图实测，1920×1080 客户区基准）**：
+  模式按钮 `(1405, 55)`；狂野盾牌 `(617, 380)`、标准盾牌 `(955, 375)`、
+  休闲盾牌 `(1290, 380)`。三个点统一在同一水平带里（三个盾牌的亮面都覆盖
+  y 330–430；往上会碰到等级六边形、往下中间会碰到「标准模式」蓝幅）。
+- **核对坐标不用真的点**：`python hsctl.py --json screenshot --points mode`
+  会把四个点画成红十字标在图上（只截图、不点击、不移动鼠标）—— 想让用户确认
+  "到底点在哪儿"就用它，把图发过去即可。
+- 点击位置不准时**不用改代码**：`ui_config.json` 顶层 `mode_click` 段可覆盖坐标
+  （`menu_open` / `wild` / `standard` / `casual`，值为 `[x, y]`，1920×1080 客户区坐标），
+  改完立即生效。也可以 `hsctl calibrate` 在校准窗口里拖这四个框（框中心=点击点），
+  按 S 保存。
+- 典型场景：上传说后换模式继续——
+  `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 2" "start"`。
 
 ## 5. 改参数前必须知道的生效时机
 
@@ -364,14 +423,18 @@ python hsctl.py serve task-status      # 看有没有现成的「最高权限」
 
 **为什么计划任务能免 UAC**：任务计划程序服务以 SYSTEM 身份按"最高权限"标志创建进程，
 不经过 `ShellExecute` 提权路径，所以没有 UAC 弹窗。之后任何非提权进程都能
-`schtasks /run` 触发它。
+触发它（`hsctl` 会先试 `schtasks /run`，**被策略拦掉时自动改走 PowerShell 的
+`Start-ScheduledTask`** —— 有的机器把 `schtasks.exe` 列进了黑名单，不必你操心）。
 
 注意：
 
 - 注册任务**必须**管理员权限，你做不到 —— 只能把命令交给用户。
 - 用完后如需清理：`python hsctl.py serve uninstall-task`。这个任务等于一个提权入口
-  （任何能跑 `schtasks /run` 的本机进程都能触发），所以不要到处宣传任务名。
+  （任何能触发它的本机进程都算提权入口），所以不要到处宣传任务名。
 - **不要**建议用户关闭 UAC。
+- **停掉提权控制台不需要管理员**：`python hsctl.py serve stop` 会走控制台的
+  **HTTP 自停通道**（token 从 `log/ui_port.txt` 读，只有本机能发），控制台自己收尾退出。
+  失败时它才退回 taskkill，那时才需要 `--hard` + 管理员 shell。
 
 ### 8.1 控制台跑在错误的 Python 上（自检"全部依赖 fail"）
 
@@ -379,43 +442,43 @@ python hsctl.py serve task-status      # 看有没有现成的「最高权限」
 一整排 `ModuleNotFoundError`），且 `selfcheck.executable` 指向的解释器版本不对
 （本项目要求 3.12，3.13+ 装不上 OCR 的轮子）。
 
-**根因（通用，任何机器都可能踩）**：`serve install-task` 生成的计划任务 cmd
-（`log\hs_serve_elevated.cmd`）把"当时跑 install-task 的那个 python"**硬编码**了进去。
-如果那次是别的工具自带的 Python（版本不符、没装依赖），之后每次 `serve start --via-task`
-都会用错解释器。
+**先做这一件事**（大概率一条命令就够）：
 
-**修法（不需要重装任何包，也不需要用户手动提权）**：
+```bash
+python hsctl.py --json doctor        # 看 verdict / candidates / next_steps
+python hsctl.py env --discover       # 列出本机所有候选解释器 + 各自缺什么
+python hsctl.py env --pin "<选中的 python.exe 路径>"   # 校验并**保存**到本机 log/env.json
+python hsctl.py serve stop           # 走自停通道（不需要提权）
+python hsctl.py serve start --via-task
+python hsctl.py --json doctor        # 复验：env_ok + console.is_admin=true
+```
 
-1. 先确认机器上存在一个**正确的环境**：找一个 Python 3.12 的环境，
-   逐个 import 依赖验证（`win32gui/cv2/numpy/PIL/paddleocr/paddle/psutil/keyboard/pynput/requests/click`）。
-   常见位置：conda 的项目 env、venv。都验证通过再往下走。
-2. **直接编辑** `log\hs_serve_elevated.cmd`，把里面那行 python 绝对路径换成
-   正确环境的 python.exe（这是个普通文本文件，agent 可以直接改；
-   `install-task` 只是用"当前 python"重新生成它，效果等价）。
-3. **旧控制台要先停**：它是提权起的，非提权进程 `serve stop` 杀不掉（Access denied）。
-   通用技巧——**借计划任务自己来停**：
-   - 把 cmd 临时改成 `"<正确python>" hsctl.py serve stop`；
-   - 触发任务（见下面的 shell 注意事项），等几秒，确认 `status` 连不上（退出码 3）；
-   - 把 cmd 改回正常的 `serve start --wait 120`，再触发一次任务 → 控制台以正确解释器提权重启。
-   **血泪教训**：①用 `.bak` 备份/恢复轮换 cmd 极易把 stop 版残留成"当前版"，
-   下次重启时控制台被悄悄降级成非提权（表现为 admin 变 false）——每次改完
-   **必须 cat 核对文件内容**，确认最后一行是 `serve start --wait 120`；
-   ②shell 的 `printf` 会吃掉 `\U`/`\e` 转义写坏 cmd 路径，改这个文件一律用
-   编辑工具整文件写入，不要用 shell 字符串拼接；
-   ③如果自动化正卡在"对局结算"收尾，`serve stop` 会等它退完，看似没反应 ——
-   端口迟迟不释放时改用提权 `taskkill /F /PID <监听8765的pid>`（netstat -ano 查）。
-4. 重启后立刻 `status` 核对：`selfcheck.ok: true` 且 `is_admin: true`，再继续 §2 编排。
+**为什么这样就够**：
 
-**shell 注意事项（通用）**：在 Git Bash / POSIX shell 里，`schtasks /run /tn X`
-的 `/run` 会被当成路径改写成 `D:/.../run` 导致报错 —— 要写成 `schtasks //run //tn X`
-（双斜杠防改写）。PowerShell/cmd 里则用单斜杠。触发成功会打印一条乱码或本地语言的
-"成功"消息，以退出码为准。
+- `log/env.json` 是**本机专属**配置（`log/` 不入库），保存一次之后：
+  * `hsctl` 用**任何** python 启动都会自动重入到它（见下），agent 不必再找环境；
+  * `serve install-task` 生成的启动器也以它为准 —— 修掉了"计划任务把生成它时的
+    那个错误 Python 硬编码进去"这个老坑。
+  * 仓库里只有占位符模板 [`env.example.json`](env.example.json)，不含任何机器路径。
+- `hsctl` 入口会校验当前解释器（3.12 + 依赖齐全，只 `find_spec` 不 import）；
+  不合格但本机有合格的就 `os.execv` 重入过去并顺手保存，一个都不合格才退出码 **4**
+  并打印"怎么修"（`HSCTL_NO_PROXY=1` 可关闭这个代理，`HSCTL_REEXEC=1` 防死循环）。
 
-**预防**：换机器、换 Python、重装环境后，第一次 `serve start --via-task` 之前，
-先跑一次 `status` 看 `selfcheck`，别直接开打。
+**换机器 / 换 agent 的完整清单**（`doctor` 会把这几条写成 `next_steps`）：
+
+1. `python hsctl.py --json doctor`
+2. 按它给的 `hsctl env --pin "<路径>"` 保存本机解释器（多个候选都合格时**问用户一次**选哪个）
+3. 再 `doctor` 复验到 `env_ok`
+4. `serve start --via-task`（任务没注册就先 `serve install-task`，需要管理员跑一次）
+
+**只有这一种情况还需要旧办法**：`log/env.json` 里固定的解释器被卸载/改名，
+且本机确实没有别的合格环境 —— 那就按 `doctor` 的 `env_no_valid_interpreter` 分支
+建环境（conda / venv）再 `env --pin`。
 
 ## 9. 参考
 
+- **通用 agent 行为约定（跨项目）**：[`AGENTS.md`](AGENTS.md)
 - 完整命令参考：`docs/CLI.md`
+- 解释器配置模板：[`env.example.json`](env.example.json)（实际生效的是本机 `log/env.json`）
 - 脚本本身的用法/安装：`README.md`
 - 控制台实现（HTTP 接口定义）：`web_ui.py` 的 `Handler.do_GET` / `do_POST`
