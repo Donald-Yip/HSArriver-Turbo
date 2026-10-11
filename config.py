@@ -483,8 +483,9 @@ _USER_BOX_KEYS = ("recommendation_roi", "mulligan_confirm_roi",
                   "ai_win_rate_roi", "ai_win_rate_wide_roi",
                   "post_game_start_roi", "post_game_rank_roi",
                   # 界面识别（battle_entry）：主界面「传统对战」文字框、
-                  # 选择套牌界面的 9 个卡组网格框。
-                  "main_menu_battle_roi", "deck_grid_roi")
+                  # 选择套牌界面「选择套牌」标题框、9 个卡组网格框。
+                  "main_menu_battle_roi", "deck_select_title_roi",
+                  "deck_grid_roi")
 
 
 def _roi_declared_client(data: dict) -> bool:
@@ -710,6 +711,13 @@ class RecommendationConfig:
     # 皮肤/补丁改了字的颜色或反色时，用 `hsctl ui --learn` 按当前框从当前画面重裁。
     # 可通过 ui_config.json 的 main_menu_battle_roi 覆盖（校准工具写入）。
     main_menu_battle_roi: tuple[int, int, int, int] = (832, 317, 1091, 344)
+
+    # 选择套牌界面「选择套牌」**标题**框（客户区相对坐标，只框那四个字）。
+    # 用它判"是不是停在选卡组界面"：标题**始终在**，而「开始」按钮在没选中
+    # 卡组时是不出现的 —— 若只认「开始」，脚本会一直认不出界面、反复点画面
+    # 中心直到超时（用户 2026-10-11 反馈的死循环）。
+    # 可通过 ui_config.json 的 deck_select_title_roi 覆盖（校准工具写入）。
+    deck_select_title_roi: tuple[int, int, int, int] = (671, 123, 775, 147)
 
     # 选择套牌界面的 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点
     # （实测列 486/729/968、行 318/534/750，每格约 226×198），并逐个检查格子里

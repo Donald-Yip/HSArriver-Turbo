@@ -72,6 +72,17 @@ class ModePointSourceTests(unittest.TestCase):
             self.assertEqual(screen_regions.MODE_MARK_SIZE, bottom - top)
 
     def test_targets_use_the_same_points(self):
+        """校准目标里 mode_* 的框中心 = MODE_POINTS 的点（默认口径，不受本机覆盖影响）。
+
+        必须隔离 ui_config.json：本机的 `mode_click` 覆盖（用户拖过框）不该让
+        这条"默认值是否一致"的测试变红。
+        """
+        tmp = make_temp_dir()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        original = config.CONFIG_PATH
+        config.CONFIG_PATH = tmp / "ui_config.json"
+        self.addCleanup(lambda: setattr(config, "CONFIG_PATH", original))
+
         targets = {t["key"]: t for t in screen_regions.calibration_targets()}
         for point_key, point in screen_regions.MODE_POINTS.items():
             target = targets[f"mode_{point_key}"]

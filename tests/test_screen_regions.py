@@ -34,7 +34,8 @@ class RegionRegistryTests(unittest.TestCase):
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
             ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide",
-             "post_game_start", "rank", "main_menu_battle", "deck_grid",
+             "post_game_start", "rank", "main_menu_battle", "deck_select_title",
+             "deck_grid",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
             [region["key"] for region in self.regions])
 
@@ -100,14 +101,14 @@ class CalibrationTargetTests(unittest.TestCase):
 
         self.assertEqual(["recommendation", "mulligan_confirm", "win_rate",
                           "post_game_start", "rank",
-                          "main_menu_battle", "deck_grid",
+                          "main_menu_battle", "deck_select_title", "deck_grid",
                           "mode_menu_open", "mode_wild", "mode_standard",
                           "mode_casual"],
                          [target["key"] for target in targets])
         self.assertEqual(
             ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi",
              "post_game_start_roi", "post_game_rank_roi",
-             "main_menu_battle_roi", "deck_grid_roi",
+             "main_menu_battle_roi", "deck_select_title_roi", "deck_grid_roi",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
             [target["config_key"] for target in targets])
         for target in targets:
@@ -130,7 +131,7 @@ class CalibrationTargetTests(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
 
     def test_interface_recognition_boxes_match_battle_entry(self):
-        """界面识别的两个框必须与 battle_entry 的默认值一致（防止两边改岔）。
+        """界面识别的三个框必须与 battle_entry 的默认值一致（防止两边改岔）。
 
         与 AI 胜率区域那条规矩一样：坐标只应有一个出处，改了一边另一边会红。
         """
@@ -138,13 +139,16 @@ class CalibrationTargetTests(unittest.TestCase):
 
         self.assertEqual(battle_entry.MAIN_MENU_BATTLE_DEFAULT,
                          screen_regions.MAIN_MENU_BATTLE_REGION)
+        self.assertEqual(battle_entry.DECK_SELECT_TITLE_DEFAULT,
+                         screen_regions.DECK_SELECT_TITLE_REGION)
         self.assertEqual(battle_entry.DECK_GRID_DEFAULT,
                          screen_regions.DECK_GRID_REGION)
         # 文字框可以很薄：它的缩放下限必须小于框高，否则手柄拖不出来
-        target = next(t for t in screen_regions.calibration_targets(make_config())
-                      if t["key"] == "main_menu_battle")
-        height = target["box"][3] - target["box"][1]
-        self.assertLess(target["min_size"], height)
+        for key in ("main_menu_battle", "deck_select_title"):
+            target = next(t for t in screen_regions.calibration_targets(make_config())
+                          if t["key"] == key)
+            height = target["box"][3] - target["box"][1]
+            self.assertLess(target["min_size"], height)
 
     def test_the_rank_box_is_calibratable(self):
         """用户反馈"段位数字无法校准"：它必须是可拖、可保存的目标。"""

@@ -64,11 +64,19 @@ def main_menu_frame(config=None) -> np.ndarray:
     return paste(blank_frame(), template_gray("traditional"), left, top)
 
 
-def deck_select_frame(config=None) -> np.ndarray:
-    """选择套牌界面：贴上「开始」模板 + 9 个卡组格都有名牌白字。"""
+def deck_select_frame(config=None, *, with_start: bool = True) -> np.ndarray:
+    """选择套牌界面：贴上「选择套牌」标题（可选「开始」）+ 9 个卡组格都有名牌白字。
+
+    `with_start=False` 模拟**还没选中卡组**（「开始」不出现）—— 这正是用户
+    2026-10-11 反馈的死循环场景：只认「开始」的话这里会被判成 unknown，
+    反复点画面中心直到超时。改用标题识别后，有没有「开始」都能认出来。
+    """
     frame = blank_frame()
-    left, top, _right, _bottom = be.start_box(config)
-    paste(frame, template_gray("start"), left, top)
+    left, top, _right, _bottom = be.deck_select_title_box(config)
+    paste(frame, template_gray("deck_select_title"), left, top)
+    if with_start:
+        left, top, _right, _bottom = be.start_box(config)
+        paste(frame, template_gray("start"), left, top)
     return paint_deck_plates(frame, config)
 
 
@@ -85,6 +93,7 @@ def bright_textured_frame() -> np.ndarray:
 
 def make_config(**overrides):
     base = dict(main_menu_battle_roi=be.MAIN_MENU_BATTLE_DEFAULT,
+                deck_select_title_roi=be.DECK_SELECT_TITLE_DEFAULT,
                 deck_grid_roi=be.DECK_GRID_DEFAULT,
                 post_game_start_roi=be.START_BOX_DEFAULT)
     base.update(overrides)
@@ -142,6 +151,7 @@ class TextOnlyRecognitionTests(unittest.TestCase):
 
         deck = be.identify(deck_select_frame(config), config)
         self.assertEqual("deck_select", deck["state"])
+        self.assertGreaterEqual(deck["deck_title"]["score"], 0.99)
         self.assertGreaterEqual(deck["start"]["score"], 0.99)
         self.assertEqual(9, deck["deck"]["slots_found"])
 
@@ -149,13 +159,28 @@ class TextOnlyRecognitionTests(unittest.TestCase):
         bgra = cv2.cvtColor(main_menu_frame(config), cv2.COLOR_BGR2BGRA)
         self.assertEqual("main_menu", be.identify(bgra, config)["state"])
 
-        # 空白/黑屏（游戏还没画出来）：两个分数都必须是 0.0000 ——
+        # 空白/黑屏（游戏还没画出来）：分数都必须是 0.0000 ——
         # 判定通过就会去点按钮，所以"拿不准"必须是**不点**。
         for value in (120, 0, 255):
             blank = be.identify(blank_frame(value), config)
             self.assertEqual("unknown", blank["state"])
             self.assertEqual(0.0, blank["traditional"]["score"])
+            self.assertEqual(0.0, blank["deck_title"]["score"])
             self.assertEqual(0.0, blank["start"]["score"])
+
+    def test_deck_select_is_recognized_without_the_start_button(self):
+        """没选中卡组时「开始」不出现，也必须认出选卡组界面（用户反馈的死循环）。
+
+        旧逻辑只认「开始」，这种画面会被判成 unknown → 反复点画面中心直到超时。
+        改用「选择套牌」标题后，标题在就认得出。
+        """
+        config = make_config()
+        frame = deck_select_frame(config, with_start=False)
+
+        ui = be.identify(frame, config)
+        self.assertEqual("deck_select", ui["state"])
+        self.assertGreaterEqual(ui["deck_title"]["score"], 0.99)
+        self.assertLess(ui["start"]["score"], be.NCC_MIN)   # 确实没有「开始」
 
     def test_learn_refuses_a_frame_that_is_not_drawn_and_keeps_the_template(self):
         """画面还没画出来（白屏）时不能重裁模板，更不能覆盖掉能用的那个。
@@ -171,7 +196,8 @@ class TextOnlyRecognitionTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertEqual({}, result["learned"])
-        self.assertEqual({"traditional", "start"}, set(result["refused"]))
+        self.assertEqual({"traditional", "deck_select_title", "start"},
+                         set(result["refused"]))
         self.assertIn("深色", result["message"])
         self.assertEqual(before, path.read_bytes(), "绝不该覆盖掉能用的模板")
 

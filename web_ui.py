@@ -2163,10 +2163,11 @@ _RESTART_STATE = {"running": False}
 
 # ---------------------------------------------------------------- 界面识别 / 一键进入对战
 # 「现在在哪个界面」由 battle_entry 认：**只认文字**（灰度 NCC，在可校准框
-# ±40px 内找「传统对战」四个字 / 「开始」按钮的图案）。先看清楚再动手 ——
+# ±40px 内找「传统对战」/「选择套牌」的图案）。选卡组界面认「选择套牌」标题
+# （始终在）而不是右下角「开始」（没选中卡组时不出现）。先看清楚再动手 ——
 # 认不出来就什么都不点，超时退出并说明原因。
 _UI_STATE_LABELS = {"main_menu": "主界面（认出「传统对战」）",
-                    "deck_select": "选择套牌界面（认出「开始」）",
+                    "deck_select": "选择套牌界面（认出「选择套牌」标题）",
                     "unknown": "没认出界面"}
 _ENTER_STATE = {"running": False, "stage": "", "ok": None, "message": "",
                 "started_at": None, "finished_at": None, "steps": []}
@@ -2174,10 +2175,11 @@ _ENTER_LOCK = threading.Lock()
 
 
 def _ui_info() -> dict:
-    """界面识别的公共信息：三个框的位置、9 个点击点、当前卡组设置。"""
+    """界面识别的公共信息：四个框的位置、9 个点击点、当前卡组设置。"""
     import battle_entry
     return {
         "boxes": {"traditional": list(battle_entry.traditional_box()),
+                  "deck_title": list(battle_entry.deck_select_title_box()),
                   "start": list(battle_entry.start_box()),
                   "deck_grid": list(battle_entry.deck_grid_box())},
         "slot_points": [list(point) for point in battle_entry.deck_slot_points()],
@@ -2435,6 +2437,49 @@ def api_mode_click(body=None) -> dict:
         _MODE_CLICK_LOCK.release()
 
 
+# 「手动投降」：点右下角齿轮 → 等游戏菜单弹出 → 点中间红色「认输」。
+# 与自动投降（低胜率触发）共用 click.click_setting/click_concede 两个点击原语。
+# 前置条件：正在对战中。自动化**不需要停止** —— 这正是它存在的意义：
+# 自动打的时候你想立刻认输，不用先 stop（stop 只会让 FSM 停下、不会点认输，
+# 卡着的对局还在打）。但为避免和 FSM 抢鼠标，跟 FSM 共用同一个会话锁。
+_MANUAL_CONCEDE_LOCK = threading.Lock()
+
+
+def _manual_concede_inner() -> dict:
+    """实际点击执行体（手动投降）。api 与队列动作共用。"""
+    import click as hs_click
+    if not _MANUAL_CONCEDE_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "上一次投降点击还没完成，请稍候。"}
+    try:
+        with hs_click.hearthstone_action_session():
+            hs_click.click_setting()      # 齿轮 (1895, 1060)
+            time.sleep(1.0)               # 等游戏菜单弹出
+            hs_click.click_concede()      # 认输 (960, 380)
+        time.sleep(1.0)
+    except Exception as exc:
+        return {"ok": False, "error": f"投降点击失败：{exc}"}
+    finally:
+        _MANUAL_CONCEDE_LOCK.release()
+    message = "已发送投降（点齿轮 → 认输）；请目视确认对局是否结束"
+    _log("SYS", message)
+    return {"ok": True, "message": message}
+
+
+def api_concede_now(body=None) -> dict:
+    """手动投降：立刻点「齿轮 → 认输」。同步、约 3 秒。
+
+    前提：正在对战中（不在对局里点了会弹设置菜单，不会有别的副作用）。
+    """
+    # 队列在跑 → 拒绝（队列内部调用走 _manual_concede_inner，不受此限）
+    with _QUEUE_LOCK:
+        if _QUEUE_STATE["running"]:
+            return {"ok": False, "error": "命令队列正在执行，等它跑完再投降。"}
+    with _ENTER_LOCK:
+        if _ENTER_STATE["running"]:
+            return {"ok": False, "error": "「进入对战」正在跑，等它结束再投降。"}
+    return _manual_concede_inner()
+
+
 # ================================================================ 待做命令队列
 # 一次性提交多条命令，控制台后台线程按顺序执行。断线不影响；状态可查、可取消。
 _QUEUE_LOCK = threading.Lock()
@@ -2445,7 +2490,7 @@ _QUEUE_STATE = {"running": False, "items": [], "current": -1,
 # 例："stop mode=after_game" / "wait-stopped timeout=300" / "deck 1" / "deck-click 8"
 #     / "prepare" / "start" / "delay 5"
 _QUEUE_ACTIONS = {"stop", "wait_stopped", "deck", "deck_click", "prepare",
-                  "start", "delay", "mode"}
+                  "start", "delay", "mode", "concede_now"}
 
 
 def _queue_parse_step(text: str) -> dict:
@@ -2499,6 +2544,9 @@ def _queue_run_item(action: str, args: dict) -> dict:
         return _mode_click_inner(_MODE_ALIASES[mode])
     if action == "prepare":
         return api_prepare({})
+    if action == "concede_now":
+        # 走 _manual_concede_inner：队列自己就是执行上下文，不被队列守卫自我拒绝。
+        return _manual_concede_inner()
     if action == "start":
         return api_start({"keep_score": str(args.get("keep_score") or "").lower() in ("1", "true", "yes")})
     if action == "delay":
@@ -2927,6 +2975,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_toggle_overlay(body))
             elif path == "/api/concede":
                 self._json(api_save_concede(body))
+            elif path == "/api/concede_now":
+                self._json(api_concede_now(body))
             elif path == "/api/rank_stop":
                 self._json(api_save_rank_stop(body))
             elif path == "/api/human_like":

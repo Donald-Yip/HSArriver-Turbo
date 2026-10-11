@@ -61,9 +61,16 @@ REFERENCE_CLIENT = (1920, 1080)
 # ---------------------------------------------------------------- 可校准框的默认值
 # 主界面「传统对战」**四个字**的位置（实测：字 (835,320)-(1088,341)，外扩 3px）。
 MAIN_MENU_BATTLE_DEFAULT = (832, 317, 1091, 344)
+# 选择套牌界面顶部「选择套牌」**四个字**的位置（实测 2026-10-11 截图：
+# 文字 (674,126)-(772,144)，外扩 3px）。
+# 它是"停在选卡组界面"的**主**判定依据：标题始终在，而右下角「开始」在没选中
+# 卡组时不出现 —— 只认「开始」会让脚本一直认不出界面、反复点画面中心到超时。
+DECK_SELECT_TITLE_CONFIG_KEY = "deck_select_title_roi"
+DECK_SELECT_TITLE_DEFAULT = (671, 123, 775, 147)
 # 选择套牌界面 9 个卡组整块（实测列 486/729/968、行 318/534/750，3×3 均分）。
 DECK_GRID_DEFAULT = (366, 210, 1089, 858)
 # 「开始」按钮复用已经可校准的 post_game_start_roi（选套牌与结算界面同一个按钮）。
+# **不再单独用于界面判定**，只在点「开始」时定位（识别交给上面的标题）。
 START_BOX_CONFIG_KEY = "post_game_start_roi"
 START_BOX_DEFAULT = (1325, 865, 1475, 935)
 
@@ -111,6 +118,7 @@ DECK_SELECT_TIMEOUT_SECONDS = 90.0
 TEMPLATE_DIR = ROOT / "assets" / "ui_templates"
 TEMPLATE_FILE = {
     "traditional": "traditional_text.png",
+    "deck_select_title": "deck_select_title_text.png",
     "start": "start_text.png",
 }
 
@@ -162,6 +170,11 @@ def _roi(config, key: str, default) -> tuple:
 def traditional_box(config=None) -> tuple:
     """主界面「传统对战」文字框（客户区相对坐标）。"""
     return _roi(config, "main_menu_battle_roi", MAIN_MENU_BATTLE_DEFAULT)
+
+
+def deck_select_title_box(config=None) -> tuple:
+    """选择套牌界面顶部「选择套牌」标题框（客户区相对坐标）。"""
+    return _roi(config, DECK_SELECT_TITLE_CONFIG_KEY, DECK_SELECT_TITLE_DEFAULT)
 
 
 def deck_grid_box(config=None) -> tuple:
@@ -386,12 +399,15 @@ def deck_slot_looks_like_deck(frame_bgr, index: int, config=None) -> bool:
 def identify(frame_bgr, config=None) -> dict:
     """认一次界面：`main_menu` / `deck_select` / `unknown`（外加全部证据）。
 
-    判定顺序：**先看「开始」**（主界面上没有开始按钮，而选套牌与结算界面都有它，
-    是同一个按钮），**再看「传统对战」**。
+    判定顺序：**先看「选择套牌」标题**（选卡组界面**独有**，且没选中卡组时也在），
+    **再看「传统对战」**（主界面独有）。「开始」按钮只作为选卡组界面的**兜底**
+    证据返回，不单独决定状态 —— 它在没选中卡组时不出现，只认它会让脚本一直
+    认不出界面、反复点画面中心直到超时（用户 2026-10-11 反馈的死循环）。
     """
     result = {
         "state": "unknown",
         "traditional": None,
+        "deck_title": None,
         "start": None,
         "deck": {"slots_found": 0,
                  "slot_points": deck_slot_points(config),
@@ -404,23 +420,29 @@ def identify(frame_bgr, config=None) -> dict:
         return result
     gray = _gray(frame)
     traditional = _visible(gray, traditional_box(config), "traditional")
+    deck_title = _visible(gray, deck_select_title_box(config), "deck_select_title")
     start = _visible(gray, start_box(config), "start")
     plate = plate_pixels(frame, config)
     slots_found = sum(1 for value in plate if value >= DECK_PLATE_MIN_PIXELS)
     result["traditional"] = traditional
+    result["deck_title"] = deck_title
     result["start"] = start
     result["deck"] = {"slots_found": slots_found,
                       "slot_points": deck_slot_points(config),
                       "plate_pixels": plate}
-    if start["visible"]:
+    if deck_title["visible"] or start["visible"]:
         result["state"] = "deck_select"
-        if slots_found < DECK_MIN_SLOTS_FOUND:
-            result["note"] = (f"「开始」按钮可见，但只找到 {slots_found}/9 个卡组格："
-                              f"可能是对局结算界面")
+        if not deck_title["visible"]:
+            # 只有「开始」认出来：可能是结算界面，也可能是标题模板还没学。
+            result["note"] = ("「选择套牌」标题没认出来（只认到「开始」）："
+                              "可能是对局结算界面，或标题模板还没学"
+                              "（站到选卡组界面跑 hsctl ui --learn）")
+        elif slots_found < DECK_MIN_SLOTS_FOUND:
+            result["note"] = (f"只找到 {slots_found}/9 个卡组格：可能是对局结算界面")
     elif traditional["visible"]:
         result["state"] = "main_menu"
     else:
-        for item in (traditional, start):
+        for item in (traditional, deck_title, start):
             reason = item.get("reason")
             if reason:
                 result["note"] = f"{REASON_TEXT.get(reason, reason)}（score={item['score']}）"
@@ -562,7 +584,7 @@ def _wait_for_state(kind: str, *, timeout, interval, capture, click_at_fn, sleep
     盲点「传统对战」或卡组格。
     """
     label = ("主界面（传统对战）" if kind == "main_menu"
-             else "选择套牌界面（开始）")
+             else "选择套牌界面（选择套牌标题）")
     deadline = clock() + max(0.0, float(timeout))
     polls = 0
     last = None
@@ -763,7 +785,7 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
         stage = "aborted" if waited["reason"] == "aborted" else "timeout_deck_select"
         return done(False, stage, waited["message"])
     ui = waited["ui"]
-    record("wait_deck_select", ui["start"]["point"], waited["message"])
+    record("wait_deck_select", ui["deck_title"]["point"], waited["message"])
 
     # ⑤ 选卡组（可选，带单格保护）
     if deck_index:
@@ -800,8 +822,11 @@ def learn_template(kind: str = "all", *, frame=None, config=None) -> dict:
     if frame is None:
         return {"ok": False, "error": "抓不到炉石客户区（未运行/最小化）"}
     gray = _gray(to_reference(frame))
-    names = ["traditional", "start"] if kind in (None, "", "all") else [str(kind)]
-    boxes = {"traditional": traditional_box(config), "start": start_box(config)}
+    names = (["traditional", "deck_select_title", "start"]
+             if kind in (None, "", "all") else [str(kind)])
+    boxes = {"traditional": traditional_box(config),
+             "deck_select_title": deck_select_title_box(config),
+             "start": start_box(config)}
     learned, refused = {}, {}
     for name in names:
         box = boxes.get(name)

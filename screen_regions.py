@@ -64,18 +64,23 @@ POST_GAME_RANK_REGION = (1230, 180, 1385, 225)
 # 段位框的统一配色（校准目标 + 预览区域共用，避免两处各写一份十六进制）。
 RANK_COLOR = "#c9a3e8"
 
-# 界面识别（battle_entry）用的两个框，必须与 battle_entry.MAIN_MENU_BATTLE_DEFAULT /
-# DECK_GRID_DEFAULT 一致（test_screen_regions.py 会导入 battle_entry 校验，
-# 防止两边改岔 —— 与 AI 胜率区域那条规矩一样）。
+# 界面识别（battle_entry）用的框，必须与 battle_entry 的对应默认值一致
+# （test_screen_regions.py 会导入 battle_entry 校验，防止两边改岔 ——
+# 与 AI 胜率区域那条规矩一样）。
 #   * MAIN_MENU_BATTLE_REGION：「传统对战」**四个字**（不是整条银条）；
+#   * DECK_SELECT_TITLE_REGION：选择套牌界面顶部的「选择套牌」四个字
+#     （识别"在不在选卡组界面"的**主**依据，「开始」按钮没选卡组时不出现）；
 #   * DECK_GRID_REGION：选择套牌界面 9 个卡组的整块区域（脚本按 3×3 均分）。
 MAIN_MENU_BATTLE_REGION = (832, 317, 1091, 344)
+DECK_SELECT_TITLE_REGION = (671, 123, 775, 147)
 DECK_GRID_REGION = (366, 210, 1089, 858)
 MAIN_MENU_BATTLE_COLOR = "#f0c04a"
+DECK_SELECT_TITLE_COLOR = "#e88ab0"
 DECK_GRID_COLOR = "#8fd3e8"
 # 文字框可以很薄：校准窗口的缩放手柄默认不允许小于 MIN_SIZE(60)，这里放行到 20，
 # 否则 259×27 的「传统对战」框根本拖不出来（只能改配置文件）。
-MAIN_MENU_BATTLE_MIN_SIZE = 20
+TEXT_BOX_MIN_SIZE = 20
+MAIN_MENU_BATTLE_MIN_SIZE = TEXT_BOX_MIN_SIZE
 
 # 「手动切换对战模式」的四个点击点（选卡组界面）。2026-10 实机截图实测
 # （1920×1080 客户区，`hsctl screenshot --points mode` 可以把它们画在图上核对）：
@@ -157,7 +162,7 @@ CALIBRATION_TARGETS = (
      "label": "段位数字（名次）", "short": "段位", "color": RANK_COLOR,
      "default": POST_GAME_RANK_REGION,
      "hint": "框住结算界面右上角的段位数字：有数字=已上传说，数字就是名次"},
-    # 下面两个是「界面识别」用的（battle_entry）：认出界面才决定点什么。
+    # 下面三个是「界面识别」用的（battle_entry）：认出界面才决定点什么。
     {"key": "main_menu_battle", "config_key": "main_menu_battle_roi",
      "label": "主界面「传统对战」（识别+点击）", "short": "传统对战",
      "color": MAIN_MENU_BATTLE_COLOR,
@@ -165,6 +170,14 @@ CALIBRATION_TARGETS = (
      "min_size": MAIN_MENU_BATTLE_MIN_SIZE,
      "hint": "框住主界面的「传统对战」四个字（贴字就行，不用框银条）："
              "脚本在框 ±40px 内用这四个字的图案找它，认到就点认到的位置"},
+    {"key": "deck_select_title", "config_key": "deck_select_title_roi",
+     "label": "选择套牌「选择套牌」标题（识别）", "short": "选择套牌标题",
+     "color": DECK_SELECT_TITLE_COLOR,
+     "default": DECK_SELECT_TITLE_REGION,
+     "min_size": TEXT_BOX_MIN_SIZE,
+     "hint": "框住选择套牌界面顶部的「选择套牌」四个字：认出它就判定停在选卡组"
+             "界面。**必须用标题而不是右下角「开始」**——没选中卡组时「开始」"
+             "不出现，只认「开始」会让脚本一直认不出、反复点画面中心直到超时"},
     {"key": "deck_grid", "config_key": "deck_grid_roi",
      "label": "选择套牌 9 个卡组（3×3）", "short": "9 个卡组",
      "color": DECK_GRID_COLOR,
@@ -334,12 +347,18 @@ def screenshot_regions(config=None) -> list[dict]:
          "config_key": "post_game_rank_roi",
          "note": "每局结束读一次：有数字=已上传说（数字即名次），空白=还没上传说；"
                  "读数偏了就把这个框拖到名次数字上"},
-        # 下面两个是「界面识别」画出来的：认出界面才决定点什么，所以也要能一眼看到。
+        # 下面三个是「界面识别」画出来的：认出界面才决定点什么，所以也要能一眼看到。
         {"key": "main_menu_battle", "color": MAIN_MENU_BATTLE_COLOR,
          "label": "主界面「传统对战」（认出它就点它）",
          "box": by_key["main_menu_battle"]["box"],
          "config_key": "main_menu_battle_roi",
          "note": "框住那四个字：认到「传统对战」= 在主界面，脚本点认到的文字位置"},
+        {"key": "deck_select_title", "color": DECK_SELECT_TITLE_COLOR,
+         "label": "选择套牌「选择套牌」标题（认出它=在选卡组界面）",
+         "box": by_key["deck_select_title"]["box"],
+         "config_key": "deck_select_title_roi",
+         "note": "框住顶部那四个字：它是停留在选卡组界面的判定依据；"
+                 "不要用右下角「开始」（没选卡组时它不出现）"},
         {"key": "deck_grid", "color": DECK_GRID_COLOR,
          "label": "选择套牌 9 个卡组（3×3 均分 = 9 个点击点）",
          "box": by_key["deck_grid"]["box"],

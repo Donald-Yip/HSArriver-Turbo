@@ -1613,6 +1613,11 @@ def cmd_concede_set(args, ctx: Ctx) -> int:
     return _ok_message(ctx, ctx.post("/api/concede", body))
 
 
+def cmd_concede_now(args, ctx: Ctx) -> int:
+    """手动投降：立刻点「齿轮 → 认输」，不需要先停自动化。"""
+    return _ok_message(ctx, ctx.post("/api/concede_now", {}))
+
+
 def cmd_rank_stop_show(args, ctx: Ctx) -> int:
     return _print_section(ctx, "rank_stop", "上分停止条件", (
         ("enabled", "总开关"),
@@ -2560,7 +2565,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(handler=cmd_liveness_set)
 
     # ---- concede
-    p = sub.add_parser("concede", parents=[common], help="自动投降")
+    p = sub.add_parser("concede", parents=[common],
+                       help="自动投降配置 / 手动投降（concede now）")
     p.set_defaults(handler=cmd_concede_show)
     csub2 = p.add_subparsers(dest="action", metavar="<动作>")
     q = csub2.add_parser("show", parents=[common], help="显示当前配置")
@@ -2572,6 +2578,9 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--rounds", type=int, default=None, help="连续低于阈值的回合数")
     q.add_argument("--no-hot", action="store_true", help="运行中拒绝修改")
     q.set_defaults(handler=cmd_concede_set)
+    q = csub2.add_parser("now", parents=[common],
+                         help="手动投降：立刻点「齿轮 → 认输」（无需先停自动化）")
+    q.set_defaults(handler=cmd_concede_now)
 
     # ---- rank-stop
     p = sub.add_parser("rank-stop", parents=[common], help="上分停止条件")
