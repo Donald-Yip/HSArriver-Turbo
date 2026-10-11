@@ -1424,6 +1424,14 @@ class CalibrationSession:
 
 
 def main() -> int:
+    # DPI 感知必须最先声明：未声明时 Windows 会把客户区几何按系统缩放虚拟化
+    # （150% 下 1920×1080 报成 1280×720），而抓图是物理像素 —— 两者对不上会
+    # 让校准框整体错位。见 display_mapping 模块 docstring。
+    try:
+        from display_mapping import dpi_aware
+        dpi_aware()
+    except Exception:
+        pass
     args = sys.argv[1:]
     selftest = "--selftest" in args
     ocr_enabled = "--no-ocr" not in args

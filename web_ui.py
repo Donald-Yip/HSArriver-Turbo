@@ -3126,6 +3126,14 @@ def _boot_resume_schedule():
 
 def main():
     os.chdir(ROOT)
+    # DPI 感知必须最先声明：未声明时 Windows 会把客户区几何按系统缩放虚拟化
+    # （150% 下 1920×1080 报成 1280×720），而抓图是物理像素 —— 两者对不上会
+    # 让所有 ROI 错位、界面识别失败。见 display_mapping 模块 docstring。
+    try:
+        from display_mapping import dpi_aware
+        dpi_aware()
+    except Exception:
+        pass
     # 常驻阶段监测线程：停止自动化也继续检测当前阶段（随时可恢复）
     threading.Thread(target=_stage_monitor_loop, name="hs-stage",
                      daemon=True).start()

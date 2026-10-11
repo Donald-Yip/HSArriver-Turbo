@@ -40,11 +40,30 @@
   `None`，所有换算函数**原样返回**，调用方行为与改造前一致。
 * 换算按实际客户区比例做，客户区非 16:9 时 `scale_x != scale_y` 会把画面
   拉变形，所以用 `compatible()` / `too_small()` 让自检与调用方能够拒绝。
+
+DPI 感知（**必须**，见 `dpi_aware()`）
+------------------------------------------------------------------
+Windows 对"未声明 DPI 感知"的进程会**虚拟化**窗口几何读数：系统缩放 150%
+时，同一个 `GetClientRect` 会返回 `1280×720`（虚拟化）而不是真实的
+`1920×1080`（物理像素）。而 `BitBlt` / `ImageGrab` 拿的是**物理像素**，
+于是"读到的客户区尺寸"与"抓到的图"对不上 —— 裁剪框整体错位，模板匹配
+必然失败，表现是"屏幕上明明有字，脚本却认不出界面"。
+
+本机实测（4K 桌面 + 150% 缩放）：
+
+| DPI 感知 | GetClientRect | ClientToScreen | 抓到的图 |
+| --- | --- | --- | --- |
+| 未声明 | 1280×720（错） | (455, 497)（错） | 1280×720，混入其它窗口内容 |
+| 已声明 | 1920×1080（对） | (683, 746)（对） | 1920×1080，干净的炉石画面 |
+
+所以**每个进程入口都必须先调 `dpi_aware()`**（`hsctl.py` / `web_ui.py` /
+`calibrate_roi.py`）。它幂等、失败不抛异常，非 Windows 上是空操作。
 """
 from __future__ import annotations
 
 import ctypes
 import math
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
@@ -639,6 +658,47 @@ def system_dpi() -> int:
         return int(ctypes.windll.user32.GetDpiForSystem())
     except Exception:
         return 0
+
+
+# 进程级 DPI 感知只声明一次；重复调用是空操作（SetProcessDpiAwareness 第二次
+# 会返回 E_ACCESSDENIED，属正常，不当错误）。
+_DPI_AWARE_DONE = False
+
+
+def dpi_aware() -> bool:
+    """声明本进程为 **per-monitor DPI 感知**，让窗口几何读数返回物理像素。
+
+    **为什么必须有**：未声明的进程，Windows 会把 `GetClientRect` /
+    `ClientToScreen` 的结果按系统缩放**虚拟化**（150% 时 1920×1080 报成
+    1280×720），而 `BitBlt`/`ImageGrab` 抓的是物理像素 —— 读到的几何与抓到的
+    图对不上，裁剪框整体错位，界面识别必然失败。详见模块 docstring「DPI 感知」。
+
+    选用 `SetProcessDpiAwareness(2)` = `PROCESS_PER_MONITOR_DPI_AWARE`：
+    多显示器且各屏缩放不同时也正确。优先走 shcore（Win8.1+），
+    退回 `SetProcessDPIAware`（Vista+），再退回什么都不做（非 Windows）。
+
+    幂等、**绝不抛异常**：拿不到就安静降级，不因为一个辅助调用打断主流程。
+    返回是否成功声明（用于自检显示，不用于控制流程）。
+    """
+    global _DPI_AWARE_DONE
+    if _DPI_AWARE_DONE:
+        return True
+    if not sys.platform.startswith("win"):
+        _DPI_AWARE_DONE = True
+        return False
+    ok = False
+    try:
+        # 0x2 = PROCESS_PER_MONITOR_DPI_AWARE
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        ok = True
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+            ok = True
+        except Exception:
+            ok = False
+    _DPI_AWARE_DONE = ok
+    return ok
 
 
 def mapping_info(mapping: Optional[DisplayMapping]) -> dict:

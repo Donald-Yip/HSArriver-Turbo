@@ -2802,6 +2802,14 @@ def _ensure_interpreter_or_exit(argv=None) -> int:
 
 def main(argv=None) -> int:
     _make_output_encoding_safe()
+    # DPI 感知必须最先声明：未声明时 Windows 会把客户区几何按系统缩放虚拟化
+    # （150% 下 1920×1080 报成 1280×720），而抓图是物理像素 —— 两者对不上会
+    # 让所有 ROI 错位、界面识别失败。见 display_mapping 模块 docstring。
+    try:
+        from display_mapping import dpi_aware
+        dpi_aware()
+    except Exception:
+        pass
     env_code = _ensure_interpreter_or_exit(argv)
     if env_code != EXIT_OK:
         return env_code
