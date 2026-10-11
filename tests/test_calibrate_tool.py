@@ -257,6 +257,135 @@ class HitTestTests(unittest.TestCase):
                          self.session.targets[0]["box"])
 
 
+class CardDragTests(unittest.TestCase):
+    """目标条本身要能被拖开。
+
+    卡片默认压在屏幕正中，正好挡住"正中那个框"时就完全没法对齐了（用户反馈），
+    所以要能整块挪走。挪动只活在本次会话，不写进 ui_config.json。
+    """
+
+    WIDTH, HEIGHT = 2560, 1440
+
+    def setUp(self):
+        self.session = make_session()
+        self.session.width, self.session.height = self.WIDTH, self.HEIGHT
+
+    def _title_point(self):
+        """标题带上的一点（卡片内、又不属于任何目标行/按钮）。"""
+        left, top = self.session._card_rect(self.WIDTH, self.HEIGHT)[:2]
+        return left + 60, top + 10
+
+    def test_the_title_band_is_a_drag_handle(self):
+        x, y = self._title_point()
+
+        self.assertEqual(("card", None),
+                         self.session._hit_test(x, y, self.WIDTH,
+                                                self.HEIGHT))
+
+    def test_dragging_the_card_moves_it_and_keeps_its_size(self):
+        base = self.session._card_rect(self.WIDTH, self.HEIGHT)
+        x, y = self._title_point()
+        self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+        self.assertEqual("card", self.session.drag[0])
+
+        self.session._on_mouse_move(x - 400, y + 120, self.WIDTH, self.HEIGHT)
+        moved = self.session._card_rect(self.WIDTH, self.HEIGHT)
+
+        self.assertEqual(base[2] - base[0], moved[2] - moved[0], "拖动不改尺寸")
+        self.assertEqual(base[3] - base[1], moved[3] - moved[1], "拖动不改高")
+        self.assertEqual((base[0] - 400, base[1] + 120), moved[:2])
+
+    def test_dragging_the_card_does_not_touch_any_region_box(self):
+        """拖卡片是纯界面行为：12 个 ROI 框一个都不许动。"""
+        before = [list(t["box"]) for t in self.session.targets]
+        x, y = self._title_point()
+        self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+        self.session._on_mouse_move(x + 200, y - 180, self.WIDTH, self.HEIGHT)
+
+        self.assertEqual(before, [list(t["box"]) for t in self.session.targets])
+
+    def test_the_card_is_clamped_into_the_screen(self):
+        base = self.session._card_rect(self.WIDTH, self.HEIGHT)
+        x, y = self._title_point()
+        self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+
+        self.session._on_mouse_move(-5000, -5000, self.WIDTH, self.HEIGHT)
+        self.assertEqual((0, 0), self.session._card_rect(self.WIDTH,
+                                                         self.HEIGHT)[:2])
+
+        self.session._on_mouse_move(99999, 99999, self.WIDTH, self.HEIGHT)
+        card = self.session._card_rect(self.WIDTH, self.HEIGHT)
+        self.assertEqual(self.WIDTH, card[2])
+        self.assertEqual(self.HEIGHT, card[3])
+        self.assertGreater(base[0], 0, "这个用例的前提是卡片本来不在左上角")
+
+    def test_pulling_back_from_the_screen_edge_responds_immediately(self):
+        """贴边后往回拖要立刻跟手。
+
+        曾经的写法是把"指针相对按下的位移"累加进 card_offset：卡片一旦被边缘
+        夹住，指针继续往外走时累加量还在涨，往回拖就得先空拖掉那段"隐形行程"，
+        表现是卡片黏在边上不动。现在改成每帧用指针当前位置重算，就不该有黏滞。
+        """
+        x, y = self._title_point()
+        grab_dx, grab_dy = 60, 10
+        self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
+
+        self.session._on_mouse_move(-5000, -5000, self.WIDTH, self.HEIGHT)
+        self.assertEqual((0, 0), self.session._card_rect(self.WIDTH,
+                                                         self.HEIGHT)[:2])
+
+        # 只往回挪一点点，卡片就必须同幅度地跟出来
+        self.session._on_mouse_move(x - 500, y - 300, self.WIDTH, self.HEIGHT)
+        self.assertEqual((x - 500 - grab_dx, y - 300 - grab_dy),
+                         self.session._card_rect(self.WIDTH, self.HEIGHT)[:2])
+
+    def test_target_rows_and_buttons_win_over_the_card_drag(self):
+        """卡片几乎被目标行铺满：按下必须优先选中那一行，不能变成拖卡片。"""
+        rect, index = self.session._chip_rects(self.WIDTH, self.HEIGHT)[2]
+        self.assertEqual(("target", 2),
+                         self.session._hit_test(rect[0] + 40, rect[1] + 8,
+                                                self.WIDTH, self.HEIGHT))
+
+        save = self.session._save_rect(self.WIDTH, self.HEIGHT)
+        self.assertEqual(("save", None),
+                         self.session._hit_test((save[0] + save[2]) // 2,
+                                                (save[1] + save[3]) // 2,
+                                                self.WIDTH, self.HEIGHT))
+        exit_ = self.session._exit_rect(self.WIDTH, self.HEIGHT)
+        self.assertEqual(("exit", None),
+                         self.session._hit_test((exit_[0] + exit_[2]) // 2,
+                                                (exit_[1] + exit_[3]) // 2,
+                                                self.WIDTH, self.HEIGHT))
+
+    def test_the_gap_between_rows_is_still_draggable(self):
+        """行与行之间的缝不是按钮也不是行：抓它也算拖卡片。"""
+        (_, top, _, _) = self.session._card_rect(self.WIDTH, self.HEIGHT)
+        left = self.session._card_rect(self.WIDTH, self.HEIGHT)[0]
+        first = self.session._chip_rects(self.WIDTH, self.HEIGHT)[0][0]
+        first_row_bottom = first[3]
+        second = self.session._chip_rects(self.WIDTH, self.HEIGHT)[1][0]
+        gap_y = (first_row_bottom + second[1]) // 2
+
+        self.assertEqual(("card", None),
+                         self.session._hit_test(left + 60, gap_y,
+                                                self.WIDTH, self.HEIGHT))
+
+    def test_the_offset_is_not_persisted(self):
+        """拖动只在本次会话有效：ui_config.json 里不许出现界面状态。"""
+        left, top = self.session._card_rect(self.WIDTH, self.HEIGHT)[:2]
+        self.session._on_mouse_down(left + 60, top + 10, self.WIDTH,
+                                    self.HEIGHT)
+        self.session._on_mouse_move(left - 300, top + 90, self.WIDTH,
+                                    self.HEIGHT)
+        self.assertNotEqual([0, 0], self.session.card_offset)
+
+        fresh = make_session()
+        fresh.width, fresh.height = self.WIDTH, self.HEIGHT
+        self.assertEqual([0, 0], fresh.card_offset)
+        self.assertEqual(calibrate_roi.card_rect(self.WIDTH, self.HEIGHT),
+                         fresh._card_rect(self.WIDTH, self.HEIGHT))
+
+
 class SaveTests(unittest.TestCase):
     def setUp(self):
         self.tmp = make_temp_dir()

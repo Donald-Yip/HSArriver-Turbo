@@ -32,6 +32,7 @@
 非当前目标一个都不画 —— 十几个框同时铺出来根本看不清要对齐哪个。
 整体拖动抓**框正中央的四向箭头十字标**（它画在目标条之上，框落在屏幕正中也不会被盖住）；
 框的四条边同样能拖整体，只是框一大就离得远、不好抓。改大小拖右下角手柄。
+**目标条挡住了框就把它拖走**：抓卡片标题带整块挪（目标行/按钮仍照常点）。
 
 **框跟着炉石窗口走**：所有框都以"客户区相对坐标"为准（基准 1920×1080），
 每一帧按当前窗口位置/尺寸重新推导屏幕位置。所以：
@@ -47,6 +48,9 @@
   * **框正中央有一个四向箭头十字标**：抓它就能整体拖动这个框。框的
     四条边同样可以拖整体，但框一大就离得太远、很难抓准，所以主力抓手是十字标；
   * 拖右下角手柄可调整大小；
+  * **目标条本身也能拖**：卡片默认压在屏幕正中，正好挡住"正中那个框"时就抓
+    标题带（✥ 图标那一行）整块挪开；目标行和两个按钮之外的空白都能拖。
+    挪动**只活在这一个会话里**，不写进 `ui_config.json`，关掉窗口下次仍回正中；
   * 目标条里列出十二个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
   * 目标条底部两个按钮：**左「保存全部区域 (S)」、右「退出 (Esc)」**，
     都有悬停高亮；键盘 **S** 保存、**Esc** 退出同样有效；
@@ -210,12 +214,27 @@ def wrap_text(text, font, max_width: float,
     return lines
 
 
-def card_rect(width: int, height: int,
-              card_h: int | None = None) -> tuple[int, int, int, int]:
-    """目标条的矩形：屏幕正中央（屏幕比卡片还小时贴左上角）。"""
+def card_rect(width: int, height: int, card_h: int | None = None,
+              offset: tuple[int, int] | None = None
+              ) -> tuple[int, int, int, int]:
+    """目标条的矩形：屏幕正中央 + 用户拖动偏移（屏幕比卡片还小时贴左上角）。
+
+    offset 是用户把目标条拖开的那段位移（见 `CalibrationSession.card_offset`）。
+    它**只活在这次会话里**，不写进 ui_config.json：那是 ROI 配置，不该混界面状态。
+    拖动后仍会把整张卡片夹回屏幕内（只保证"看得见"，不改变卡片尺寸）。
+    """
     card_h = CARD_H if card_h is None else int(card_h)
-    left = max(8, (int(width) - CARD_W) // 2)
-    top = max(8, (int(height) - card_h) // 2)
+    dx, dy = (0, 0) if offset is None else (int(offset[0]), int(offset[1]))
+    width, height = int(width), int(height)
+    # 居中位置（屏幕比卡片还小时贴左上角 8px，不出现负数坐标）。
+    home_left = max(8, (width - CARD_W) // 2)
+    home_top = max(8, (height - card_h) // 2)
+    if offset is None:
+        return (home_left, home_top, home_left + CARD_W, home_top + card_h)
+    # 拖动后夹回屏幕内。下限用 **0 而不是 8**：贴边是用户主动拖过去的，
+    # 应该能真正贴到边上（否则右/下边缘永远差 8px 对不齐）。
+    left = min(max(0, home_left + dx), max(0, width - CARD_W))
+    top = min(max(0, home_top + dy), max(0, height - card_h))
     return (left, top, left + CARD_W, top + card_h)
 
 # ---------------------------------------------------------------- 预览面板
@@ -323,9 +342,15 @@ class CalibrationSession:
         # _check_active_target）：显示在顶部提示条里，拖框时当场看准没准。
         self.target_status = None
         self.drag = None              # None | ("move", dx, dy) | ("resize",)
+                                      #        | ("card", dx, dy)
+        # 目标条被拖开的位移（相对"屏幕正中"；只活在本会话，不落盘）。
+        # 默认停在正中：屏幕正中是唯一空出来的地方（推荐面板在左、换牌确认在
+        # 右下、AI胜率浮动条贴左上），但正中偶尔会压住正在校准的那个框，所以
+        # 让用户能把它拖开（用户反馈）。
+        self.card_offset = [0, 0]
         # 鼠标在哪个按钮/目标行上（只为高亮，不影响其它逻辑）。
         self.hover = None             # None | ("save", None) | ("exit", None)
-                                      #        | ("target", index)
+                                      #        | ("target", index) | ("card", None)
         # 按下时落在哪个按钮上：抬起也在同一按钮才触发（保存/退出都一样）。
         self.press_target = None      # None | ("save", None) | ("exit", None)
         self.saved_flash_until = 0.0
@@ -472,7 +497,8 @@ class CalibrationSession:
         return cached
 
     def _card_rect(self, width: int, height: int):
-        return card_rect(width, height, self._card_height())
+        return card_rect(width, height, self._card_height(),
+                         self.card_offset)
 
     def _chip_rects(self, width: int, height: int):
         left, top = self._card_rect(width, height)[:2]
@@ -483,6 +509,19 @@ class CalibrationSession:
                            left + CARD_W - CARD_PAD, row_top + ROW_H - 4), index))
             row_top += ROW_H
         return rects
+
+    def _card_drag_rect(self, width: int, height: int):
+        """目标条的「拖动区」= 卡片减去目标行和按钮后剩下的部分。
+
+        为什么要"减去"而不是整张卡片都能拖：卡片几乎被目标行铺满了，如果整张
+        可拖，按下时到底是"选中那一行"还是"开始拖卡片"就分不清了 —— 拖完手指
+        一松才发现在选目标。所以：目标行、两个按钮**优先**响应自己的点击，
+        其余的空白（标题带、说明区、行与行之间的缝、状态文字附近）才是拖卡片。
+        """
+        left, top, right, bottom = self._card_rect(width, height)
+        blocked = [rect for rect, _index in self._chip_rects(width, height)]
+        blocked.extend(self._button_rects(width, height))
+        return (left, top, right, bottom), blocked
 
     def _button_rects(self, width: int, height: int):
         """底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」。"""
@@ -524,9 +563,13 @@ class CalibrationSession:
     def _hit_test(self, sx: int, sy: int, width: int, height: int):
         """返回 (类型, 目标序号)；不在可交互区域上返回 None。
 
-        命中顺序（先到先得）：目标行/按钮 → 右下角手柄 → **正中央十字标** →
-        框边。十字标排在框边前面，因为它在框内部，是"整体拖动"的主抓手：
-        用户反馈拖边缘移动整体很难抓（框一大，四条边离得远、要瞄得很准）。
+        命中顺序（先到先得）：目标行/按钮 → **目标条空白区（拖卡片）** →
+        右下角手柄 → 正中央十字标 → 框边。
+
+        卡片排在框之前：卡片是画在最上层的不透明面板，点"穿过"卡片去命中的框
+        与眼睛看到的不一致。卡片内部又先给目标行/按钮，只有它们之外的空白才算
+        拖卡片（见 `_card_drag_rect`）。十字标排在框边前面，因为它在框内部，
+        是"整体拖动"的主抓手（框一大，四条边离得远、要瞄得很准）。
         """
         for rect, index in self._chip_rects(width, height):
             if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
@@ -535,6 +578,11 @@ class CalibrationSession:
                            ("exit", self._exit_rect(width, height))):
             if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
                 return (name, None)
+        card, blocked = self._card_drag_rect(width, height)
+        if card[0] <= sx <= card[2] and card[1] <= sy <= card[3]:
+            if not any(r[0] <= sx <= r[2] and r[1] <= sy <= r[3]
+                       for r in blocked):
+                return ("card", None)
         # 当前目标的框与鼠标事件同口径（都是屏幕上量出来的坐标），直接比较。
         left, top, right, bottom = (int(v) for v in self.active["box"])
         if (right + 2 <= sx <= right + 2 + HANDLE
@@ -580,6 +628,10 @@ class CalibrationSession:
             # 十字标与框边都是「整体移动」：记住按下点相对框左上的偏移即可。
             left, top = self.active["box"][0], self.active["box"][1]
             self.drag = ("move", sx - left, sy - top)
+        elif name == "card":
+            # 拖目标条：记住按下点相对卡片左上的偏移，移动时反推卡片左上。
+            card = self._card_rect(width, height)
+            self.drag = ("card", sx - card[0], sy - card[1])
         self.dirty = True
         if self.window is not None and self.window.hwnd is not None:
             USER32.SetCapture(self.window.hwnd)
@@ -607,6 +659,23 @@ class CalibrationSession:
                 self.dirty = True
             return
         # 鼠标给的是屏幕坐标，而框本身也是屏幕上量出来的坐标：直接写入。
+        if self.drag[0] == "card":
+            # 拖目标条：drag 里存的是**按下点相对卡片左上**的偏移（grab），把
+            # "想让卡片左上落在 (sx-grab)"夹进屏幕后反推 card_offset。
+            #
+            # 注意**不能**在按下的那一刻就把 grab 换算成"指针相对屏幕的绝对
+            # 位移"再累加：一旦卡片被屏幕边缘夹住，指针继续往外走时累积量会
+            # 一直涨，往回拖就得先空拖掉那段"隐形行程"，表现是卡片贴在边上
+            # 不动（实测踩过）。存 grab、每帧用**指针当前位置**重算，就不存在
+            # 这种累积误差。
+            _, grab_x, grab_y = self.drag
+            card_h = self._card_height()
+            want_left = min(max(0, sx - grab_x), max(0, width - CARD_W))
+            want_top = min(max(0, sy - grab_y), max(0, height - card_h))
+            self.card_offset = [want_left - max(8, (width - CARD_W) // 2),
+                                want_top - max(8, (height - card_h) // 2)]
+            self.dirty = True
+            return
         left, top, right, bottom = (int(v) for v in self.active["box"])
         if self.drag[0] == "move":
             _, dx, dy = self.drag
@@ -996,6 +1065,27 @@ class CalibrationSession:
             if x < hx1 and y < hy1:
                 draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
 
+    @staticmethod
+    def _draw_move_glyph(draw, x: int, y: int, color) -> None:
+        """16×16 的「四向箭头」小图标：标在目标条标题前，提示这里能整块拖。
+
+        和框正中央的大十字标是同一个意象（四向箭头 = 整体移动），但这里只是
+        **静态提示**：真正判定拖动靠 `_hit_test` 的 ("card", None)，不是靠这个
+        图标——所以图标画小了也不影响好不好拖。
+        """
+        cx, cy = x + 7, y + 7
+        arm = 6
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            tip_x, tip_y = cx + dx * arm, cy + dy * arm
+            draw.line((cx, cy, tip_x, tip_y), fill=color, width=2)
+            back_x, back_y = tip_x - dx * 3, tip_y - dy * 3
+            if dx:
+                draw.line((tip_x, tip_y, back_x, back_y - 2), fill=color, width=2)
+                draw.line((tip_x, tip_y, back_x, back_y + 2), fill=color, width=2)
+            else:
+                draw.line((tip_x, tip_y, back_x - 2, back_y), fill=color, width=2)
+                draw.line((tip_x, tip_y, back_x + 2, back_y), fill=color, width=2)
+
     def _draw_move_cross(self, draw, color) -> None:
         """框正中央的「四个箭头十字标」= 整体拖动抓手。
 
@@ -1039,14 +1129,25 @@ class CalibrationSession:
           * 说明按「：」拆成金色标题段 + 暗淡说明段；
           * 说明段按卡片内宽换行（最多 3 行），卡片高度跟着行数加高；
           * 「当前目标」「坐标」「保存状态」分行排版，当前目标用目标自己的颜色高亮；
-          * 底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」，悬停会提亮。
+          * 底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」，悬停会提亮；
+          * 标题带是**拖动把手**（✥ + 高亮条），抓卡片空白处能整块挪开——卡片
+            默认压在屏幕正中，正好挡住"正中那个框"时挪一下就能看见。
         """
         card_left, card_top, card_right, card_bottom = self._card_rect(width,
                                                                       height)
         draw.rectangle((card_left, card_top, card_right, card_bottom),
                        fill=CARD_BG, outline=CARD_BORDER, width=2)
-        self._draw_text(draw, (card_left + CARD_PAD, card_top + CARD_PAD),
-                        "校准目标（Tab 切换）", 15, CARD_BORDER)
+        # 标题带 = 拖动把手：悬停时整条提亮，一眼看出"这里能拖"。
+        title_h = CARD_PAD + 20 + 8
+        dragging_card = self.drag is not None and self.drag[0] == "card"
+        if dragging_card or self.hover == ("card", None):
+            draw.rectangle((card_left + 2, card_top + 2, card_right - 2,
+                            card_top + title_h - 4),
+                           fill=CARD_ROW_HOVER)
+        self._draw_move_glyph(draw, card_left + CARD_PAD, card_top + CARD_PAD,
+                              CARD_BORDER)
+        self._draw_text(draw, (card_left + CARD_PAD + 18, card_top + CARD_PAD),
+                        "校准目标（Tab 切换 · 拖这里挪动）", 15, CARD_BORDER)
         for rect, index in self._chip_rects(width, height):
             target = self.targets[index]
             active = index == self.active_index
