@@ -268,7 +268,8 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
 - 点击位置不准时**不用改代码**：`ui_config.json` 顶层 `mode_click` 段可覆盖坐标
   （`menu_open` / `wild` / `standard` / `casual`，值为 `[x, y]`，1920×1080 客户区坐标），
   改完立即生效。也可以 `hsctl calibrate` 在校准窗口里拖这四个框（框中心=点击点），
-  按 S 保存。
+  按 S 保存 —— **ROI 不是热开关**：保存后要在下次「开始对战」时读取一次才生效
+  （`fsm.init()` 重建 `RecommendationConfig`），不用重启脚本进程。
 - 典型场景：上传说后换模式继续——
   `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 2" "start"`。
 

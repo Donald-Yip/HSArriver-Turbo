@@ -276,7 +276,7 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 | 命令 | 说明 |
 | --- | --- |
 | `overlay on\|off\|toggle` | 开/关右上角日志浮窗。`on`/`off` 已经是目标状态时**不会**多发请求 |
-| `calibrate [--target 目标]` | 打开屏幕上的校准窗口（和网页按钮是同一个窗口）。`--target main_menu_battle` 可以一打开就停在「传统对战」那个框上；目标名：`recommendation` / `mulligan_confirm` / `win_rate` / `post_game_start` / `rank` / `main_menu_battle` / `deck_grid` |
+| `calibrate [--target 目标]` | 打开屏幕上的校准窗口（和网页按钮是同一个窗口）。`--target main_menu_battle` 可以一打开就停在「传统对战」那个框上；目标名：`recommendation` / `mulligan_confirm` / `win_rate` / `post_game_start` / `rank` / `main_menu_battle` / `deck_select_title` / `deck_grid` / `mode_menu_open` / `mode_wild` / `mode_standard` / `mode_casual`。窗口里**只画当前目标那一个框**，抓框正中央的四向箭头十字标整体拖动，拖右下角手柄缩放；S 保存后**点一次「开始对战」即生效**（ROI 在 `fsm.init()` 时读取） |
 | `schedule` | 看当前定时任务 |
 | `schedule at 22:30 [--end 23:30]` | 开始时间。`HH:MM` 按「今天，已过则明天」；也接受 `2026-05-30T22:30` |
 | `schedule at --in 30 [--duration 90]` | 30 分钟后开始，持续 90 分钟 |

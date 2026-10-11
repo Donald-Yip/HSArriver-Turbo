@@ -8,7 +8,7 @@
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
   * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-七个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
+十二个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
 | # | 目标 | 写入 ui_config.json | 对齐方法 |
 | --- | --- | --- | --- |
@@ -18,31 +18,48 @@
 | 4 | 结算「开始」按钮（青绿） | `post_game_start_roi` | 框住每局结束底部的「开始」按钮：脚本用它判断结算界面点完没有，并点它的正中心 |
 | 5 | 段位数字（淡紫） | `post_game_rank_roi` | 框住结算界面右上角的段位名次数字：有数字=已上传说，数字就是名次 |
 | 6 | 主界面「传统对战」（金） | `main_menu_battle_roi` | **贴住那四个字**（不用框整条银条）：脚本在框 ±40px 内用这四个字的图案找它，认到就点认到的位置 |
-| 7 | 选择套牌 9 个卡组（天蓝） | `deck_grid_roi` | 框住 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
+| 7 | 选择套牌「选择套牌」标题（粉） | `deck_select_title_roi` | 框住顶部那四个字。**判界面靠它，绝不能用右下角「开始」**（没选中卡组时「开始」不出现） |
+| 8 | 选择套牌 9 个卡组（天蓝） | `deck_grid_roi` | 框住 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
+| 9-12 | 模式按钮 + 三个盾牌（红） | `mode_click` 段 | 选卡组界面的模式按钮、以及狂野/标准/休闲三个盾牌：**框中心=点击点** |
 
-目标 6/7 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
+目标 6/7/8 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
 （`框内文字匹配 1.00（阈值 0.80），对准了` / `9 格里 9 格有卡组名牌文字`），
 用的就是脚本运行时**同一个**判定函数，所以"这里说对、脚本说不对"不会发生。
-目标 6 是文字框（259×27），所以它的缩放下限单独放宽到 20px（见 `min_size`）。
+目标 6/7 是文字框（传统对战 259×27、选择套牌标题 104×24），所以它们的缩放下限
+单独放宽到 20px（见 `min_size`）。
+
+**随时只有一个框在屏幕上**：只画当前目标那一个（切目标时框就换位置），
+非当前目标一个都不画 —— 十几个框同时铺出来根本看不清要对齐哪个。
+整体拖动抓**框正中央的四向箭头十字标**（它画在目标条之上，框落在屏幕正中也不会被盖住）；
+框的四条边同样能拖整体，只是框一大就离得远、不好抓。改大小拖右下角手柄。
 
 **框跟着炉石窗口走**：所有框都以"客户区相对坐标"为准（基准 1920×1080），
 每一帧按当前窗口位置/尺寸重新推导屏幕位置。所以：
 
-  * 拖动/缩放炉石窗口时，7 个框**实时跟着走**，不需要重新校准；
+  * 拖动/缩放炉石窗口时，所有框**实时跟着走**，不需要重新校准；
   * 保存时写入的是客户区相对坐标（`roi_frame="client"`），换个分辨率也不会偏；
   * 老配置（没有 `roi_frame` 标记）第一次打开时会自动判断每个框的口径并打印出来，
     按一次 **S** 保存即升级成新格式。
 
 操作：
-  * 拖框的边框可整体移动，拖右下角手柄可调整大小；
-  * 目标条里列出七个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
+  * **屏幕上只画当前目标那一个框**（非当前目标不画）——十几个框同时铺在屏幕上
+    会完全看不清要对齐哪个；切目标时框就换到新位置；
+  * **框正中央有一个四向箭头十字标**：抓它就能整体拖动这个框。框的
+    四条边同样可以拖整体，但框一大就离得太远、很难抓准，所以主力抓手是十字标；
+  * 拖右下角手柄可调整大小；
+  * 目标条里列出十二个目标（当前目标高亮 + 左侧竖条），点一行就能切过去；
   * 目标条底部两个按钮：**左「保存全部区域 (S)」、右「退出 (Esc)」**，
     都有悬停高亮；键盘 **S** 保存、**Esc** 退出同样有效；
   * 说明文字在卡片内自动换行（金色标题段 = 做什么，暗淡说明段 = 怎么做），
     永远不会穿出卡片；卡片高度跟着换行行数长高；
-  * 画面空白处的鼠标是**穿透**的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到
-    炉石上，所以可以边看游戏画面边调；
+  * 画面空白处的鼠标是**穿透**的：只有框/十字标/手柄/目标条上才拦鼠标，其余点击
+    照常落到炉石上，所以可以边看游戏画面边调；
   * 顶部提示条每 1.5s 重判一次「绿框里有没有盒子面板」，对齐成功会变绿。
+
+**保存后什么时候生效**：ROI 不是独立的热开关，而是**在「开始对战」时读取一次**
+（`fsm.init()` → `initialize_recommendation_automation()` 重建
+`RecommendationConfig`）。校准窗口只能在自动化**没在跑**的时候打开，所以
+"存完再点一次「开始对战」"就生效，不需要重启脚本进程、也不需要重开一局对战。
 
 原理：盒子推荐面板顶部才是「打法参考A」红头标题；面板没被框进推荐区域时
 OCR 读不到信标 → 程序判定面板不存在 → 回合内 recommendation_not_stable
@@ -93,6 +110,11 @@ EDGE = 6           # 边框抓取厚度（画在截图区域外侧，捕捉画�
 HANDLE = 22        # 右下角缩放手柄边长
 MIN_SIZE = 60      # 区域最小边长
 CLASS_NAME = "HSLegendArriverCalibrate"
+# 框正中央的「整体拖动」十字标：半边长 13 → 26×26 的方块，比 HANDLE 稍大、
+# 好抓；画在框中心而不是边缘，是因为"拖边缘移动整体"很难抓准（用户反馈）。
+MOVE_CROSS_HALF = 13
+# 十字标只在框小到装不下时才缩（框短边的一半 - 4，最少 6px）。
+MOVE_CROSS_MIN_HALF = 6
 
 # 顶部提示条的重判间隔（与 region_overlay 保持一致）。
 PANEL_REFRESH_SECONDS = 1.5
@@ -486,8 +508,26 @@ class CalibrationSession:
         left = max(8, width - PREVIEW_W - 16)
         return (left, 16, left + PREVIEW_W, 16 + PREVIEW_H)
 
+    def _move_cross_rect(self) -> tuple[int, int, int, int]:
+        """当前目标框正中央那个「整体拖动」十字标的方块（屏幕坐标）。
+
+        框很小时（比如「传统对战」文字框只有 27px 高）十字标按短边缩到最小，
+        但**永远留一块可点的区域**——它已经退化成很小，也需要能抓到。
+        """
+        left, top, right, bottom = (int(v) for v in self.active["box"])
+        half = min(MOVE_CROSS_HALF,
+                   max(MOVE_CROSS_MIN_HALF,
+                       min(right - left, bottom - top) // 2 - 4))
+        cx, cy = (left + right) // 2, (top + bottom) // 2
+        return (cx - half, cy - half, cx + half, cy + half)
+
     def _hit_test(self, sx: int, sy: int, width: int, height: int):
-        """返回 (类型, 目标序号)；不在可交互区域上返回 None。"""
+        """返回 (类型, 目标序号)；不在可交互区域上返回 None。
+
+        命中顺序（先到先得）：目标行/按钮 → 右下角手柄 → **正中央十字标** →
+        框边。十字标排在框边前面，因为它在框内部，是"整体拖动"的主抓手：
+        用户反馈拖边缘移动整体很难抓（框一大，四条边离得远、要瞄得很准）。
+        """
         for rect, index in self._chip_rects(width, height):
             if rect[0] <= sx <= rect[2] and rect[1] <= sy <= rect[3]:
                 return ("target", index)
@@ -500,6 +540,9 @@ class CalibrationSession:
         if (right + 2 <= sx <= right + 2 + HANDLE
                 and bottom + 2 <= sy <= bottom + 2 + HANDLE):
             return ("corner", None)
+        cross = self._move_cross_rect()
+        if cross[0] <= sx <= cross[2] and cross[1] <= sy <= cross[3]:
+            return ("cross", None)
         if (left - EDGE <= sx <= right + EDGE
                 and top - EDGE <= sy <= bottom + EDGE):
             return ("edge", None)
@@ -533,7 +576,8 @@ class CalibrationSession:
             self.press_target = (name, None)
         elif name == "corner":
             self.drag = ("resize",)
-        elif name == "edge":
+        elif name in ("cross", "edge"):
+            # 十字标与框边都是「整体移动」：记住按下点相对框左上的偏移即可。
             left, top = self.active["box"][0], self.active["box"][1]
             self.drag = ("move", sx - left, sy - top)
         self.dirty = True
@@ -822,7 +866,7 @@ class CalibrationSession:
         print(f"[校准] 已保存 {len(boxes)} 个区域 -> {path}")
         for key, box in boxes.items():
             print(f"[校准]   {key} = {tuple(box)}")
-        print("[校准] 重开对局生效（不覆盖名字/日志目录/延时等其它配置）")
+        print("[校准] 下次「开始对战」生效（不覆盖名字/日志目录/延时等其它配置）")
         return True
 
     def _preview_config(self, mapping=None):
@@ -865,8 +909,25 @@ class CalibrationSession:
         return {target["key"]: tuple(int(v) for v in target["box"])
                 for target in self.targets}
 
+    def _region_keys_to_skip(self) -> set[str]:
+        """叠加层里**一个框都不画**的 key 集合 —— 即"屏幕上所有会画出来的框"。
+
+        `screenshot_regions()` 里除了可拖的目标，还有**推导出来**的区域：
+        目前只有 `win_rate_wide`（AI胜率的兜底框，永远跟着主区域外扩）。它没有
+        对应的目标行、也不能单独拖，但同样会在屏幕上多出一圈红框，所以必须
+        一起跳过。这里**照着 regions 真实产出的 key 收**，而不是手抄一份名单：
+        以后再加派生区域时不会漏。
+        """
+        from screen_regions import screenshot_regions
+        cfg = self._preview_config()
+        return {region["key"] for region in screenshot_regions(cfg)}
+
     def render(self, width: int, height: int):
-        """画出一整屏 RGBA：所有区域框 + 提示条 + 当前目标高亮 + 目标条/预览。
+        """画出一整屏 RGBA：**只有当前目标**一个框 + 提示条 + 目标条/预览。
+
+        **屏幕上只画当前目标**：以前会把十几个框全画出来，屏幕全是框，根本看不
+        清要对齐哪个（用户反馈）。现在非当前目标的框一个都不画——切目标时框就
+        换到新位置，位置参考由屏幕正中央的目标条（含每个框的尺寸）负责。
 
         当前目标在这一层里被**整个跳过**，由 `_draw_active_target()` 单独画：
         否则同一个框会被画两次（两次描边差 1px，外圈偏暗），看起来像"一个区域
@@ -882,16 +943,22 @@ class CalibrationSession:
         mapping = self._mapping()
         # 窗口移动/缩放后立刻重算屏幕框（帧内只算一次，之后是空操作）。
         self._sync_boxes(mapping)
-        # 叠加层里所有框都用各自的**屏幕坐标**直接画（overrides），当前目标由
-        # _draw_active_target 用同一批坐标画粗框 —— 两条路径天然落点一致。
+        # 所有框都交给 skip_keys 不画（叠加层只留提示条 + 阶段判定点）；
+        # 当前目标由 _draw_active_target 用同一批屏幕坐标画粗框。
+        # overrides 仍然要给：draw_region_boxes 会用它回填 in_bounds/screen_box，
+        # 网页预览图与本窗口共用同一份绘制逻辑，两边的框必须落在同一批像素上。
         layer = paint_layer(width, height, self.panel_state,
                             self._preview_config(mapping),
-                            skip_keys=(active_key,), mapping=mapping,
+                            skip_keys=self._region_keys_to_skip(),
+                            mapping=mapping,
                             overrides=self._screen_boxes(),
                             status=self.target_status)
         draw = ImageDraw.Draw(layer)
         self._draw_active_target(draw, width, height, mapping)
         self._draw_card(draw, width, height, mapping)
+        # 十字标最后画：它是"整体拖动"的唯一抓手，被目标条压住就等于没了。
+        # （框正好落在屏幕正中时，目标条会盖在框中心上——用户就是这么遇到的。）
+        self._draw_move_cross(draw, _rgba(self.active["color"]))
         self._draw_preview(draw, width, layer)
         return layer
 
@@ -904,7 +971,10 @@ class CalibrationSession:
 
     def _draw_active_target(self, draw, width: int, height: int,
                             mapping=None) -> None:
-        """把当前目标画成粗框 + 右下角手柄。
+        """把**当前目标**画成粗框 + 右下角缩放手柄 + 正中央「整体拖动」十字标。
+
+        只有当前目标会被画出来：屏幕上同时出现十几个框会完全看不清要对齐哪个
+        （用户反馈）。非当前目标一个都不画，切目标时当前框换个位置就是了。
 
         坐标写在正中央的目标条里，不在框旁边飘字：左上角的
         「AI胜率」浮动条贴着屏幕顶边，飘字要么出屏、要么压住别的框。
@@ -925,6 +995,41 @@ class CalibrationSession:
             x, y = hx + offset, hy + offset
             if x < hx1 and y < hy1:
                 draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
+
+    def _draw_move_cross(self, draw, color) -> None:
+        """框正中央的「四个箭头十字标」= 整体拖动抓手。
+
+        框边虽然也能拖整体，但框一大、四条边就离得很远，要瞄得很准才抓得到
+        （用户反馈"拉框的边缘进行整体拖动非常不方便"）。十字标画在框中心，
+        跟框一起走，抓它就能整体挪；框小的时候它会自动缩到框内。
+        """
+        rect = self._move_cross_rect()
+        cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+        half = min(rect[2] - cx, rect[3] - cy)
+        if half < 3:
+            return
+        # 底衬：半透明深色方块，保证十字标在任何画面（亮/花）上都看得清。
+        draw.rectangle(rect, fill=(20, 23, 30, 200), outline=color, width=2)
+        # 四向箭头：每个方向的线段 + 两条箭头短线（不做旋转多边形，
+        # 直线画法在 13px 尺度上更干净，也不会因为抗锯齿发虚）。
+        arm = half - 3
+        if arm < 2:
+            return
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            tip_x, tip_y = cx + dx * arm, cy + dy * arm
+            draw.line((cx, cy, tip_x, tip_y), fill=TEXT_MAIN, width=2)
+            # 箭头两撇：沿垂直方向各退一格，再朝尖端收拢。
+            back_x, back_y = tip_x - dx * 4, tip_y - dy * 4
+            if dx:
+                draw.line((tip_x, tip_y, back_x, back_y - 3), fill=TEXT_MAIN,
+                          width=2)
+                draw.line((tip_x, tip_y, back_x, back_y + 3), fill=TEXT_MAIN,
+                          width=2)
+            else:
+                draw.line((tip_x, tip_y, back_x - 3, back_y), fill=TEXT_MAIN,
+                          width=2)
+                draw.line((tip_x, tip_y, back_x + 3, back_y), fill=TEXT_MAIN,
+                          width=2)
 
     def _draw_card(self, draw, width: int, height: int,
                    mapping=None) -> None:
@@ -1008,7 +1113,7 @@ class CalibrationSession:
         if time.time() < self.saved_flash_until:
             self._draw_text(draw,
                             (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),
-                            "已保存，重开对局生效", 13, TEXT_OK)
+                            "已保存，下次「开始对战」生效", 13, TEXT_OK)
         else:
             self._draw_text(draw,
                             (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),

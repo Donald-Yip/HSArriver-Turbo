@@ -152,6 +152,47 @@ class HitTestTests(unittest.TestCase):
                          self.session._hit_test(105, 350, self.WIDTH,
                                                 self.HEIGHT))
 
+    def test_finds_the_center_cross_for_whole_box_dragging(self):
+        """框正中央要有「整体拖动」十字标：抓它就能挪整个框。
+
+        用户反馈拖边缘移动整体很难抓（框一大四条边离得远），所以十字标是
+        "整体拖动"的主抓手，必须命中。
+        """
+        box = self.session.active["box"]
+        cx, cy = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+
+        self.assertEqual(("cross", None),
+                         self.session._hit_test(cx, cy, self.WIDTH,
+                                                self.HEIGHT))
+
+    def test_center_cross_drags_the_whole_box(self):
+        """十字标按下再移动 = 整体平移（和拖边缘同一个 drag 状态）。"""
+        box = self.session.active["box"]
+        cx, cy = (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
+        self.session._on_mouse_down(cx, cy, self.WIDTH, self.HEIGHT)
+        self.assertEqual("move", self.session.drag[0])
+
+        before_w = box[2] - box[0]
+        self.session._on_mouse_move(cx + 40, cy + 25, self.WIDTH,
+                                    self.HEIGHT)
+        moved = self.session.active["box"]
+        self.assertEqual(before_w, moved[2] - moved[0], "整体拖动不该改变宽度")
+        self.assertEqual(box[0] + 40, moved[0])
+        self.assertEqual(box[1] + 25, moved[1])
+
+    def test_the_cross_shrinks_inside_a_very_thin_box(self):
+        """「传统对战」这种又薄又宽的框：十字标要缩进框内，且仍能抓到。"""
+        self.session.targets[0]["box"] = [100, 300, 500, 320]   # 400×20
+        rect = self.session._move_cross_rect()
+
+        self.assertGreaterEqual(rect[1], 300)
+        self.assertLessEqual(rect[3], 320)
+        self.assertLessEqual(rect[2] - rect[0], 20)     # 不超过框的短边
+        cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+        self.assertEqual(("cross", None),
+                         self.session._hit_test(cx, cy, self.WIDTH,
+                                                self.HEIGHT))
+
     def test_finds_the_target_rows_and_the_save_button(self):
         rect, index = self.session._chip_rects(self.WIDTH, self.HEIGHT)[1]
         self.assertEqual(("target", 1),
@@ -319,6 +360,46 @@ class RenderTests(unittest.TestCase):
         # 中心点属于框内部（未被粗框/卡片涂实），透明才能看见底下的游戏画面
         self.assertEqual(0, layer.getpixel(center)[3])
 
+    def test_render_draws_only_the_active_target(self):
+        """屏幕上只画**当前目标**那一个框：十几个框全铺出来根本看不清拖哪个。
+
+        （用户反馈：框框只有在被选择到才显示，不然屏幕上全是框框。）
+        取样点必须避开目标条与预览面板 —— 它们是本来就该画的两块 UI。
+        """
+        session = make_session()
+        session.targets[0]["box"] = [100, 60, 300, 160]      # 当前目标
+        # 非当前目标放左下角：避开正中央的目标条与右上的预览面板。
+        session.targets[1]["box"] = [80, 800, 400, 950]
+        session.active_index = 0
+        size = (1920, 1080)
+        session.width, session.height = size
+
+        card = calibrate_roi.card_rect(*size, session._card_height())
+        preview = session._preview_rect(size[0])
+
+        def _edge_hits(box):
+            left, top, right, bottom = box
+            probes = [(x, top) for x in range(left, right, 5)]
+            probes += [(x, bottom) for x in range(left, right, 5)]
+            probes += [(left, y) for y in range(top, bottom, 5)]
+            probes = [p for p in probes
+                      if not (card[0] <= p[0] <= card[2]
+                              and card[1] <= p[1] <= card[3])
+                      and not (preview[0] <= p[0] <= preview[2]
+                               and preview[1] <= p[1] <= preview[3])]
+            return probes
+
+        layer = session.render(*size)
+
+        active_probes = _edge_hits(session.targets[0]["box"])
+        self.assertTrue(active_probes, "取样点被 UI 面板吃光了")
+        self.assertTrue(any(layer.getpixel(p)[3] > 0 for p in active_probes),
+                        "当前目标应当被画出来")
+        other_probes = _edge_hits(session.targets[1]["box"])
+        self.assertTrue(other_probes, "取样点被 UI 面板吃光了")
+        self.assertFalse(any(layer.getpixel(p)[3] > 0 for p in other_probes),
+                         "非当前目标不该出现在屏幕上")
+
     def test_preview_config_follows_the_in_progress_boxes(self):
         """拖框过程中 `_preview_config()` 必须跟上（它喂给 panel_state）。"""
         session = make_session()
@@ -429,7 +510,12 @@ class ActiveTargetMappingTests(unittest.TestCase):
                          "框被多算了一次窗口偏移")
 
     def test_active_box_interior_stays_transparent(self):
-        """当前目标只描边 + 手柄，框内仍透明（要能看见底下的游戏画面）。"""
+        """当前目标只描边 + 手柄，框内仍是透明的（要能看见底下的游戏画面）。
+
+        正中央的「整体拖动」十字标由 `render()` 在最后单独画（它必须压在目标条
+        上面，否则框落在屏幕正中时会被盖住 —— 见 `test_..._cross`），所以直接
+        调 `_draw_active_target` 时框内整片都该是空的。
+        """
         session = self.mapped_session()
         session.active_index = 0
         session._sync_boxes(session._mapping())
@@ -440,6 +526,46 @@ class ActiveTargetMappingTests(unittest.TestCase):
         box = tuple(int(v) for v in session.active["box"])
         center = ((box[0] + box[2]) // 2, (box[1] + box[3]) // 2)
         self.assertEqual(0, canvas.getpixel(center)[3])
+
+    def test_render_draws_the_center_cross_on_top_of_the_card(self):
+        """十字标必须画在目标条**之上**：框正好落在屏幕正中时也要看得见。
+
+        注意命中优先级：**目标行/按钮 > 十字标**。目标条自己也要能点（切目标、
+        保存、退出），所以卡片盖住的地方点击仍归卡片 —— 这只是"看得见"的修复，
+        不改变谁先接收点击。
+        """
+        session = make_session()
+        size = (1920, 1080)
+        session.width, session.height = size
+        # 把当前目标摆到屏幕正中，和居中画出来的目标条完全重叠。
+        card = calibrate_roi.card_rect(*size, session._card_height())
+        session.targets[0]["box"] = list(card)
+        session.active_index = 0
+
+        layer = session.render(*size)
+        rect = session._move_cross_rect()
+
+        # 十字标方块里应有白色箭头（底色是深色衬底），说明它画在卡片之上了。
+        arrow_pixels = [layer.getpixel((x, y))
+                        for x in range(rect[0], rect[2] + 1, 2)
+                        for y in range(rect[1], rect[3] + 1, 2)]
+        self.assertTrue(any(px[3] > 0 and px[0] > 200 and px[1] > 200
+                            for px in arrow_pixels),
+                        "框中心的十字标被目标条盖住了")
+
+    def test_target_rows_win_the_click_over_the_center_cross(self):
+        """卡片上的点击归卡片：十字标再显眼也不能抢走目标行的点击。"""
+        session = make_session()
+        size = (1920, 1080)
+        session.width, session.height = size
+        card = calibrate_roi.card_rect(*size, session._card_height())
+        session.targets[0]["box"] = list(card)
+        session.active_index = 0
+        cx, cy = (card[0] + card[2]) // 2, (card[1] + card[3]) // 2
+
+        kind, index = session._hit_test(cx, cy, *size)
+        self.assertEqual("target", kind)
+        self.assertEqual(7, index)      # 正中央恰好压在第 7 行上
 
     def test_no_mapping_draws_at_the_raw_box(self):
         """拿不到客户区几何时是恒等换算：框仍画在它的坐标上。"""
