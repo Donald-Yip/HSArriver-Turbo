@@ -34,7 +34,8 @@ class RegionRegistryTests(unittest.TestCase):
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
             ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide",
-             "post_game_start", "rank", "main_menu_battle", "deck_grid"],
+             "post_game_start", "rank", "main_menu_battle", "deck_grid",
+             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
             [region["key"] for region in self.regions])
 
     def test_boxes_come_from_the_config(self):
@@ -99,18 +100,34 @@ class CalibrationTargetTests(unittest.TestCase):
 
         self.assertEqual(["recommendation", "mulligan_confirm", "win_rate",
                           "post_game_start", "rank",
-                          "main_menu_battle", "deck_grid"],
+                          "main_menu_battle", "deck_grid",
+                          "mode_menu_open", "mode_wild", "mode_standard",
+                          "mode_casual"],
                          [target["key"] for target in targets])
         self.assertEqual(
             ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi",
              "post_game_start_roi", "post_game_rank_roi",
-             "main_menu_battle_roi", "deck_grid_roi"],
+             "main_menu_battle_roi", "deck_grid_roi",
+             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
             [target["config_key"] for target in targets])
         for target in targets:
             self.assertTrue(target["label"])
             self.assertTrue(target["short"])
             self.assertTrue(target["hint"])
             self.assertRegex(target["color"], r"^#[0-9a-fA-F]{6}$")
+        # 模式点击点带 point_key（保存进 ui_config.json 的 `mode_click` 段，
+        # 而不是 ROI 框），且框大小固定、中心就是点击点。
+        mode_targets = [t for t in targets if t.get("point_key")]
+        self.assertEqual(4, len(mode_targets))
+        for target in mode_targets:
+            left, top, right, bottom = target["box"]
+            self.assertEqual(screen_regions.MODE_MARK_SIZE, right - left)
+            self.assertEqual(screen_regions.MODE_MARK_SIZE, bottom - top)
+
+    def test_calibratable_config_keys_are_unique(self):
+        """config_key 是 ui_config.json 的顶层键，重了就会互相覆盖。"""
+        keys = [t["config_key"] for t in screen_regions.CALIBRATION_TARGETS]
+        self.assertEqual(len(keys), len(set(keys)))
 
     def test_interface_recognition_boxes_match_battle_entry(self):
         """界面识别的两个框必须与 battle_entry 的默认值一致（防止两边改岔）。
@@ -264,11 +281,22 @@ class RegionPreviewTests(unittest.TestCase):
     def test_all_regions_are_inside_the_screen(self):
         result = self.preview()
 
-        # 7 个可校准目标 + AI胜率兜底框（共 8 个区域）；数量跟着注册表走，
-        # 别写死数字，否则加一个目标就要来改一次。
+        # 所有可校准目标 + AI胜率兜底框；数量跟着注册表走，别写死数字，
+        # 否则加一个目标就要来改一次。
         self.assertEqual(len(screen_regions.CALIBRATION_TARGETS) + 1,
                          len(result["regions"]))
         self.assertTrue(all(r["in_bounds"] for r in result["regions"]))
+
+    def test_mode_points_are_marked_as_click_points(self):
+        """模式点击点也要能在预览/校准里看到（框中心=实际点击点）。"""
+        regions = {r["key"]: r for r in screen_regions.screenshot_regions()}
+
+        for key in ("mode_menu_open", "mode_wild", "mode_standard",
+                    "mode_casual"):
+            self.assertIn(key, regions)
+            box = regions[key]["box"]
+            self.assertEqual(screen_regions.MODE_MARK_SIZE, box[2] - box[0])
+            self.assertEqual(screen_regions.MODE_MARK_SIZE, box[3] - box[1])
 
     def test_resolution_is_no_longer_a_failure(self):
         """换了分辨率不再判失败：客户区几何由 display_mapping 换算。

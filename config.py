@@ -400,6 +400,51 @@ def save_battle_entry_setting(key: str, value) -> dict:
     return {**DEFAULT_BATTLE_ENTRY, **section}
 
 
+# ---------------------------------------------------------------- 模式选择
+# ui_config.json 顶层 `mode_click` 段：「手动切换对战模式」的点击坐标覆盖。
+# 键：menu_open（打开模式菜单的按钮）+ wild / standard / casual（三个模式）。
+# 值：[x, y] 两元素数值数组，1920x1080 客户区相对坐标。
+#
+# 默认值**不在这里硬编码**：坐标的唯一来源是 screen_regions.MODE_POINTS
+# （2026-10 实机截图实测），这样校准窗口、叠加层、截图标记与这里的默认值永远
+# 同一个数。`hsctl screenshot --points mode` 可以把这几个点在图上画出来核对。
+def _mode_click_defaults() -> dict:
+    try:
+        from screen_regions import mode_click_points
+        return {key: tuple(point) for key, point in mode_click_points().items()}
+    except Exception:
+        # screen_regions 不可用（理论上不会）时给一份内联兜底，保证点击有坐标可用。
+        return {"menu_open": (1405, 55), "wild": (617, 380),
+                "standard": (955, 375), "casual": (1290, 380)}
+
+
+_MODE_CLICK_DEFAULTS = _mode_click_defaults()
+
+
+def load_mode_click_points() -> dict:
+    """读取 ui_config.json 顶层 `mode_click` 段的坐标覆盖（默认值打底）。
+
+    返回合并后的完整表 {key: (x, y)}。宽容读取：只接受 2 元素数值数组，
+    格式不对的项忽略并回退默认值——这个文件主要由程序写，手改出错不该
+    让脚本拒启。每次调用重新读盘，改完 json 立即生效。
+    """
+    points = {key: tuple(value) for key, value in _MODE_CLICK_DEFAULTS.items()}
+    section = _load_ui_config().get("mode_click")
+    if not isinstance(section, dict):
+        return points
+    for key, default in _MODE_CLICK_DEFAULTS.items():
+        raw = section.get(key)
+        if (isinstance(raw, (list, tuple)) and len(raw) == 2
+                and all(isinstance(v, (int, float)) for v in raw)):
+            points[key] = (float(raw[0]), float(raw[1]))
+    return points
+
+
+def default_mode_click_points() -> dict:
+    """代码默认的模式点击点（不含 ui_config.json 覆盖；测试与提示用）。"""
+    return {key: tuple(value) for key, value in _MODE_CLICK_DEFAULTS.items()}
+
+
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。
 # 原先 0.2s 且连续两次 EOF 才返回，静止时每轮阻塞 0.4s；缩短后主循环对

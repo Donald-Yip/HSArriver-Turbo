@@ -71,6 +71,389 @@ EXIT_OK = 0
 EXIT_API = 1
 EXIT_USAGE = 2
 EXIT_UNREACHABLE = 3
+# 环境不可用（找不到/校验不过的解释器，或缺依赖）。agent 见到它就跑 `hsctl doctor`。
+EXIT_ENV = 4
+
+# --------------------------------------------------------------------- 运行环境
+# 为什么有这一整块：这个项目**必须**跑在 Python 3.12 + 那一堆 win32/cv2/paddle 依赖上，
+# 而每台机器、每个 agent 自带的 python 都不同 —— 把某一台机器的路径写进代码/默认值
+# 一定会在别的机器上翻车。所以这里的做法是：
+#   1) 仓库里放 `log/env.example.json`（只有占位符与说明，**不含任何本机路径**）；
+#   2) 每台机器把选定的解释器**保存**到本机专属的 `log/env.json`（log/ 不入库）；
+#   3) `hsctl doctor` 一条命令告诉 agent"现在什么状态、该执行哪几条命令"；
+#   4) 任何 agent 用任何 python 跑 hsctl，都会被自动代理到那个解释器上。
+ENV_FILE = ROOT / "log" / "env.json"
+# 模板放在仓库根、并显式加进版本库（log/ 整个目录被忽略，里面放不了"要提交的"模板）。
+ENV_TEMPLATE = ROOT / "env.example.json"
+# 解释器校验：3.12.x + 这些模块必须**存在**（只 find_spec，不 import —— 不拉重依赖）。
+REQUIRED_MODULES = ("win32gui", "cv2", "numpy", "PIL", "paddleocr",
+                    "paddle", "psutil", "keyboard", "pynput", "requests", "click")
+# 模块名 → pip 包名（只用于给用户/agent 打印"缺哪个包该装什么"）。
+MODULE_PACKAGES = {
+    "win32gui": "pywin32", "cv2": "opencv_python_headless", "PIL": "Pillow",
+    "paddleocr": "paddleocr", "paddle": "paddlepaddle", "psutil": "psutil",
+    "keyboard": "keyboard", "pynput": "pynput", "requests": "Requests",
+    "click": "click", "numpy": "numpy",
+}
+EXPECTED_PYTHON = (3, 12)
+PROBE_TIMEOUT = 60.0
+REEXEC_MARKER = "HSCTL_REEXEC"
+
+# 在被代理的解释器里跑的探针：把版本与缺失模块打成一行 JSON。只用标准库。
+_PROBE_CODE = (
+    "import sys,json,importlib.util\n"
+    "mods=%r\n"
+    "def has(m):\n"
+    "    try:\n"
+    "        return importlib.util.find_spec(m) is not None\n"
+    "    except Exception:\n"
+    "        return False\n"
+    "missing=[m for m in mods if not has(m)]\n"
+    "print(json.dumps({'version':list(sys.version_info[:3]),\n"
+    "                  'executable':sys.executable,\n"
+    "                  'missing':missing}))\n"
+)
+
+
+def _env_text(key: str) -> str:
+    return (os.environ.get(key) or "").strip()
+
+
+def _read_env_file() -> dict:
+    """读本机专属的 log/env.json（不存在/坏掉都返回 {}）。"""
+    try:
+        data = json.loads(ENV_FILE.read_text(encoding="utf8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_env_file(data: dict) -> bool:
+    """原子替换写入 log/env.json（写不了返回 False，不影响命令本身）。"""
+    try:
+        ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = ENV_FILE.with_name(ENV_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                       encoding="utf8")
+        os.replace(tmp, ENV_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def env_pin_source() -> str:
+    """当前解释器是从哪儿定下来的：env / file / current / candidate / none。"""
+    if _env_text("HS_PYTHON"):
+        return "env"
+    pinned = str(_read_env_file().get("interpreter") or "").strip()
+    if pinned and Path(pinned).exists():
+        return "file"
+    return "none"
+
+
+def verify_python(python: str, *,
+                  runner=None) -> dict:
+    """跑一次探针，返回 {'ok', 'version', 'missing', 'reason', 'executable'}。
+
+    runner 可注入（测试用），签名 ``runner(argv, timeout) -> (返回码, 文本)``。
+    """
+    python = str(python or "").strip()
+    if not python:
+        return {"ok": False, "executable": "", "version": None, "missing": [],
+                "reason": "解释器路径为空"}
+    if not Path(python).exists():
+        return {"ok": False, "executable": python, "version": None, "missing": [],
+                "reason": "文件不存在"}
+    argv = [python, "-c", _PROBE_CODE % (list(REQUIRED_MODULES),)]
+    runner = runner or _run_capture
+    try:
+        code, out = runner(argv, PROBE_TIMEOUT)
+    except Exception as exc:
+        return {"ok": False, "executable": python, "version": None, "missing": [],
+                "reason": f"探针执行失败：{type(exc).__name__}: {exc}"}
+    if code != 0:
+        return {"ok": False, "executable": python, "version": None, "missing": [],
+                "reason": f"解释器无法运行探针（退出码 {code}）：{(out or '').strip()[:160]}"}
+    payload = None
+    for line in reversed((out or "").strip().splitlines()):
+        try:
+            payload = json.loads(line)
+            break
+        except Exception:
+            continue
+    if not isinstance(payload, dict):
+        return {"ok": False, "executable": python, "version": None, "missing": [],
+                "reason": "探针输出无法解析"}
+    version = tuple(int(v) for v in (payload.get("version") or []))
+    missing = [str(m) for m in (payload.get("missing") or [])]
+    if version[:2] != EXPECTED_PYTHON:
+        return {"ok": False, "executable": str(payload.get("executable") or python),
+                "version": version, "missing": missing,
+                "reason": f"版本 {'.'.join(str(v) for v in version)} 不是 "
+                          f"{EXPECTED_PYTHON[0]}.{EXPECTED_PYTHON[1]}（3.13+ 装不上 OCR 轮子）"}
+    if missing:
+        return {"ok": False, "executable": str(payload.get("executable") or python),
+                "version": version, "missing": missing,
+                "reason": "缺依赖：" + "、".join(MODULE_PACKAGES.get(m, m) for m in missing)}
+    return {"ok": True, "executable": str(payload.get("executable") or python),
+            "version": version, "missing": [], "reason": "ok"}
+
+
+def _run_capture(argv, timeout: float = PROBE_TIMEOUT) -> tuple:
+    """跑一条命令，返回 (返回码, 文本)。只用于探针，失败不抛。"""
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout)
+    except Exception as exc:
+        return 1, f"{type(exc).__name__}: {exc}"
+    raw = (proc.stdout or b"") + (proc.stderr or b"")
+    for enc in ("utf-8", "mbcs"):
+        try:
+            return proc.returncode, raw.decode(enc)
+        except Exception:
+            continue
+    return proc.returncode, raw.decode("utf-8", "replace")
+
+
+def _normalize_python(path) -> str:
+    """把 pythonw.exe 换成同目录的 python.exe（pythonw 下 stdout 可能是 None）。"""
+    text = str(path or "").strip().strip('"')
+    if not text:
+        return ""
+    if os.name == "nt" and text.lower().endswith("pythonw.exe"):
+        plain = str(Path(text).with_name("python.exe"))
+        if Path(plain).exists():
+            return plain
+    return text
+
+
+def _where_pythons() -> list:
+    """`where python` 之类的兜底：拿到 PATH 上的解释器。"""
+    if os.name != "nt":
+        return []
+    found = []
+    for name in ("python.exe", "python3.exe"):
+        try:
+            proc = subprocess.run(["where", name], capture_output=True, timeout=10)
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in (proc.stdout or b"").decode("mbcs", "replace").splitlines():
+            line = line.strip()
+            if line:
+                found.append(line)
+    return found
+
+
+def discover_candidates() -> list:
+    """列出机器上"可能是本项目解释器"的候选路径（去重、保序、只留真实文件）。
+
+    这里**只是候选**，合格与否一律靠 verify_python 判定 —— 尤其是 conda 的 HTL
+    这类命名习惯只在部分机器上成立，绝不能当成默认值。
+    """
+    raw = []
+    for key in ("HS_PYTHON",):
+        raw.append(_env_text(key))
+    for key in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        prefix = _env_text(key)
+        if prefix:
+            raw.append(str(Path(prefix) / "Scripts" / "python.exe"))
+            raw.append(str(Path(prefix) / "bin" / "python3"))
+    pinned = str(_read_env_file().get("interpreter") or "").strip()
+    if pinned:
+        raw.append(pinned)
+    # 常见 conda 位置（仅候选；有的机器根本没有 conda）。
+    bases = [Path(r"D:\miniconda3"), Path(r"D:\anaconda3"),
+             Path.home() / "miniconda3", Path.home() / "anaconda3",
+             Path.home() / "miniforge3",
+             Path(os.environ.get("LOCALAPPDATA", "")) / "miniconda3",
+             Path(os.environ.get("LOCALAPPDATA", "")) / "anaconda3"]
+    for base in bases:
+        for env_name in ("HTL", "htl"):
+            raw.append(str(base / "envs" / env_name / "python.exe"))
+        raw.append(str(base / "python.exe"))
+    for name in (".venv", "venv"):
+        raw.append(str(ROOT / name / "Scripts" / "python.exe"))
+        raw.append(str(ROOT / name / "bin" / "python3"))
+    raw.extend(_where_pythons())
+    local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python"
+    if local.exists():
+        try:
+            for item in sorted(local.glob("Python31*")):
+                raw.append(str(item / "python.exe"))
+        except Exception:
+            pass
+
+    seen, out = set(), []
+    current = _normalize_python(sys.executable).casefold()
+    for item in raw:
+        path = _normalize_python(item)
+        if not path:
+            continue
+        key = path.casefold()          # Windows 路径大小写不敏感：别把同一个环境列两遍
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.basename(path).lower().startswith("python") is False:
+            # `py.exe`（启动器）不是解释器：显式跳过，避免误报"找不到环境"。
+            continue
+        try:
+            if not Path(path).is_file():
+                continue
+        except OSError:
+            continue
+        if key == current:
+            continue
+        out.append(path)
+    return out
+
+
+def resolve_interpreter(probe=None, *, probe_candidates: bool = True) -> dict:
+    """按优先级找出**合格**的解释器。
+
+    顺序：``HS_PYTHON`` → 本机 ``log/env.json`` → 已在跑的当前解释器 → 候选清单。
+    返回 ``{"path","source","record","candidates":[{path,ok,reason,missing,version}],
+    "current_ok","current"}``；找不到合格的就是 ``path=""``。
+    """
+    probe = probe or verify_python
+    current = _normalize_python(sys.executable)
+    result = {"path": "", "source": "none", "record": None,
+              "candidates": [], "current_ok": False, "current": current}
+
+    env_python = _normalize_python(_env_text("HS_PYTHON"))
+    if env_python:
+        record = probe(env_python)
+        result["candidates"].append({"path": env_python, **record})
+        if record.get("ok"):
+            result.update({"path": env_python, "source": "env", "record": record})
+            return result
+
+    pinned = _normalize_python(_read_env_file().get("interpreter"))
+    if pinned:
+        cached = (_read_env_file().get("last_ok") or {})
+        record = (dict(cached, reason="cached")
+                  if cached.get("executable") == pinned and cached.get("version")
+                  else None)
+        if record is None or not probe_candidates:
+            record = probe(pinned)
+        result["candidates"].append({"path": pinned, **record})
+        if record.get("ok"):
+            result.update({"path": pinned, "source": "file", "record": record})
+            return result
+
+    record = probe(current)
+    result["current_ok"] = bool(record.get("ok"))
+    if record.get("ok"):
+        result.update({"path": current, "source": "current", "record": record})
+        return result
+    if not probe_candidates:
+        return result
+
+    for candidate in discover_candidates():
+        record = probe(candidate)
+        result["candidates"].append({"path": candidate, **record})
+        if record.get("ok"):
+            result.update({"path": candidate, "source": "candidate", "record": record})
+            return result
+    return result
+
+
+def _persist_env(path: str, source: str) -> bool:
+    """把选定的解释器**保存**到本机专属 log/env.json。"""
+    data = _read_env_file()
+    data["interpreter"] = str(path)
+    data["pinned_at"] = datetime.now().isoformat(timespec="seconds")
+    data["source"] = source
+    return _write_env_file(data)
+
+
+def _cache_env_probe(record: dict) -> None:
+    """把一次合格校验的结果缓存进 env.json（下次免探针）。"""
+    data = _read_env_file()
+    data["last_ok"] = {
+        "executable": record.get("executable"),
+        "version": list(record.get("version") or []),
+        "missing": [],
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _write_env_file(data)
+
+
+def ensure_interpreter(*, probe=None, write: bool = True) -> dict:
+    """`hsctl` 入口用的解释器保证：合格就返回，不合格就用合格的重入。
+
+    返回 ``{"path","source","changed","reason"}``；``changed=True`` 表示已经
+    ``os.execv`` 重入过（正常情况下不会返回到调用方）。
+    """
+    probe = probe or verify_python
+    if _env_text("HSCTL_NO_PROXY"):
+        return {"path": _normalize_python(sys.executable), "source": "current",
+                "changed": False, "reason": "HSCTL_NO_PROXY=1"}
+    current = _normalize_python(sys.executable)
+    record = probe(current)
+    if record.get("ok"):
+        if write:
+            _cache_env_probe(record)
+        return {"path": current, "source": "current", "changed": False,
+                "reason": "ok", "record": record}
+
+    resolved = resolve_interpreter(probe=probe)
+    if not resolved.get("path"):
+        return {"path": "", "source": "none", "changed": False,
+                "reason": record.get("reason") or "没有合格解释器",
+                "record": record, "candidates": resolved.get("candidates") or []}
+
+    if resolved["path"] == current or _env_text(REEXEC_MARKER):
+        # 已经是目标解释器（或已经重入过一次）：不再重入，按现状尽力执行。
+        return {"path": resolved["path"], "source": resolved["source"],
+                "changed": False, "reason": "已在目标解释器上",
+                "record": resolved.get("record")}
+
+    if write and resolved["source"] in ("candidate", "current"):
+        _persist_env(resolved["path"], resolved["source"])
+    if write:
+        _cache_env_probe(resolved.get("record") or {})
+
+    env = dict(os.environ)
+    env[REEXEC_MARKER] = "1"
+    argv = [resolved["path"], str(ROOT / "hsctl.py")] + list(sys.argv[1:])
+    try:
+        os.execve(resolved["path"], argv, env)
+    except Exception as exc:
+        # 重入失败（极少数：权限/路径问题）：不阻断，按当前解释器继续，让命令
+        # 自己在需要时报"缺依赖"。
+        return {"path": resolved["path"], "source": resolved["source"],
+                "changed": False,
+                "reason": f"切换解释器失败：{type(exc).__name__}: {exc}"}
+
+
+def interpreter_report(*, probe=None) -> dict:
+    """给 `hsctl doctor` / `hsctl env` 用的环境快照。"""
+    probe = probe or verify_python
+    current = _normalize_python(sys.executable)
+    current_record = probe(current)
+    pinned_path = _normalize_python(_read_env_file().get("interpreter"))
+    pinned_record = probe(pinned_path) if pinned_path else None
+    candidates = []
+    seen = set()
+    for item in ([pinned_path] if pinned_path else []) + discover_candidates():
+        path = _normalize_python(item)
+        key = path.casefold()
+        if not path or key in seen:
+            continue
+        seen.add(key)
+        record = (pinned_record if key == pinned_path.casefold() else None) or probe(path)
+        candidates.append({"path": path, **record})
+    return {
+        "current": {"path": current, **current_record},
+        "pinned": ({"path": pinned_path, **(pinned_record or {})}
+                   if pinned_path else None),
+        "pinned_source": env_pin_source(),
+        "env_file": str(ENV_FILE),
+        "env_file_exists": ENV_FILE.exists(),
+        "template": str(ENV_TEMPLATE),
+        "candidates": candidates,
+    }
 
 # 「进入对战」的最长等待：等主界面 + 等选择套牌界面 + 拉起炉石，再留一点余量。
 ENTER_BATTLE_WAIT_SECONDS = 600.0
@@ -406,6 +789,239 @@ def _ok_message(ctx: Ctx, payload: dict) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------- 环境自诊
+def _console_report(ctx: Ctx) -> dict:
+    """控制台侧的诊断信息（连不上就说明没跑，不算错误）。"""
+    info = read_port_file() or {}
+    report = {"running": False, "url": None, "pid": info.get("pid"),
+              "executable": info.get("executable"), "token_present": bool(info.get("token")),
+              "is_admin": None, "phase": None, "console_python_ok": None,
+              "selfcheck_failed": None, "note": ""}
+    try:
+        alive = ctx._probe(ctx.base)
+    except TransportError:
+        alive = False
+    if not alive:
+        report["note"] = "控制台没在运行（端口文件可能过期）"
+        return report
+    report["running"] = True
+    try:
+        report["url"] = ctx.base
+    except TransportError:
+        pass
+    try:
+        status = ctx.get("/api/status")
+        report["is_admin"] = bool(status.get("is_admin"))
+        report["phase"] = status.get("phase")
+        selfcheck = status.get("selfcheck") or {}
+        report["selfcheck_failed"] = selfcheck.get("failed")
+    except (ApiFailure, TransportError) as exc:
+        report["note"] = f"读 /api/status 失败：{exc}"
+    try:
+        full = ctx.get("/api/selfcheck") or {}
+        result = full.get("result") or {}
+        executable = result.get("executable")
+        if executable:
+            report["executable"] = executable
+            report["console_python"] = result.get("python")
+            report["console_python_ok"] = (
+                bool(result.get("ok")) and report["executable"] == _normalize_python(sys.executable))
+    except (ApiFailure, TransportError):
+        pass
+    return report
+
+
+def _doctor_env_verdict(env: dict) -> tuple:
+    """环境相关的 verdict + next_steps（不含控制台部分）。
+
+    verdict 的语义（agent 按它决定要不要动手）：
+      * ``env_ok``             —— 本机已保存合格解释器，什么都不用做；
+      * ``env_ok_unsaved``     —— 环境能用，但**还没保存**到 log/env.json：
+                                  换 agent/换 shell 时可能又用错解释器，
+                                  所以下一步是 `hsctl env --pin <当前解释器>`（一条命令）；
+      * ``env_deps_missing``   —— 找到 3.12 但缺包 → 给精确到解释器的 pip 命令；
+      * ``env_no_valid_interpreter`` —— 全都不合格 → 给 bootstrap（conda/venv）。
+    """
+    current = env.get("current") or {}
+    pinned = env.get("pinned") or {}
+    pinned_path = _normalize_python(_read_env_file().get("interpreter"))
+    steps = []
+
+    if pinned_path and pinned.get("ok"):
+        return "env_ok", steps
+
+    # 合格但不等于"已保存"的那一个：优先当前解释器，其次任何合格候选。
+    ok_candidates = [c for c in (env.get("candidates") or []) if c.get("ok")]
+    if current.get("ok"):
+        steps.append(f'hsctl env --pin "{current.get("path")}"')
+        steps.append("# ↑ 把本机解释器保存到 log/env.json（log/ 不入库，每台机器各存一份）")
+        return "env_ok_unsaved", steps
+    if pinned_path and not pinned.get("ok"):
+        steps.append("# log/env.json 里固定的解释器现在不可用："
+                     + str(pinned.get("reason")))
+    if len(ok_candidates) == 1:
+        steps.append(f'hsctl env --pin "{ok_candidates[0]["path"]}"')
+        steps.append("python hsctl.py --json doctor    # 复验到 env_ok")
+        return "env_ok_unsaved", steps
+    if len(ok_candidates) > 1:
+        steps.append("# 本机有多个合格解释器，选一个保存（本机专属 log/env.json）：")
+        for item in ok_candidates:
+            steps.append(f'hsctl env --pin "{item["path"]}"')
+        return "env_ok_unsaved", steps
+    if current.get("missing"):
+        pkgs = " ".join(MODULE_PACKAGES.get(m, m) for m in current["missing"])
+        py = current.get("path") or sys.executable
+        steps.append(f'"{py}" -m pip install {pkgs} '
+                     "-i https://pypi.tuna.tsinghua.edu.cn/simple")
+        return "env_deps_missing", steps
+    steps.append("conda create -p <你的路径>\\envs\\HTL python=3.12    # 有 conda 时")
+    steps.append("python -m venv .venv                              # 没有 conda 时")
+    steps.append('"<新解释器>" -m pip install -r requirements.txt '
+                 "-i https://pypi.tuna.tsinghua.edu.cn/simple")
+    steps.append('hsctl env --pin "<新解释器>"')
+    return "env_no_valid_interpreter", steps
+
+
+def cmd_doctor(args, ctx: Ctx) -> int:
+    """一条命令给出"环境/控制台现在什么状态、下一步执行什么"。"""
+    env = interpreter_report()
+    pinned_path = _normalize_python(_read_env_file().get("interpreter"))
+    verdict, steps = _doctor_env_verdict(env)
+    env_saved = verdict == "env_ok"
+
+    console = _console_report(ctx)
+    if env_saved:
+        if not console["running"]:
+            verdict = "console_not_running"
+            steps = ["hsctl serve start --via-task   # 不弹 UAC；任务没注册就先 serve install-task"]
+        elif console.get("is_admin") is False:
+            verdict = "console_not_admin"
+            steps = ["hsctl serve task-status",
+                     "hsctl serve stop              # 自停通道（不需要提权）",
+                     "hsctl serve start --via-task  # 提权重启，点击才会生效"]
+        elif console.get("console_python_ok") is False:
+            verdict = "env_wrong_interpreter"
+            steps = ['hsctl env --pin "<正确的 python.exe 路径>"',
+                     "hsctl serve stop",
+                     "hsctl serve start --via-task"]
+
+    payload = {
+        # ok 的语义：环境可用（是否已保存见 verdict / env_saved）。控制台没跑不算"环境坏"。
+        "ok": verdict in ("env_ok", "env_ok_unsaved", "console_not_running"),
+        "verdict": verdict,
+        "env_saved": env_saved,
+        "this_python": env.get("current"),
+        "pinned": env.get("pinned"),
+        "pinned_path": pinned_path or None,
+        "pinned_source": env.get("pinned_source"),
+        "env_file": env.get("env_file"),
+        "env_template": env.get("template"),
+        "candidates": env.get("candidates"),
+        "console": console,
+        "next_steps": steps,
+        "note": ("本机专属解释器配置保存在 log/env.json（log/ 不入库，每台机器/每个 clone "
+                 "各自保存一份）；模板见 log/env.example.json。"
+                 "保存/更换都用 hsctl env --pin <路径>。"),
+    }
+    if ctx.json:
+        print(json.dumps(payload, ensure_ascii=False))
+        return EXIT_OK
+    print(f"环境：{'✓' if verdict.startswith('env_ok') else '✗'} {verdict}")
+    cur = env.get("current") or {}
+    version = ".".join(str(v) for v in (cur.get("version") or [])) or "?"
+    print(f"  当前解释器：{cur.get('path')}（Python {version}）"
+          f"{'  合格' if cur.get('ok') else '  不合格：' + str(cur.get('reason'))}")
+    if env.get("pinned"):
+        print(f"  已保存：{env['pinned'].get('path')}"
+              f"（来源 {env.get('pinned_source')}）")
+    else:
+        print("  已保存：（还没有：log/env.json 不存在或没有 interpreter）")
+    if cur.get("missing"):
+        print("  缺依赖：" + "、".join(MODULE_PACKAGES.get(m, m) for m in cur["missing"]))
+    print(f"控制台：{'运行中 ' + str(console.get('url')) if console['running'] else '没在运行'}"
+          + (f"  管理员：{'是' if console.get('is_admin') else '否'}"
+             f"（控制台 Python {console.get('console_python') or '?'}）"
+             if console["running"] else ""))
+    if steps:
+        print("下一步：")
+        for step in steps:
+            print(f"  {step}")
+    print(f"  （{payload['note']}）")
+    return EXIT_OK
+
+
+def cmd_env(args, ctx: Ctx) -> int:
+    """看/固定/探测本机的 Python 解释器（保存到 log/env.json）。"""
+    action = getattr(args, "env_action", None) or "show"
+    if action == "discover":
+        candidates = []
+        for path in discover_candidates():
+            candidates.append({"path": path, **verify_python(path)})
+        payload = {"ok": True, "template": str(ENV_TEMPLATE), "env_file": str(ENV_FILE),
+                   "candidates": candidates}
+        if ctx.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return EXIT_OK
+        if not candidates:
+            print("没有探测到候选解释器。用 hsctl env --pin <python.exe 路径> 手动指定。")
+            return EXIT_OK
+        for item in candidates:
+            flag = "✓" if item["ok"] else "✗"
+            version = ".".join(str(v) for v in (item.get("version") or [])) or "?"
+            print(f"  {flag} {item['path']}  ({version}) {'' if item['ok'] else item['reason']}")
+        return EXIT_OK
+
+    if action == "pin":
+        target = str(getattr(args, "path", "") or "").strip()
+        if target.lower() == "auto" or not target:
+            resolved = resolve_interpreter()
+            if not resolved.get("path"):
+                raise ApiFailure(
+                    "没有探测到合格解释器（Python 3.12 + 依赖齐全）。\n"
+                    "  先看候选：hsctl env --discover\n"
+                    "  或手动指定：hsctl env --pin <python.exe 路径>")
+            target = resolved["path"]
+        record = verify_python(target)
+        if not record.get("ok"):
+            raise ApiFailure(f"这个解释器不合格：{target}\n  原因：{record.get('reason')}\n"
+                             "  （要求 Python 3.12 + requirements.txt 里的依赖齐全）")
+        if not _persist_env(record.get("executable") or target, "hsctl env --pin"):
+            raise ApiFailure(f"写不了 {ENV_FILE}（检查目录权限）")
+        _cache_env_probe(record)
+        payload = {"ok": True, "interpreter": record.get("executable") or target,
+                   "env_file": str(ENV_FILE),
+                   "message": f"已保存本机解释器到 {ENV_FILE}",
+                   "note": "这是本机专属配置（log/ 不入库）；换机器/换 agent 各自保存一份。"}
+        if ctx.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(f"✓ {payload['message']}")
+            print(f"  {record.get('executable') or target}"
+                  f"  Python {'.'.join(str(v) for v in (record.get('version') or []))}")
+            print(f"  {payload['note']}")
+        return EXIT_OK
+
+    report = interpreter_report()
+    if ctx.json:
+        print(json.dumps(report, ensure_ascii=False))
+        return EXIT_OK
+    cur = report["current"]
+    print(f"当前解释器：{cur['path']}")
+    print(f"  版本：{'.'.join(str(v) for v in (cur.get('version') or [])) or '?'}"
+          f"  合格：{'是' if cur.get('ok') else '否'}")
+    if not cur.get("ok"):
+        print(f"  原因：{cur.get('reason')}")
+    pinned = report.get("pinned")
+    print(f"已固定解释器（log/env.json）：{(pinned or {}).get('path') or '（无）'}"
+          f"  来源：{report.get('pinned_source')}")
+    ok_candidates = [c for c in report["candidates"] if c.get("ok")]
+    print(f"候选：{len(report['candidates'])} 个，其中合格 {len(ok_candidates)} 个"
+          f"（hsctl env --discover 看全部）")
+    if ok_candidates:
+        print("固定其中一个：hsctl env --pin \"" + ok_candidates[0]["path"] + "\"")
+    return EXIT_OK
+
+
 # --------------------------------------------------------------------- 命令
 def cmd_status(args, ctx: Ctx) -> int:
     if getattr(args, "watch", 0):
@@ -591,6 +1207,25 @@ def cmd_deck_click(args, ctx: Ctx) -> int:
     return _ok_message(ctx, payload)
 
 
+def cmd_mode(args, ctx: Ctx) -> int:
+    """手动切换对战模式：hsctl mode wild|standard|casual（狂野/标准/休闲）。
+
+    前提：脚本停在「选择套牌」界面、自动化未运行。同步执行约 2-3 秒，
+    点右上角打开模式菜单后点对应模式；坐标可在 ui_config.json 的
+    mode_click 段覆盖。
+    """
+    mode = str(args.mode).strip().lower()
+    aliases = {"wild": "wild", "standard": "standard", "casual": "casual",
+               "狂野": "wild", "标准": "standard", "休闲": "casual"}
+    if mode not in aliases:
+        print("模式必须是 wild/standard/casual（或 狂野/标准/休闲）", file=sys.stderr)
+        return EXIT_USAGE
+    payload = ctx.post("/api/mode", {"mode": aliases[mode]})
+    if not payload.get("ok"):
+        return _fail(ctx, "api", payload.get("error") or "没能切换模式")
+    return _ok_message(ctx, payload)
+
+
 def cmd_queue(args, ctx: Ctx) -> int:
     """待做命令队列：一次性提交多条命令，控制台按顺序执行（断线不影响）。
 
@@ -599,7 +1234,8 @@ def cmd_queue(args, ctx: Ctx) -> int:
       hsctl queue status
       hsctl queue cancel
     支持：stop [mode=after_game|now] / wait-stopped [timeout=秒] /
-          deck 序号 | deck-click 序号 / prepare / start [keep_score=1] / delay 秒
+          deck 序号 | deck-click 序号 / mode wild|standard|casual /
+          prepare / start [keep_score=1] / delay 秒
     某一步失败即停，剩余标记 skipped；提交前会整体校验语法，写错一条都不收。
     """
     sub = getattr(args, "queue_cmd", "status")
@@ -748,6 +1384,8 @@ def cmd_screenshot(args, ctx: Ctx) -> int:
         body["max_width"] = int(args.max_width)
     if args.out:
         body["out"] = args.out
+    if getattr(args, "points", None):
+        body["points"] = args.points
     if args.watch:
         return _watch_screenshot(args, ctx, body)
     payload = ctx.post("/api/screenshot", body)
@@ -1072,9 +1710,15 @@ def _pid_image_name(pid: int):
     if os.name != "nt":
         return None
     try:
-        out = subprocess.run(
+        # 中文 Windows 上 tasklist 输出是 GBK/ANSI 编码；text=True 默认按
+        # locale 之外的解释会 UnicodeDecodeError 崩掉读线程，这里显式按
+        # bytes 拿回来再宽容解码。
+        raw = subprocess.run(
             ["tasklist", "/FI", f"PID eq {int(pid)}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15).stdout
+            capture_output=True, timeout=15).stdout
+        out = raw.decode("utf-8", errors="replace")
+        if not out.strip() or "\ufffd" in out:
+            out = raw.decode("gbk", errors="replace")
     except Exception:
         return None
     return out.strip() or None
@@ -1159,11 +1803,19 @@ def is_user_admin() -> bool:
 
 
 def _python_for_task() -> str:
-    """计划任务用哪个解释器：优先 python.exe。
+    """计划任务用哪个解释器：优先**本机固定**的那个（log/env.json）。
 
-    pythonw.exe 下 sys.stdout 可能是 None，而 web_ui 会用 _TeeStream 接管 stdout，
-    拿 None 去 write 会炸；所以这里刻意避开 pythonw。
+    为什么要这样：计划任务的启动器是把"生成它时的那个 python"硬编码进去的。
+    如果那次生成用的是别的工具自带的 Python（版本不符、没依赖），之后每次
+    `serve start --via-task` 都会用错解释器，自检会"全部依赖 fail"。
+    所以只要本机固定过解释器，就以它为准（见 `hsctl env --pin`）。
+
+    另：pythonw.exe 下 sys.stdout 可能是 None，而 web_ui 会用 _TeeStream 接管
+    stdout，拿 None 去 write 会炸；所以这里刻意避开 pythonw。
     """
+    pinned = _normalize_python(_read_env_file().get("interpreter"))
+    if pinned and Path(pinned).exists():
+        return pinned
     exe = Path(sys.executable)
     if os.name == "nt" and exe.name.lower() == "pythonw.exe":
         plain = exe.with_name("python.exe")
@@ -1434,6 +2086,29 @@ def _serve_start_elevated(args, ctx: Ctx) -> int:
     return EXIT_OK
 
 
+def _run_task_now() -> dict:
+    """触发「最高权限」计划任务：schtasks 优先，被策略拦掉就降级 PowerShell。
+
+    为什么需要降级：有的机器把 `schtasks.exe` 列进了程序黑名单（本机实测），
+    这时 schtasks 的任何子命令都跑不了，但 PowerShell 的 `Start-ScheduledTask`
+    走的是任务计划程序 COM 接口，不受影响。
+
+    返回 ``{"ok","mechanism","detail"}``；mechanism ∈ {schtasks, powershell}。
+    """
+    code, out = _run_quiet(["schtasks", "/run", "/tn", TASK_NAME])
+    if code == 0:
+        return {"ok": True, "mechanism": "schtasks", "detail": ""}
+    first = (out or "").strip()[:200]
+    ps = ("Start-ScheduledTask -TaskName '" + TASK_NAME + "'")
+    code2, out2 = _run_quiet(["powershell", "-NoProfile", "-NonInteractive",
+                              "-Command", ps])
+    if code2 == 0:
+        return {"ok": True, "mechanism": "powershell",
+                "detail": f"schtasks 不可用（{first}），已改用 PowerShell Start-ScheduledTask"}
+    return {"ok": False, "mechanism": "none",
+            "detail": f"schtasks: {first}；PowerShell: {(out2 or '').strip()[:200]}"}
+
+
 def _serve_start_via_task(args, ctx: Ctx) -> int:
     """通过「最高权限」计划任务启动：不弹 UAC，可无人值守。"""
     state = _task_state()
@@ -1444,9 +2119,11 @@ def _serve_start_via_task(args, ctx: Ctx) -> int:
     if state["highest"] is False:
         print("⚠️ 这个任务没有勾选「最高权限」，起来后仍然不是管理员。")
         print("   重建：hsctl serve uninstall-task && hsctl serve install-task")
-    code, out = _run_quiet(["schtasks", "/run", "/tn", TASK_NAME])
-    if code != 0:
-        raise ApiFailure(f"触发计划任务失败：{(out or '').strip()[:300]}")
+    triggered = _run_task_now()
+    if not triggered["ok"]:
+        raise ApiFailure(f"触发计划任务失败：{triggered['detail']}")
+    if triggered["mechanism"] == "powershell":
+        print(f"schtasks 在本机不可用，已改用 PowerShell 触发计划任务。")
     print(f"已触发计划任务 {TASK_NAME}"
           f"（由任务计划程序以最高权限启动，不弹 UAC）。")
     base = _wait_for_console(ctx, args.wait)
@@ -1514,6 +2191,34 @@ def cmd_serve_task_status(args, ctx: Ctx) -> int:
     return EXIT_OK
 
 
+def _serve_self_stop(ctx: Ctx, timeout: float = 25.0) -> bool:
+    """请求控制台**自己退出**（走 HTTP，不需要提权）。成功返回 True。
+
+    为什么需要：控制台常常是提权起的，而非提权进程结束不了提权进程
+    （taskkill 报 Access denied），于是"脚本停不掉"，只能人工用管理员 shell 再关。
+    这里用端口文件里的 token 证明"是本机的调用方"，让控制台自己收尾退出。
+    """
+    info = read_port_file() or {}
+    token = str(info.get("token") or "")
+    if not token:
+        # 老版本控制台（端口文件里没有 token）：这条通道用不了，退回 taskkill。
+        return False
+    try:
+        ctx.post("/api/serve/stop", {"token": token})
+    except (ApiFailure, TransportError):
+        # 接口不存在（老控制台）/ 已经被停掉，都按"没成功"处理，由调用方兜底。
+        pass
+    deadline = time.time() + max(1.0, float(timeout))
+    while time.time() < deadline:
+        try:
+            if not ctx._probe(ctx.base):
+                return True
+        except TransportError:
+            return True
+        time.sleep(0.4)
+    return False
+
+
 def _serve_stop(args, ctx: Ctx) -> int:
     info = read_port_file() or {}
     pid = info.get("pid")
@@ -1549,6 +2254,18 @@ def _serve_stop(args, ctx: Ctx) -> int:
             time.sleep(0.5)
     except (ApiFailure, TransportError) as exc:
         print(f"  （停自动化这步没成功，继续结束进程：{exc}）")
+
+    # 首选：让控制台自己停 —— 不需要提权，提权起的控制台也能停掉。
+    if not getattr(args, "hard", False):
+        print("正在请求控制台自停（HTTP，不需要提权）……")
+        if _serve_self_stop(ctx):
+            for path in (PORT_FILE, PID_FILE):
+                _unlink(path)
+            print(f"✓ 控制台已停止（pid {pid}，走的是自停通道）。")
+            return EXIT_OK
+        print("  自停没成功（可能控制台不是本脚本/端口文件没有 token），"
+              "退回结束进程。")
+
     if pid is None:
         print("端口文件里没有 pid，无法结束进程；请手动关掉控制台窗口。")
         return EXIT_API
@@ -1566,8 +2283,8 @@ def _serve_stop(args, ctx: Ctx) -> int:
         # 而当前 shell 没提权 —— Windows 不允许低权限进程结束高权限进程。
         raise ApiFailure(
             f"结束 pid {pid} 失败：{detail}\n"
-            "  常见原因：控制台是**提权**运行的，而非提权进程结束不了提权进程。\n"
-            "  办法：① 用**管理员** PowerShell 跑 `hsctl serve stop`；"
+            "  已试过 HTTP 自停（没成功），taskkill 也不行。\n"
+            "  办法：① 用**管理员** PowerShell 跑 `hsctl serve stop --hard`；"
             "或 ② 先 `hsctl stop` 停掉自动化（这个走 HTTP，不需要提权），"
             "再手动关掉那个控制台窗口。")
     deadline = time.time() + 15
@@ -1719,6 +2436,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="持续抓图，每次覆盖同一张（实时看画面）")
     p.add_argument("--interval", type=float, default=2.0,
                    help="--watch 的间隔秒数（默认 2）")
+    p.add_argument("--points", nargs="?", const="mode", default=None,
+                   choices=("mode",),
+                   help="在图上标出「模式切换」四个点击点（红十字=实际点击位置）；"
+                        "只画图，不点击。核对 hsctl mode 坐标就用它")
     p.set_defaults(handler=cmd_screenshot)
 
     p = sub.add_parser("ui", parents=[common],
@@ -1758,6 +2479,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("index", type=int, metavar="序号",
                    help="第几个卡组（1-9，当前页）")
     p.set_defaults(handler=cmd_deck_click)
+    p = sub.add_parser("mode", parents=[common],
+                       help="手动切换对战模式（wild/standard/casual）")
+    p.add_argument("mode", metavar="模式",
+                   help="wild | standard | casual（或 狂野/标准/休闲）")
+    p.set_defaults(handler=cmd_mode)
     p = sub.add_parser("queue", parents=[common],
                        help="待做命令队列：一次提交多条，控制台按顺序执行")
     p.add_argument("queue_cmd", nargs="?", default="status",
@@ -1895,6 +2621,8 @@ def build_parser() -> argparse.ArgumentParser:
     q = vsub.add_parser("stop", parents=[common], help="停止控制台")
     q.add_argument("--force", action="store_true",
                    help="即使 pid 看起来不是 Python 进程也结束它")
+    q.add_argument("--hard", action="store_true",
+                   help="跳过 HTTP 自停通道，直接结束进程（默认先试自停）")
     q.set_defaults(handler=cmd_serve, action="stop")
     q = vsub.add_parser("restart", parents=[common], help="重启控制台")
     q.add_argument("--browser", action="store_true")
@@ -1915,6 +2643,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("repl", parents=[common], help="进入交互模式")
     p.set_defaults(handler=None)
+
+    p = sub.add_parser("doctor", parents=[common],
+                       help="一条命令自诊：Python 环境 / 控制台 / 提权 / 下一步做什么")
+    p.set_defaults(handler=cmd_doctor)
+
+    p = sub.add_parser("env", parents=[common],
+                       help="看/固定本机 Python 解释器（保存到 log/env.json）")
+    esub = p.add_subparsers(dest="env_action", metavar="<动作>")
+    q = esub.add_parser("show", parents=[common], help="看当前与已固定的解释器")
+    q.set_defaults(handler=cmd_env, env_action="show")
+    q = esub.add_parser("discover", parents=[common],
+                        help="列出本机候选解释器并逐个校验（不写盘）")
+    q.set_defaults(handler=cmd_env, env_action="discover")
+    q = esub.add_parser("pin", parents=[common],
+                        help="校验并保存本机解释器到 log/env.json")
+    q.add_argument("path", nargs="?", default="auto",
+                   help="python.exe 路径；auto=自动选第一个合格候选")
+    q.set_defaults(handler=cmd_env, env_action="pin")
+    p.set_defaults(handler=cmd_env, env_action="show")
 
     return parser
 
@@ -2001,8 +2748,44 @@ def _make_output_encoding_safe() -> None:
             pass
 
 
+def _ensure_interpreter_or_exit(argv=None) -> int:
+    """入口处的解释器保证。返回 EXIT_OK 继续跑，或直接给出退出码/重入。
+
+    * 当前解释器合格（3.12 + 依赖齐全）→ 什么都不做（**不额外起子进程**，只写一次缓存）；
+    * 不合格但本机有合格解释器（log/env.json / HS_PYTHON / 候选清单）→ 顺手保存到
+      `log/env.json` 并 `os.execv` 重入，之后的命令都在对的解释器里跑；
+    * 找不到合格解释器 → 打印"怎么修"，退出码 4（agent 见到就 `hsctl doctor`）。
+    """
+    # 测试/嵌入调用传入 argv 时不自动重入（避免把测试进程换掉）。
+    if argv is not None:
+        return EXIT_OK
+    outcome = ensure_interpreter()
+    if outcome.get("changed"):
+        return EXIT_OK          # os.execv 成功就不会走到这里
+    if outcome.get("path"):
+        return EXIT_OK
+    record = outcome.get("record") or {}
+    print("✗ 找不到可用的 Python 环境：本项目的控制台/自动化必须跑在 "
+          f"Python {EXPECTED_PYTHON[0]}.{EXPECTED_PYTHON[1]} + requirements.txt 的依赖上。",
+          file=sys.stderr)
+    print(f"  当前解释器：{outcome.get('reason') or record.get('reason') or '未知'}", file=sys.stderr)
+    print("  下一步（任选一条，装完再回来）：", file=sys.stderr)
+    print("    ① 已有合格环境 → hsctl env --pin <python.exe 路径>",
+          file=sys.stderr)
+    print("    ② 用 conda 建一个 → conda create -p <你的路径>\\envs\\HTL python=3.12", file=sys.stderr)
+    print("    ③ 用 venv 建一个   → python -m venv .venv", file=sys.stderr)
+    print("  然后：\"<新解释器>\" -m pip install -r requirements.txt "
+          "-i https://pypi.tuna.tsinghua.edu.cn/simple", file=sys.stderr)
+    print("  诊断：python hsctl.py --json doctor（会列出本机所有候选解释器与缺什么）",
+          file=sys.stderr)
+    return EXIT_ENV
+
+
 def main(argv=None) -> int:
     _make_output_encoding_safe()
+    env_code = _ensure_interpreter_or_exit(argv)
+    if env_code != EXIT_OK:
+        return env_code
     parser = build_parser()
     args = parser.parse_args(argv)
     if getattr(args, "handler", None) is None:

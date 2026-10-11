@@ -77,10 +77,65 @@ DECK_GRID_COLOR = "#8fd3e8"
 # 否则 259×27 的「传统对战」框根本拖不出来（只能改配置文件）。
 MAIN_MENU_BATTLE_MIN_SIZE = 20
 
+# 「手动切换对战模式」的四个点击点（选卡组界面）。2026-10 实机截图实测
+# （1920×1080 客户区，`hsctl screenshot --points mode` 可以把它们画在图上核对）：
+#   * 弹出菜单里三个盾牌按钮：狂野（无限符号）/ 标准（圣甲虫）/ 休闲（太阳）；
+#   * menu_open = 选卡组界面右上角那个模式按钮（弹出菜单的开关）。
+# 为什么三个点统一取 y=380：三个盾牌只有中间那个略高，取同一条水平线才能都落在
+# "盾牌亮面"里（±2px 的拟人抖动也仍在盾内），往上会碰到等级六边形、往下中间会碰到
+# 「标准模式」蓝色横幅。
+MODE_MARK_SIZE = 56
+MODE_POINTS = {
+    "menu_open": (1405, 55),
+    "wild": (617, 380),
+    "standard": (955, 375),
+    "casual": (1290, 380),
+}
+MODE_POINT_COLOR = "#ff3b30"
+MODE_POINT_LABEL = {
+    "menu_open": "模式按钮",
+    "wild": "狂野",
+    "standard": "标准",
+    "casual": "休闲",
+}
+
+
+def mode_click_points() -> dict:
+    """模式切换的四个点击点（客户区相对坐标，唯一来源）。
+
+    返回 ``{"menu_open": (x, y), "wild": ..., "standard": ..., "casual": ...}``。
+    config.load_mode_click_points() 在这里的值之上叠加 ui_config.json 的
+    `mode_click` 覆盖，所以改这一份就等于改所有调用方的默认值。
+    """
+    return {key: tuple(value) for key, value in MODE_POINTS.items()}
+
+
+def mode_point_box(point) -> tuple[int, int, int, int]:
+    """把一个点击点变成一个 MODE_MARK_SIZE 见方的框（中心就是该点）。
+
+    校准窗口/叠加层/截图标记都用它，保证"画的框中心"和"实际点的坐标"永远同一个数。
+    """
+    x, y = (int(v) for v in point)
+    half = MODE_MARK_SIZE // 2
+    return (x - half, y - half, x - half + MODE_MARK_SIZE,
+            y - half + MODE_MARK_SIZE)
+
+
+# 模式点击点在校准窗口里的方框（默认值；用户拖过就取 `mode_click` 里存的那一份）。
+# 单独提取成常量是为了让 CALIBRATION_TARGETS 的 default 与 mode_click_points() 同源。
+MODE_TARGET_BOX = {key: mode_point_box(point)
+                   for key, point in MODE_POINTS.items()}
+
+
 # 可用校准工具拖拽并保存到 ui_config.json 的区域（校准目标登记表）。
 # key 与屏幕叠加层的区域 key 一致；config_key 是 ui_config.json 的顶层键，
 # 同时也是 config.RecommendationConfig 的字段名。dict 的 "default" 是代码默认值。
 # 新增一个「可校准区域」只需要在这里加一项：校准工具、网页与叠加层都自动跟上。
+#
+# 例外：模式点击点（mode_wild/mode_standard/mode_casual/mode_menu_open）虽然也在
+# 这张表里（这样校准窗口能拖、能画），但它们保存的是 `mode_click` 段里的 **点**
+# 而不是 ROI 框（见 mode_points / config.load_mode_click_points），所以带
+# point_key 字段、且不在 config._USER_BOX_KEYS 里。
 CALIBRATION_TARGETS = (
     {"key": "recommendation", "config_key": "recommendation_roi",
      "label": "盒子推荐面板", "short": "推荐面板", "color": "#63c76f",
@@ -116,6 +171,24 @@ CALIBRATION_TARGETS = (
      "default": DECK_GRID_REGION,
      "hint": "框住选择套牌界面的 9 个卡组整块区域：脚本按 3×3 均分得到 9 个"
              "点击点，只有名牌上有字的格子才会被点"},
+    # 下面四个是「手动切换对战模式」（hsctl mode）用的**点**：保存到 ui_config.json
+    # 的 `mode_click` 段（键就是 point_key），值为 [x, y]；框中心即点击点。
+    {"key": "mode_menu_open", "config_key": "mode_menu_open", "point_key": "menu_open",
+     "label": "模式按钮（选卡组界面右上角）", "short": "模式按钮",
+     "color": MODE_POINT_COLOR, "default": MODE_TARGET_BOX["menu_open"],
+     "hint": "框住选卡组界面右上角的模式按钮：点它弹出狂野/标准/休闲菜单"},
+    {"key": "mode_wild", "config_key": "mode_wild", "point_key": "wild",
+     "label": "模式「狂野」盾牌", "short": "狂野", "color": MODE_POINT_COLOR,
+     "default": MODE_TARGET_BOX["wild"],
+     "hint": "框住弹出菜单左边的无限符号盾牌（狂野模式）：框中心=实际点击点"},
+    {"key": "mode_standard", "config_key": "mode_standard", "point_key": "standard",
+     "label": "模式「标准」盾牌", "short": "标准", "color": MODE_POINT_COLOR,
+     "default": MODE_TARGET_BOX["standard"],
+     "hint": "框住弹出菜单中间的圣甲虫盾牌（标准模式）：框中心=实际点击点"},
+    {"key": "mode_casual", "config_key": "mode_casual", "point_key": "casual",
+     "label": "模式「休闲」盾牌", "short": "休闲", "color": MODE_POINT_COLOR,
+     "default": MODE_TARGET_BOX["casual"],
+     "hint": "框住弹出菜单右边的太阳盾牌（休闲模式）：框中心=实际点击点"},
 )
 
 # get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
@@ -164,6 +237,32 @@ def ai_win_rate_boxes(config=None) -> tuple[tuple, tuple]:
     return main, wide
 
 
+def _mode_boxes() -> dict:
+    """模式点击点的当前生效方框（优先 ui_config.json 的 `mode_click` 覆盖）。
+
+    直接走 config.load_mode_click_points()（惰性 import：config 反过来会 import
+    本模块，模块级 import 会成环），而不是走 RecommendationConfig —— `mode_click`
+    不是 ROI 字段，且必须"改完立即生效"（CLI 与校准窗口都这么用）。
+    读不到任何东西就退回代码默认值。
+    """
+    points = None
+    try:
+        from config import load_mode_click_points
+        points = load_mode_click_points()
+    except Exception:
+        points = None
+    if not isinstance(points, dict):
+        return dict(MODE_TARGET_BOX)
+    boxes = {}
+    for point_key in MODE_TARGET_BOX:
+        point = points.get(point_key) or MODE_POINTS[point_key]
+        try:
+            boxes[point_key] = mode_point_box(point)
+        except Exception:
+            boxes[point_key] = MODE_TARGET_BOX[point_key]
+    return boxes
+
+
 def calibration_targets(config=None) -> list[dict]:
     """可校准区域清单（校准工具/叠加层/AI胜率读取共用的唯一来源）。
 
@@ -172,10 +271,16 @@ def calibration_targets(config=None) -> list[dict]:
     里用户校准过的值，否则用 CALIBRATION_TARGETS 里的代码默认值。
     """
     cfg = config if config is not None else _default_config()
+    mode_boxes = _mode_boxes()
     targets = []
     for item in CALIBRATION_TARGETS:
         target = dict(item)
-        target["box"] = _box(getattr(cfg, item["config_key"], None), item["default"])
+        point_key = target.get("point_key")
+        if point_key:
+            target["box"] = _box(mode_boxes.get(point_key), target["default"])
+        else:
+            target["box"] = _box(getattr(cfg, item["config_key"], None),
+                                 item["default"])
         targets.append(target)
     return targets
 
@@ -191,7 +296,8 @@ def calibration_target(config=None, key: str = "") -> Optional[dict]:
 def screenshot_regions(config=None) -> list[dict]:
     """脚本所有截图区域（区域框预览与文档共同的唯一来源）。"""
     cfg = config if config is not None else _default_config()
-    by_key = {target["key"]: target for target in calibration_targets(cfg)}
+    targets = calibration_targets(cfg)
+    by_key = {target["key"]: target for target in targets}
     win_rate, win_rate_wide = ai_win_rate_boxes(cfg)
     return [
         {"key": "recommendation", "color": "#63c76f",
@@ -240,6 +346,13 @@ def screenshot_regions(config=None) -> list[dict]:
          "config_key": "deck_grid_roi",
          "note": "整块框住 9 个卡组即可，脚本自己按 3×3 均分；"
                  "只有名牌上有字的格子才会被点"},
+        # 下面四个是「模式切换」的**点击点**（画成 56px 方框，中心即实际点击点）。
+        # 看它们在不在盾牌上，用 `hsctl screenshot --points mode`（只截图、不点击）。
+        *[{"key": target["key"], "color": target["color"],
+           "label": f"{target['label']}（box 中心=点击点）",
+           "box": target["box"], "config_key": target["config_key"],
+           "note": target["hint"]}
+          for target in targets if target.get("point_key")],
     ]
 
 

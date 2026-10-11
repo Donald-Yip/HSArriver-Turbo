@@ -662,3 +662,58 @@ def enter_HS():
     left_click(left + 180, bottom - 110, require_hearthstone=False)
     return True
 
+
+# 「模式选择」菜单（选卡组界面）。2026-10 实机截图实测，1920x1080 客户区基准：
+#   打开菜单按钮（右上角）≈ (1405, 55)
+#   弹出菜单里三个盾牌：狂野（无限符号）≈ (617, 380)、标准（圣甲虫）≈ (955, 375)、
+#                       休闲（太阳）≈ (1290, 380)
+# 坐标的**唯一来源**是 screen_regions.MODE_POINTS（config.load_mode_click_points()
+# 在它之上叠加 ui_config.json 顶层 `mode_click` 段），这里不再硬编码。
+# 核对方式：`hsctl screenshot --points mode` 只截图、不点击，把四个点画在图上。
+# 点开菜单后到三个选项可点之间的动画延迟（保守固定值，不做截图轮询；
+# 1.2s 在低配机上偶尔点在下落动画中途，所以给到 1.8s）。
+MODE_MENU_OPEN_WAIT_SECONDS = 1.8
+
+
+def mode_click_points():
+    """当前生效的四个模式点击点（客户区相对坐标）。
+
+    惰性走 config.load_mode_click_points()：它在 ui_config.json 里读用户覆盖，
+    所以改配置立即生效，不需要重启控制台。
+    """
+    from config import load_mode_click_points
+    return load_mode_click_points()
+
+
+def click_mode_option(mode, points=None):
+    """打开模式选择菜单并点 wild/standard/casual 之一（同步、约 2-3 秒）。
+
+    前提：当前画面停在「选择套牌」界面（右上角模式按钮可见）。
+    points 可选，形如 {"menu_open": (x, y), "wild": (x, y), ...}，用于注入
+    用户在 ui_config.json 里微调过的坐标；缺省用 config 的当前值。
+    """
+    current = mode_click_points()
+    open_pos = tuple(current.get("menu_open") or (1405, 55))
+    pts = {key: tuple(value) for key, value in current.items()
+           if key != "menu_open"}
+    if points:
+        if points.get("menu_open"):
+            open_pos = tuple(points["menu_open"])
+        for key in pts:
+            if points.get(key):
+                pts[key] = tuple(points[key])
+
+    if mode not in pts:
+        raise ValueError(f"Unknown mode: {mode!r}")
+    if not get_HS_hwnd():
+        raise ValueError("Hearthstone window unavailable")
+
+    def _action():
+        rand_sleep(OPERATE_INTERVAL)
+        left_click(*open_pos)                      # 打开模式选择菜单
+        rand_sleep(MODE_MENU_OPEN_WAIT_SECONDS)    # 等弹出动画
+        left_click(*pts[mode])                     # 点对应模式
+        rand_sleep(OPERATE_INTERVAL)               # 等模式切换动画收尾
+
+    run_hearthstone_action(_action)
+

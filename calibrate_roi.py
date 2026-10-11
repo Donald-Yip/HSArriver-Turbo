@@ -837,7 +837,7 @@ class CalibrationSession:
                                              or target["box"])
                  for target in self.targets}
         main = boxes.get("ai_win_rate_roi", AI_WIN_RATE_REGION)
-        return SimpleNamespace(
+        config = SimpleNamespace(
             desktop_size=(self.width or 1920, self.height or 1080),
             desktop_dpi=96,
             recommendation_roi=boxes.get("recommendation_roi", (7, 200, 202, 500)),
@@ -853,6 +853,12 @@ class CalibrationSession:
                                            MAIN_MENU_BATTLE_REGION),
             deck_grid_roi=boxes.get("deck_grid_roi", DECK_GRID_REGION),
         )
+        # 绘制路径按**目标 key**取框（模式点击点的 config_key 是 `mode_click` 段里的
+        # 键名，不是 config 字段，所以 getattr(config, config_key) 取不到）。
+        config.hs_target_boxes = {
+            target["key"]: tuple(target.get("client_box") or target["box"])
+            for target in self.targets}
+        return config
 
     def _screen_boxes(self):
         """当前所有目标的**屏幕坐标**框（绘制叠加层直接用）。"""

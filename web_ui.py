@@ -31,6 +31,7 @@ if log_overlay is not None:
         pass
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -383,6 +384,19 @@ def capture_frame(kind: str = "client"):
         info.update({"mapping": result.get("mapping"),
                      "checks": result.get("checks"),
                      "note": "整屏 + 所有校准区域框（同网页「🎯 校准区域」）"})
+        # 这张图是**整屏**坐标：把客户区点换算成屏幕点的结果一起带出去，
+        # 供 --points mode 在这张图上标绘（见 _resolve_client_points）。
+        client_box = (result.get("mapping") or {}).get("client_screen_box")
+        if client_box:
+            origin_x, origin_y = int(client_box[0]), int(client_box[1])
+            width = max(1, int(client_box[2]) - origin_x)
+            height = max(1, int(client_box[3]) - origin_y)
+            scale_x = width / 1920.0
+            scale_y = height / 1080.0
+            info["marks"] = {
+                key: [origin_x + int(round(point[0] * scale_x)),
+                      origin_y + int(round(point[1] * scale_y))]
+                for key, point in screen_regions.mode_click_points().items()}
         return image, info
 
     if kind == "full":
@@ -427,6 +441,84 @@ def capture_frame(kind: str = "client"):
     return image.convert("RGB"), info
 
 
+def _target_frame_size() -> tuple:
+    """标绘目标图当前会被抓成多大（客户区尺寸，拿不到就按基准 1920×1080）。
+
+    标记按**比例**画，所以抓图退化（客户区→整屏）或后续 --max-width 缩放
+    都不会让十字偏位；这个函数只用来算缩放比。
+    """
+    try:
+        import display_mapping
+        mapping = display_mapping.display_mapping()
+        if mapping is not None and mapping.width > 0 and mapping.height > 0:
+            return int(mapping.width), int(mapping.height)
+    except Exception:
+        pass
+    return 1920, 1080
+
+
+def _resolve_client_points(points: dict, info: dict) -> list:
+    """把模式点击点解析成目标图上的像素点。
+
+    ``info["marks"]`` 是**屏幕坐标**（客户区→屏幕的换算结果，boxes 分支会给）：
+    这时目标图本身就是整屏（1:1），不需要再按客户区比例缩放，所以标成
+    ``space="screen"``；否则返回的是"客户区相对坐标（1920×1080 基准）"，
+    由调用方按目标图尺寸缩放。
+    """
+    marks = info.get("marks")
+    if isinstance(marks, dict) and marks:
+        out = []
+        for key, point in points.items():
+            pair = marks.get(key)
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                out.append((key, float(pair[0]), float(pair[1]), "screen"))
+        if out:
+            return out
+    if info.get("fallback") == "full":
+        try:
+            import display_mapping
+            mapping = display_mapping.display_mapping()
+            if mapping is not None:
+                return [(key, mapping.to_screen(*point)[0],
+                         mapping.to_screen(*point)[1], "screen")
+                        for key, point in points.items()]
+        except Exception:
+            pass
+    return [(key, float(point[0]), float(point[1]), "reference")
+            for key, point in points.items()]
+
+
+def _draw_mode_points(image, info: dict, points: dict):
+    """在抓到的帧上画模式切换十字标记（客户区坐标 → 图像坐标按比例换算）。
+
+    只画图，不点击、不移动鼠标。返回可 JSON 化的标记清单（供 agent 直接判定）。
+    """
+    from PIL import ImageDraw
+    target_w, target_h = _target_frame_size()
+    scale_x = (image.width / float(target_w)) if target_w else 1.0
+    scale_y = (image.height / float(target_h)) if target_h else 1.0
+    draw = ImageDraw.Draw(image)
+    font = screen_regions.label_font(16)
+    resolved = _resolve_client_points(points, info)
+    drawn = []
+    for key, x, y, space in resolved:
+        # 屏幕坐标的标记：目标图是整屏、1:1，不再缩放（否则会翻倍跑偏）。
+        px = x if space == "screen" else x * scale_x
+        py = y if space == "screen" else y * scale_y
+        size = max(8, int(24 * (scale_x + scale_y) / 2))
+        draw.line([(px - size, py), (px + size, py)], fill=(255, 0, 0), width=3)
+        draw.line([(px, py - size), (px, py + size)], fill=(255, 0, 0), width=3)
+        draw.ellipse([px - 3, py - 3, px + 3, py + 3], outline=(255, 255, 0),
+                     width=2)
+        label = f"{screen_regions.MODE_POINT_LABEL.get(key, key)} {int(round(x))},{int(round(y))}"
+        draw.text((px + size + 2, py + 2), label, fill=(255, 255, 0), font=font)
+        drawn.append({"key": key, "label": screen_regions.MODE_POINT_LABEL.get(key, key),
+                      "space": space,
+                      "client": [int(round(x)), int(round(y))],
+                      "image": [int(round(px)), int(round(py))]})
+    return drawn
+
+
 def _save_frame(image, info: dict, out=None) -> dict:
     """把这一帧存成 PNG，并更新固定路径 ``agent_latest.png``。"""
     SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
@@ -459,7 +551,10 @@ def api_screenshot(body=None):
     """按需抓一帧并存成 PNG，返回路径（CLI/agent 用）。
 
     body: {"kind": client|full|roi|boxes, "max_width": int, "out": "文件名",
-           "quiet": bool}
+           "quiet": bool, "points": ""|"mode"}
+
+    ``points="mode"`` 时在图上画「模式切换」四个点击点的十字标记（只画图，
+    不点击、不移动鼠标）—— 用来核对坐标有没有对准盾牌按钮。
     """
     from PIL import Image
 
@@ -477,6 +572,19 @@ def api_screenshot(body=None):
         max_width = int(body.get("max_width") or 0)
     except (TypeError, ValueError):
         return {"ok": False, "error": "max_width 必须是整数。"}
+    # 标记在缩放**之前**画：画在客户区/屏幕坐标上，之后等比缩放，十字不会偏。
+    marks = str(body.get("points") or "").strip().lower()
+    if marks and marks != "none":
+        if "mode" in marks:
+            try:
+                info["mode_points"] = _draw_mode_points(
+                    image, info, screen_regions.mode_click_points())
+                info["points_note"] = ("已标绘模式切换点击点（红十字=实际点击位置，"
+                                       "客户区坐标 1920×1080 基准）")
+            except Exception as exc:
+                info["points_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            return {"ok": False, "error": f"不支持的 points：{marks}（可选 mode）"}
     if max_width > 0 and image.width > max_width:
         ratio = max_width / float(image.width)
         image = image.resize((max_width, max(1, int(image.height * ratio))),
@@ -1410,8 +1518,24 @@ def _start_calibration(target: str = "") -> dict:
     command = [sys.executable, str(script)]
     if target:
         command += ["--target", str(target)]
+    # 校准工具是 GUI 叠加层，但 sys.executable 是控制台子系统的 python.exe：
+    # 不设标志的话每次点「校准」都会弹一个黑色 CMD 窗口。用 CREATE_NO_WINDOW
+    # 让子进程不分配控制台窗口；同时把 stdout/stderr 重定向到日志文件——
+    # 没有控制台句柄时 print 会炸，重定向到文件既避免黑框又保留调试输出。
+    popen_kwargs = {"cwd": str(ROOT)}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            log_dir = ROOT / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_handle = open(str(log_dir / "calibrate_roi.log"), "ab", buffering=0)
+            popen_kwargs["stdout"] = log_handle
+            popen_kwargs["stderr"] = subprocess.STDOUT
+        except Exception:
+            popen_kwargs["stdout"] = subprocess.DEVNULL
+            popen_kwargs["stderr"] = subprocess.DEVNULL
     try:
-        _CALIBRATION_PROC = subprocess.Popen(command, cwd=str(ROOT))
+        _CALIBRATION_PROC = subprocess.Popen(command, **popen_kwargs)
     except Exception as exc:
         _log("WARN", f"启动校准窗口失败：{exc}")
         return {"ok": False, "error": f"启动校准工具失败：{exc}"}
@@ -2258,6 +2382,59 @@ def api_deck_click(body=None) -> dict:
     return dict(result)
 
 
+# 「手动切换对战模式」：点右上角 (1405,55) 打开模式菜单，再点狂野/标准/休闲之一。
+_MODE_CLICK_LOCK = threading.Lock()
+
+_MODE_ALIASES = {"wild": "wild", "standard": "standard", "casual": "casual",
+                 "狂野": "wild", "标准": "standard", "休闲": "casual"}
+
+
+def _mode_click_inner(mode: str) -> dict:
+    """实际点击执行体（守卫①② + 点击）。api_mode_click 与队列动作共用。"""
+    import click as hs_click
+    from config import load_mode_click_points
+    # 守卫①：FSM 在跑 / 正在启动 → 拒绝（鼠标归 FSM 管，两边同时点会互相打断）
+    if CTRL.automation_thread is not None or CTRL.starting:
+        return {"ok": False, "error": "自动化已经在运行中；先 stop 再切模式。"}
+    # 守卫②：enter_battle 状态机在跑 → 拒绝
+    with _ENTER_LOCK:
+        if _ENTER_STATE["running"]:
+            return {"ok": False, "error": "「进入对战」正在跑，等它结束再切模式。"}
+    # 应用用户覆盖坐标（默认值打底），参数注入进 click_mode_option，不改全局常量
+    points = load_mode_click_points()
+    try:
+        hs_click.click_mode_option(mode, points=points)
+    except Exception as exc:
+        return {"ok": False, "error": f"切换模式失败：{exc}"}
+    message = f"已点击切换到 {mode}（请目视确认菜单确实弹出并切换成功）"
+    _log("SYS", message)
+    return {"ok": True, "mode": mode, "message": message}
+
+
+def api_mode_click(body=None) -> dict:
+    """手动切换对战模式：wild/standard/casual（或 狂野/标准/休闲）。
+
+    同步、约 2-3 秒。前提：画面停在「选择套牌」界面、自动化未运行。
+    坐标可在 ui_config.json 顶层 `mode_click` 段覆盖。
+    """
+    body = body or {}
+    # 守卫③：队列在跑 → 拒绝（队列内部调用走 _mode_click_inner，不受此限）
+    with _QUEUE_LOCK:
+        if _QUEUE_STATE["running"]:
+            return {"ok": False, "error": "命令队列正在执行，等它跑完再切模式。"}
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in _MODE_ALIASES:
+        return {"ok": False,
+                "error": "mode 必须是 wild/standard/casual（或 狂野/标准/休闲）"}
+    mode = _MODE_ALIASES[mode]
+    if not _MODE_CLICK_LOCK.acquire(blocking=False):
+        return {"ok": False, "error": "上一次模式切换还没完成，请稍候。"}
+    try:
+        return _mode_click_inner(mode)
+    finally:
+        _MODE_CLICK_LOCK.release()
+
+
 # ================================================================ 待做命令队列
 # 一次性提交多条命令，控制台后台线程按顺序执行。断线不影响；状态可查、可取消。
 _QUEUE_LOCK = threading.Lock()
@@ -2268,7 +2445,7 @@ _QUEUE_STATE = {"running": False, "items": [], "current": -1,
 # 例："stop mode=after_game" / "wait-stopped timeout=300" / "deck 1" / "deck-click 8"
 #     / "prepare" / "start" / "delay 5"
 _QUEUE_ACTIONS = {"stop", "wait_stopped", "deck", "deck_click", "prepare",
-                  "start", "delay"}
+                  "start", "delay", "mode"}
 
 
 def _queue_parse_step(text: str) -> dict:
@@ -2312,6 +2489,14 @@ def _queue_run_item(action: str, args: dict) -> dict:
         return api_save_deck(body)
     if action == "deck_click":
         return api_deck_click({"index": int(args.get("index"))})
+    if action == "mode":
+        # 走 _mode_click_inner 而不是 api_mode_click：队列自己就是执行上下文，
+        # 不应被守卫③（队列在跑）自我拒绝。
+        mode = str(args.get("index") or args.get("mode") or "").strip().lower()
+        if mode not in _MODE_ALIASES:
+            return {"ok": False,
+                    "error": "mode 必须是 wild/standard/casual（或 狂野/标准/休闲）"}
+        return _mode_click_inner(_MODE_ALIASES[mode])
     if action == "prepare":
         return api_prepare({})
     if action == "start":
@@ -2728,6 +2913,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_enter_battle(body))
             elif path == "/api/deck_click":
                 self._json(api_deck_click(body))
+            elif path == "/api/mode":
+                self._json(api_mode_click(body))
             elif path == "/api/queue":
                 self._json(api_queue_submit(body))
             elif path == "/api/queue/cancel":
@@ -2750,6 +2937,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_delays(body))
             elif path == "/api/selfcheck":
                 self._json(api_selfcheck(force=True))
+            elif path == "/api/serve/stop":
+                payload, code = api_serve_stop(body)
+                self._json(payload, code)
             else:
                 self._json({"ok": False, "error": "未知接口"}, 404)
         except Exception as exc:
@@ -2757,11 +2947,62 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": str(exc)}, 500)
 
 
+# ---------------------------------------------------------------- 自停通道
+# 为什么需要它：控制台常常是**提权**起来的（serve start --via-task / --elevate），
+# 而 Windows 不允许非提权进程结束提权进程 —— `hsctl serve stop` 的 taskkill 会
+# 拿到 Access denied，于是"脚本停不掉"，只能让人用管理员 shell 再关一次。
+# 这里让控制台**自己**退：只要能在 127.0.0.1 上发一个带 token 的 POST，它就自己
+# 收尾退出。因为发起者不需要任何特权，agent / 手机 / 普通 shell 都能用。
+#
+# 安全边界：token 随机生成、只写在本机端口文件里（log/ui_port.txt，随 log/ 不入库），
+# 且接口只回 127.0.0.1 —— 网络上打进来的请求拿不到 token，也就停不掉。
+_SERVE_TOKEN = secrets.token_urlsafe(24)
+
+
+def api_serve_stop(body=None):
+    """控制台自停：校验 token 后收尾退出。返回 (payload, http_code)。
+
+    这是 `hsctl serve stop` 的首选通道（不需要提权）。真正的退出放在子线程里，
+    因为要先把响应写回给调用方，再停自动化、清端口文件、退出进程。
+    """
+    body = body or {}
+    token = str(body.get("token") or "")
+    if not token or not secrets.compare_digest(token, _SERVE_TOKEN):
+        _log("WARN", "收到自停请求但 token 不对，已拒绝。")
+        return ({"ok": False,
+                 "error": "token 不对：自停只接受本机端口文件里的 token（log/ui_port.txt）"},
+                403)
+    _log("SYS", "收到自停请求：停自动化 → 清理端口文件 → 退出控制台。")
+    threading.Thread(target=_self_shutdown, name="hs-self-stop",
+                     daemon=True).start()
+    return {"ok": True, "message": "已受理：控制台正在退出"}, 200
+
+
+def _self_shutdown() -> None:
+    """自停收尾：先优雅停自动化，再清端口文件，最后退出进程。"""
+    try:
+        if CTRL.automation_thread is not None:
+            try:
+                api_stop({"mode": "now"})
+            except Exception:
+                pass
+            deadline = time.time() + 15
+            while time.time() < deadline and CTRL.automation_thread is not None:
+                time.sleep(0.2)
+    except Exception:
+        pass
+    _clear_port_file()
+    # 用 os._exit：这是"自己结束自己"，不需要（也拿不到）任何特权。
+    os._exit(0)
+
+
 # ---------------------------------------------------------------- 启动
 def _write_port_file(port: int) -> None:
     """把实际监听端口写给 CLI / agent（原子替换，读到的永远是一份完整 JSON）。
 
     端口会因为占用而顺延（BASE_PORT..BASE_PORT+19），所以消费方不该硬编码 8765。
+    `token` 供自停接口校验，`executable` 供 `hsctl doctor` 判断"控制台是不是跑在
+    错误的解释器上"。
     """
     try:
         PORT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -2771,6 +3012,8 @@ def _write_port_file(port: int) -> None:
             "url": f"http://{HOST}:{port}",
             "pid": os.getpid(),
             "started_at": datetime.now().isoformat(timespec="seconds"),
+            "token": _SERVE_TOKEN,
+            "executable": sys.executable,
         }
         tmp = PORT_FILE.with_name(PORT_FILE.name + ".tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf8")

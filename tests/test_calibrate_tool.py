@@ -386,7 +386,7 @@ class ActiveTargetMappingTests(unittest.TestCase):
                 session.active_index = index
                 box = tuple(int(v) for v in target["box"])
                 drawn = display_mapping.box_to_screen(
-                    getattr(cfg, target["config_key"]), mapping)
+                    cfg.hs_target_boxes[target["key"]], mapping)
                 self.assertEqual(box, drawn,
                                  "两条路径的换算落点不一致（切换目标就会跳）")
 
