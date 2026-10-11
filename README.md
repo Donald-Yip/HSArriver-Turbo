@@ -76,10 +76,10 @@ python web_ui.py
 `env.example.json`）。会话第一条命令跑自诊，照它给的下一步做：
 
 ```powershell
-python hsctl.py --json doctor          # 看 verdict：环境对不对 / 控制台在不在 / 下一步做什么
-python hsctl.py env discover           # 列出本机候选解释器（版本 + 依赖逐项校验，不写盘）
-python hsctl.py env pin "D:\miniconda3\envs\HTL\python.exe"   # 选定并保存（换成你自己的路径）
-python hsctl.py --json doctor          # 复验到 verdict=env_ok
+python hsctl.py --json doctor                  # 看 verdict：环境对不对 / 控制台在不在 / 下一步做什么
+python hsctl.py env discover                   # 列出本机候选解释器（版本 + 依赖逐项校验，不写盘）
+python hsctl.py env pin "C:\你的Python3.12\python.exe"   # 选定并保存到 log/env.json（换成你实际的路径）
+python hsctl.py --json doctor                  # 复验到 verdict=env_ok
 ```
 
 解释器查找顺序是唯一权威的：`HS_PYTHON` 环境变量 → `log/env.json` → 当前解释器
