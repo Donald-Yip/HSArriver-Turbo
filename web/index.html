@@ -255,7 +255,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <button id="btnAfterGame" class="btn btn-warn" type="button" disabled>本局结束后停止</button>
         <button id="btnStopNow" class="btn btn-danger" type="button" disabled>立即停止</button>
       </div>
-      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080、缩放 100%。<br>🖥️ 炉石请使用 <b>全屏模式</b>（<code>设置 → 选项 → 显示 → 全屏</code>），<b>不要用「最大化窗口」</b>：最大化时窗口坐标与 1920×1080 全屏不一致，硬编码的点击坐标会整体偏移——下随从因有吸附还能成功，法术指定目标则会一直失败重试。<br>♻ 浮窗上的 <b>「重启炉石」</b>会先弹确认，再执行「停自动化 → 强制结束 Hearthstone.exe → 清空日志目录（保留 Log.config）→ 重新启动炉石」，用于<b>日志状态和游戏对不上</b>（没在游戏却显示在换牌）的情况；重启会<b>优先走战网</b>（战网没开就先开战网，再点「开始游戏」），而且以<b>游戏窗口出现</b>才算成功，不会出现“报已启动、其实炉石已经关了”；<b>「退出浮窗」</b>只关窗口、脚本继续跑；关掉浮窗会回到<b>未就绪</b>状态（大按钮变回「🪄 开始运行（准备）」），再点上面的「🪟 日志浮窗」或「开始运行」把浮窗开出来，然后点「⚔️ 开始对战」才会开始。</div>
+      <div class="hint-line">🪄 点 <b>「开始运行」</b>只会打开日志浮窗、把炉石切到前台，<b>不会自动开打</b>；就绪后按钮变为 <b>「开始对战」</b>，再点一次（二次确认后）才真正开始。<br>⌨️ 快捷键 Ctrl+Q 可随时立即停止自动化；请保持炉石与炉石盒子前台可见、分辨率 1920×1080。<br>🖥️ 炉石请使用 <b>全屏模式</b>（<code>设置 → 选项 → 显示 → 全屏</code>），<b>不要用「最大化窗口」</b>：最大化时窗口坐标与 1920×1080 全屏不一致，硬编码的点击坐标会整体偏移——下随从因有吸附还能成功，法术指定目标则会一直失败重试。<br>♻ 浮窗上的 <b>「重启炉石」</b>会先弹确认，再执行「停自动化 → 强制结束 Hearthstone.exe → 清空日志目录（保留 Log.config）→ 重新启动炉石」，用于<b>日志状态和游戏对不上</b>（没在游戏却显示在换牌）的情况；重启会<b>优先走战网</b>（战网没开就先开战网，再点「开始游戏」），而且以<b>游戏窗口出现</b>才算成功，不会出现“报已启动、其实炉石已经关了”；<b>「退出浮窗」</b>只关窗口、脚本继续跑；关掉浮窗会回到<b>未就绪</b>状态（大按钮变回「🪄 开始运行（准备）」），再点上面的「🪟 日志浮窗」或「开始运行」把浮窗开出来，然后点「⚔️ 开始对战」才会开始。</div>
     </section>
 
     <section class="card wide">
@@ -279,6 +279,29 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       </div>
       <div class="hint-line">挂机时最怕“炉石已经没了，脚本还在对着失效画面做 OCR”。开启后每个循环都会确认：<b>Hearthstone.exe 进程是否还在</b>（闪退/被关，权威信号），以及<b>对局中 Power.log 是否还在更新</b>（进程还在但游戏卡死）。判定退出会立刻在日志与浮窗<b>醒目告警并自动停止自动化</b>，不会空转到天亮。默认开启；自动化运行中不可修改。</div>
       <div class="hint-line" id="livenessStatus" style="margin-top:4px;color:var(--text)">存活状态：等待检测…</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">🔄 中断重启（卡住自动重开）</h2>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:90px">
+          <span class="field-label">启用</span>
+          <input id="chkWatchdog" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <label class="field">
+          <span class="field-label">日志停滞多久算卡住（秒）</span>
+          <input id="inpWdStale" type="number" min="30" max="3600" step="30">
+        </label>
+        <label class="field">
+          <span class="field-label">最多重启次数</span>
+          <input id="inpWdMax" type="number" min="1" max="20" step="1">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveWatchdog" class="btn btn-ghost" type="button">💾 保存中断重启</button>
+      </div>
+      <div class="hint-line">开启后，<b>自动化运行中</b>只要 <code>Power.log</code> 停滞超过阈值（默认 <b>300 秒 = 5 分钟</b>）就判定炉石卡住，自动执行：<b>重启炉石 → 等主界面 → 重新进入对战 → 重新开始挂机</b>，无人值守也能自己爬回来。<br>⚠️ 与上面的「存活检测」<b>不要同时依赖</b>：本开关打开时，日志停滞<b>交给它重启</b>，存活检测那条「自动停止」不再触发；关掉则恢复原来的「停止并等人工」。<br>🛡️ 防无限重启：<b>10 分钟内最多重启 3 次</b>，超过就停止并醒目告警（反复重启说明不是一两次抖动，继续只会烧资源）。<br>⚠️ 只在<b>自动化运行中</b>判定——停在主界面发呆时日志本来就不动，不会被误重启。</div>
+      <div class="hint-line" id="watchdogStatus" style="margin-top:4px;color:var(--text)">中断重启：等待检测…</div>
     </section>
 
     <section class="card wide">
@@ -523,6 +546,7 @@ var dirtyConcede = false;
 var dirtyDelays = false;
 var dirtyHumanLike = false;
 var dirtyLiveness = false;
+var dirtyWatchdog = false;
 var dirtyRankStop = false;
 
 var PHASE_INFO = {
@@ -748,6 +772,46 @@ function render(s){
       lvTxt = "存活状态：无法判定（进程列表读取失败）";
     }
     $("livenessStatus").textContent = lvTxt;
+  }
+
+  /* 中断重启（看门狗） */
+  $("chkWatchdog").disabled = busy;
+  $("inpWdStale").disabled = busy;
+  $("inpWdMax").disabled = busy;
+  $("btnSaveWatchdog").disabled = busy;
+  if (s.watchdog){
+    var wd = s.watchdog;
+    if (!dirtyWatchdog){
+      $("chkWatchdog").checked = !!wd.enabled;
+      $("inpWdStale").value = wd.stale_seconds;
+      $("inpWdMax").value = wd.max_restarts;
+    }
+    var wdTxt;
+    if (!wd.enabled){
+      wdTxt = "中断重启：已关闭（卡住时会走「存活检测」自动停止并等人工处理）";
+    } else if (wd.status === "exhausted"){
+      wdTxt = "中断重启：❌ " + Math.round((wd.window_seconds || 600) / 60) + " 分钟内已重启 "
+            + wd.restarts_in_window + " 次（达到上限），已停手等人工处理";
+    } else if (wd.restart_running){
+      wdTxt = "中断重启：🔄 正在重启炉石并重新进入对战…";
+    } else if (wd.status === "settling"){
+      wdTxt = "中断重启：⏳ 重启后宽限期中（还剩 " + Math.round(wd.settle_left || 0) + "s 再判定）";
+    } else if (wd.status === "stale"){
+      wdTxt = "中断重启：⚠️ 日志已停滞 " + Math.round(wd.log_age || 0) + "s（≥ "
+            + wd.stale_seconds + "s），即将重启";
+    } else if (wd.status === "idle"){
+      wdTxt = "中断重启：待机（自动化未运行，不判定）";
+    } else if (wd.status === "ok"){
+      wdTxt = "中断重启：✅ 待命中（日志 " + Math.round(wd.log_age || 0) + "s 前更新；停滞 ≥ "
+            + wd.stale_seconds + "s 触发重启；本窗口已用 "
+            + wd.restarts_in_window + "/" + wd.max_restarts + " 次，累计 "
+            + (wd.restarts_total || 0) + " 次）";
+    } else if (wd.status === "unknown"){
+      wdTxt = "中断重启：待命中（暂无 Power.log，打一局后开始计时）";
+    } else {
+      wdTxt = "中断重启：无法判定";
+    }
+    $("watchdogStatus").textContent = wdTxt;
   }
 
   /* 账号昵称校验 */
@@ -1164,6 +1228,33 @@ $("btnSaveLiveness").addEventListener("click", function(){
     if (r.ok){
       toast(r.message, "ok");
       dirtyLiveness = false;
+    } else {
+      toast(r.error || "保存失败", "error");
+    }
+  });
+});
+
+/* ---------- 中断重启（看门狗） ---------- */
+$("chkWatchdog").addEventListener("change", function(){ dirtyWatchdog = true; });
+["inpWdStale","inpWdMax"].forEach(function(id){
+  $(id).addEventListener("input", function(){ dirtyWatchdog = true; });
+});
+
+$("btnSaveWatchdog").addEventListener("click", function(){
+  if ($("chkWatchdog").checked && !confirm(
+      "开启「中断重启」后：自动化运行中如果日志停滞超过 "
+      + $("inpWdStale").value + " 秒，脚本会自动重启炉石并重新进入对战。\n\n"
+      + "注意：它会接管「存活检测」的日志停滞判定（不再自动停止改由它重启）。\n\n确定开启？")){
+    return;
+  }
+  post("/api/watchdog", {
+    enabled: $("chkWatchdog").checked,
+    stale_seconds: $("inpWdStale").value,
+    max_restarts: $("inpWdMax").value
+  }).then(function(r){
+    if (r.ok){
+      toast("中断重启已保存", "ok");
+      dirtyWatchdog = false;
     } else {
       toast(r.error || "保存失败", "error");
     }

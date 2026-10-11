@@ -248,6 +248,7 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 | `delays` / `delays set 键=值 [键=值 …]` | 延时；`delays` 会逐条标出**生效时机** |
 | `human-like [set …]` | 活人感：`--enabled/--no-enabled`、`--hand-hover/--no-hand-hover`、`--minion-hover/--no-minion-hover`、`--post-delay-min/-max`、`--hover-min/-max`、`--minion-hover-min/-max` |
 | `liveness [set …]` | 存活检测：`--enabled/--no-enabled`、`--warn`（秒）、`--stop`（秒） |
+| `watchdog on\|off\|status\|set` | **中断重启**：自动化运行中 `Power.log` 停滞超阈值就重启炉石并重新进入对战。`set` 参数：`--stale`（秒，默认 300=5 分钟）、`--max-restarts`（默认 3）、`--window`（秒，默认 600）。默认**关**；打开后接管 `liveness` 的日志停滞判定（不再自动停止，改为重启） |
 | `concede [set …]` | 自动投降：`--enabled/--no-enabled`、`--threshold`（%）、`--rounds` |
 | `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
 | `rank-stop [set …]` | 段位目标：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N`、`--action stop\|keep`（`stop`=达到后停止；`keep`=控分，名次数值比目标更靠前就开局投降） |
@@ -449,7 +450,7 @@ python hsctl.py env --pin auto     # 自动选第一个合格候选
 3. 检查 name_match.matched        → false 就用 hsctl config set --name 纠正
 4. hsctl prepare                  → 确认浮窗/前台就绪，再 hsctl start
 5. hsctl log -f                   → 跟随日志观察；或 hsctl --json status --watch 2
-6. 需要时热改：hsctl delays set … / hsctl liveness set …
+6. 需要时热改：hsctl delays set … / hsctl liveness set … / hsctl watchdog set …
 7. 收工：hsctl stop --after-game（打完本局）或 hsctl stop
 ```
 

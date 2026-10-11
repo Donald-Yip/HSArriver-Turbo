@@ -1230,6 +1230,62 @@ def cmd_mode(args, ctx: Ctx) -> int:
     return _ok_message(ctx, payload)
 
 
+def cmd_watchdog(args, ctx: Ctx) -> int:
+    """中断重启看门狗：日志长时间不变就重启炉石并把这一局重开。
+
+    用法：
+      hsctl watchdog on|off            开关
+      hsctl watchdog status           看当前状态（默认）
+      hsctl watchdog set --stale 300 --max-restarts 3 --window 600
+
+    与「存活检测」（hsctl liveness）的区别：存活检测判定无响应后**停止**并告警，
+    等人处理；本开关打开后改为**重启炉石并自动重新进入对战**，无人值守自己爬
+    回来。开关打开时由它接管「日志停滞」，存活检测那条自动停止不再触发。
+    """
+    sub = getattr(args, "watchdog_cmd", None) or "status"
+    if sub == "on":
+        return _ok_message(ctx, ctx.post("/api/watchdog", {"enabled": True}))
+    if sub == "off":
+        return _ok_message(ctx, ctx.post("/api/watchdog", {"enabled": False}))
+    if sub == "set":
+        body = {}
+        if getattr(args, "stale", None) is not None:
+            body["stale_seconds"] = args.stale
+        if getattr(args, "max_restarts", None) is not None:
+            body["max_restarts"] = args.max_restarts
+        if getattr(args, "window", None) is not None:
+            body["window_seconds"] = args.window
+        if not body:
+            raise ApiFailure("没有要改的字段（用 --stale / --max-restarts / --window）")
+        return _ok_message(ctx, ctx.post("/api/watchdog", body))
+
+    payload = ctx.get("/api/status")
+    wd = payload.get("watchdog") or {}
+    if ctx.json:
+        print(json.dumps({"ok": True, "watchdog": wd}, ensure_ascii=False))
+        return EXIT_OK
+    state_labels = {
+        "disabled": "已关闭", "ok": "正常（日志在更新）", "idle": "自动化未运行",
+        "stale": "日志停滞（即将重启）", "settling": "重启后宽限期中",
+        "exhausted": "重启次数用尽（已停手等人工）", "unknown": "无法判定",
+        "error": "读取失败",
+    }
+    print("中断重启看门狗")
+    print(f"  开关      : {'开' if wd.get('enabled') else '关'}")
+    print(f"  状态      : {state_labels.get(wd.get('status'), wd.get('status'))}")
+    print(f"  触发阈值  : 日志停滞 {wd.get('stale_seconds', 0):.0f} 秒")
+    print(f"  限流      : {wd.get('window_seconds', 0) / 60:.0f} 分钟内最多 "
+          f"{wd.get('max_restarts', 0)} 次（已用 {wd.get('restarts_in_window', 0)} 次，"
+          f"累计 {wd.get('restarts_total', 0)} 次）")
+    age = wd.get("log_age")
+    print(f"  日志停滞  : {'—' if age is None else f'{age:.0f} 秒'}")
+    if wd.get("restart_running"):
+        print("  正在重启  : 是")
+    if wd.get("message"):
+        print(f"  最近事件  : {wd['message']}")
+    return EXIT_OK
+
+
 def cmd_queue(args, ctx: Ctx) -> int:
     """待做命令队列：一次性提交多条命令，控制台按顺序执行（断线不影响）。
 
@@ -2497,6 +2553,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("mode", metavar="模式",
                    help="wild | standard | casual（或 狂野/标准/休闲）")
     p.set_defaults(handler=cmd_mode)
+    p = sub.add_parser("watchdog", parents=[common],
+                       help="中断重启：日志长时间不变就重启炉石并重开一局")
+    p.add_argument("watchdog_cmd", nargs="?", default="status",
+                   choices=["on", "off", "status", "set"],
+                   help="on/off=开关；status=看状态（默认）；set=改参数")
+    p.add_argument("--stale", type=float, default=None, metavar="秒",
+                   help="日志停滞多少秒算卡住（默认 300 = 5 分钟）")
+    p.add_argument("--max-restarts", dest="max_restarts", type=int, default=None,
+                   metavar="次数", help="滑动窗口内最多重启几次（默认 3）")
+    p.add_argument("--window", type=float, default=None, metavar="秒",
+                   help="滑动窗口长度（默认 600 = 10 分钟）")
+    p.set_defaults(handler=cmd_watchdog)
     p = sub.add_parser("queue", parents=[common],
                        help="待做命令队列：一次提交多条，控制台按顺序执行")
     p.add_argument("queue_cmd", nargs="?", default="status",

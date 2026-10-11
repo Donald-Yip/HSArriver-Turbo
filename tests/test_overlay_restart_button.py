@@ -137,7 +137,7 @@ class RestartWorkerTests(unittest.TestCase):
                          [call[0] for call in self.calls])
         self.assertEqual("C:/Logs", self.calls[0][1])
         self.assertEqual(Path("C:/Hearthstone.exe"), self.calls[-1][1])
-        self.assertTrue(any("重启完成" in msg for msg in self._messages(logger)))
+        self.assertTrue(any("炉石已重新启动" in msg for msg in self._messages(logger)))
 
     def test_stops_a_running_automation_before_touching_anything(self):
         def fake_stop(body):

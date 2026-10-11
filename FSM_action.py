@@ -32,6 +32,7 @@ from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import ActionKind
 from src.safety.hearthstone_liveness import default_monitor
 from src.safety.recommendation_validator import RecommendationValidator
+from src.safety.restart_watchdog import default_watchdog
 
 
 FSM_state = ""
@@ -81,6 +82,7 @@ _name_match_reported = None
 # 炉石存活检测（进程消失 / Power.log 停滞）：状态机主循环每轮检查一次。
 # 与 Web 界面共享同一个检测器实例，浮窗/网页看到的是同一份判定。
 hearthstone_liveness = default_monitor()
+restart_watchdog = default_watchdog()
 # 最近一次“判定炉石已退出/无响应”的醒目告警（供网页横幅显示，下一轮开始时清空）。
 _liveness_alert = None
 # 连续“推荐读取失败（RETRY）”次数：只作为存活告警文案里的旁证，帮助判断卡在哪。
@@ -868,6 +870,11 @@ def check_hearthstone_liveness():
     """状态机主循环调用：存活检测 + 告警/自动停止。
 
     返回本次事件（``None`` = 正常或无需处理），方便日志/测试观察。
+
+    **与「中断重启」看门狗的优先级**：看门狗开关打开时，由它接管
+    「Power.log 长时间停滞」这件事（重启炉石并重开一局），此时这里**不再**
+    触发自动停止 —— 否则两个功能会在同一秒里一个要重启、一个要停机，
+    互相打架。看门狗开关关着时行为与从前完全一致。
     """
     try:
         event = hearthstone_liveness.check(
@@ -875,8 +882,27 @@ def check_hearthstone_liveness():
             detail=_liveness_detail())
     except Exception:
         return None
+
+    # 看门狗判定（独立于上面那条，只在"停滞"这一类事件上接管）。
+    watchdog_event = None
+    try:
+        watchdog_event = restart_watchdog.poll()
+    except Exception:
+        watchdog_event = None
+    if watchdog_event is not None:
+        _report_watchdog_event(watchdog_event)
+
     if event is None:
-        return None
+        return watchdog_event
+    if event.get("kind", "").startswith("log_stale") and _watchdog_enabled():
+        # 停滞交给看门狗处理：这里只把告警文案写进日志，不触发自动停止。
+        try:
+            manual_controller.output(
+                f"[SYS] 检测到日志停滞：已交由「中断重启」处理"
+                f"（{event['message']}）")
+        except Exception:
+            pass
+        return watchdog_event or event
     if event.get("fatal"):
         _alert_hearthstone_gone(event["message"])
     else:
@@ -885,6 +911,29 @@ def check_hearthstone_liveness():
         except Exception:
             pass
     return event
+
+
+def _watchdog_enabled() -> bool:
+    """看门狗开关是否打开（读配置，失败按关闭处理=保持旧行为）。"""
+    try:
+        from config import watchdog_settings
+        return bool(watchdog_settings().get("enabled", False))
+    except Exception:
+        return False
+
+
+def _report_watchdog_event(event: dict) -> None:
+    """把看门狗事件写进日志；「重启次数用尽」这类需要人工介入的走醒目告警。"""
+    try:
+        message = event.get("message") or ""
+        if not message:
+            return
+        if event.get("kind") == "exhausted":
+            _alert_hearthstone_gone(message)
+        else:
+            manual_controller.output(f"[SYS] {message}")
+    except Exception:
+        pass
 
 
 def hearthstone_liveness_state() -> dict:

@@ -221,6 +221,8 @@ python hsctl.py delays                           # 看延时 + 每条生效时�
 python hsctl.py delays set pre_action_delay_seconds=5
 python hsctl.py human-like set --enabled --post-delay-min 0.5 --post-delay-max 2.5
 python hsctl.py liveness set --enabled --warn 120 --stop 300
+python hsctl.py watchdog on                      # 中断重启：日志停滞 5 分钟就重启炉石并重开
+python hsctl.py watchdog set --stale 300 --max-restarts 3 --window 600
 python hsctl.py concede set --enabled --threshold 12 --rounds 4
 python hsctl.py rank-stop set --enabled --mode legend_number --legend-number 500 --action stop
 # 控分：名次数值 < 500（名次比目标更靠前）就开局投降，压到 >= 500 再正常打
@@ -284,7 +286,7 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
 | **需重启脚本进程** | `ocr_preprocess_scale` |
 
 `hsctl delays set` 的回话里有 `effects` 字段直接告诉你每项的实际时机 —— **以此为准**，
-不要凭本表猜。活人感 / 存活检测 / 自动投降 / 段位目标是每次读盘，改完立即生效。
+不要凭本表猜。活人感 / 存活检测 / 中断重启 / 自动投降 / 段位目标是每次读盘，改完立即生效。
 
 **卡组序号**（`hsctl deck 8`）也是每次开局前重读 —— 改完**下一局**生效，不用重启脚本。
 

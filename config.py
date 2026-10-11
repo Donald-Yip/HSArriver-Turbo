@@ -253,6 +253,56 @@ def liveness_settings() -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------- 中断重启（看门狗）
+# 「日志卡住就重启炉石重开一局」的看门狗。与存活检测（liveness）的区别：
+#   * liveness：Power.log 停滞 → **停止**自动化并告警，等人来处理；
+#   * watchdog：Power.log 停滞 → **重启炉石并重新开始**，无人值守自己爬回来。
+# 两者看的是同一个（其实不同的）信号，但 watchdog **优先级更高**：开关打开时
+# 由它接管「停滞」这件事，liveness 那条自动停止不再触发（见 FSM_action
+# check_hearthstone_liveness）。开关关闭时行为与从前完全一致。
+#   enabled           : 总开关（**默认关**，要用户显式打开才生效）。
+#   stale_seconds     : Power.log 停滞超过该秒数 → 判定卡住并重启（默认 300s = 5 分钟）。
+#   max_restarts      : 滑动窗口内最多重启几次，超过就停止并告警（防无限重启）。
+#   window_seconds    : 滑动窗口长度（默认 600s = 10 分钟）。
+#   check_seconds     : 判定间隔（默认 15s，别设太小以免抖动误判）。
+#   settle_seconds    : 重启并重新进入对战后，先给它这么多秒把日志写起来再重新计时
+#                       （默认 120s），否则刚重启完日志还没动就又被判停滞。
+# 真实值保存在 ui_config.json 的 watchdog 段。
+DEFAULT_WATCHDOG = {
+    "enabled": False,
+    "stale_seconds": 300.0,
+    "max_restarts": 3,
+    "window_seconds": 600.0,
+    "check_seconds": 15.0,
+    "settle_seconds": 120.0,
+}
+
+
+def watchdog_settings() -> dict:
+    """读取 ui_config.json 的 watchdog 段（每次调用都读文件，改完即时生效）。
+
+    缺字段/类型不对时回退默认值；数值做基本收敛，避免配置写坏导致
+    「刚开局就重启」或「无限重启」。
+    """
+    cfg = dict(DEFAULT_WATCHDOG)
+    data = _load_ui_config().get("watchdog")
+    if isinstance(data, dict):
+        for key in cfg:
+            if data.get(key) is not None:
+                cfg[key] = data[key]
+    try:
+        cfg["enabled"] = bool(cfg["enabled"])
+        cfg["stale_seconds"] = max(30.0, float(cfg["stale_seconds"]))
+        cfg["max_restarts"] = max(1, int(cfg["max_restarts"]))
+        cfg["window_seconds"] = max(cfg["stale_seconds"],
+                                    float(cfg["window_seconds"]))
+        cfg["check_seconds"] = max(5.0, float(cfg["check_seconds"]))
+        cfg["settle_seconds"] = max(0.0, float(cfg["settle_seconds"]))
+    except (TypeError, ValueError):
+        return dict(DEFAULT_WATCHDOG)
+    return cfg
+
+
 def human_like_settings() -> dict:
     """读取 ui_config.json 的 human_like 段（每次调用都读文件，改完即时生效）。
 

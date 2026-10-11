@@ -2092,11 +2092,58 @@ def _overlay_restart_hearthstone():
     return True
 
 
-def _restart_hearthstone_worker():
+def _restart_hearthstone_worker(resume=False, source="manual"):
     """停自动化 → 重置日志读取器 → 中止炉石 → 清空日志目录 → 重新拉起炉石。
 
     每一步都往网页/浮窗写日志；任何一步失败都立刻停下并说明原因，绝不在拿不准
     的状态下继续删文件。
+
+    ``resume=True`` 时（看门狗自动重启）再多走两步：**等主界面 → 进入对战 →
+    重新开始自动化**，真正做到"日志卡住就自己爬回来继续打"。
+    ``source`` 只用于日志文案（``watchdog`` / ``manual``）。
+    """
+    ok = _restart_hearthstone_steps()
+    if not ok:
+        if source == "watchdog":
+            _log("ERROR", "看门狗重启未成功；已放弃本次自动恢复，等待人工处理。")
+        return False
+    if not resume:
+        return True
+
+    # ---- 恢复：等主界面 → 进入对战 → 重开自动化 ----
+    import battle_entry
+    _log("SYS", "重启完成，开始自动恢复：等待主界面 → 进入对战 → 重新开始……")
+    try:
+        result = battle_entry.enter_battle(
+            deck_index=None, click_start=False,
+            logger=lambda text: _log("SYS", text))
+    except Exception as exc:
+        _log("ERROR", f"自动进入对战失败：{exc}；请手动「进入传统对战」后再点开始。")
+        return False
+    if not result.get("ok"):
+        _log("WARN", f"自动进入对战未完成：{result.get('message')}"
+                     "（可能已在选套牌界面；继续尝试开始自动化）")
+    else:
+        _log("SYS", "已进入对战界面。")
+
+    started = api_start({"keep_score": True})
+    if not started.get("ok"):
+        _log("ERROR", f"重启后重新开始自动化失败：{started.get('error')}")
+        return False
+    _log("SYS", "✅ 重启并恢复成功：自动化已重新开始，继续挂机。")
+    try:
+        from src.safety.restart_watchdog import default_watchdog
+        default_watchdog().note_restarted()
+    except Exception:
+        pass
+    return True
+
+
+def _restart_hearthstone_steps() -> bool:
+    """重启炉石的纯步骤（不恢复自动化）。成功返回 True。
+
+    这是 ``_restart_hearthstone_worker`` 的前半段，单独抽出来是为了让
+    「中断重启」能在做完这一步后再决定要不要接着恢复自动化。
     """
     import hs_restart
 
@@ -2105,7 +2152,7 @@ def _restart_hearthstone_worker():
     info = hs_restart.resolve_paths(log_root)
     if not info["ok"]:
         _log("ERROR", f"重启炉石已取消：{info['error']}")
-        return
+        return False
 
     _log("SYS", "开始重启炉石：停止自动化 → 中止进程 → 清空日志目录 → 重新启动……")
     with CTRL.lock:
@@ -2123,7 +2170,7 @@ def _restart_hearthstone_worker():
         if not stopped:
             _log("ERROR", f"重启炉石已取消：自动化没有在 "
                           f"{AUTOMATION_STOP_TIMEOUT:.0f}s 内停下来。")
-            return
+            return False
         _log("SYS", "自动化已停止。")
 
     # 重建日志读取器：关掉本进程可能还开着的 Power.log 句柄（否则 Windows 上
@@ -2142,7 +2189,7 @@ def _restart_hearthstone_worker():
         if killed.get("running") is True:
             # 进程确确实实还在：既不能删它正在写的日志，也不能再起第二个实例。
             _log("ERROR", "炉石进程还在，已取消后续操作（未删日志、未重复启动）。")
-            return
+            return False
         # 状态不明（或确认超时）时继续往下走：宁可多试一次把炉石拉回来，
         # 也不要让它停在“被关掉且没人重启”的状态里。
         _log("WARN", "进程状态不明确，继续尝试把炉石拉起来（避免停在关闭状态）。")
@@ -2169,14 +2216,125 @@ def _restart_hearthstone_worker():
     if not launched.get("ok"):
         _log("ERROR", f"炉石没能自动启动：{launched.get('error')}；"
                       "请手动打开战网/炉石后再点「开始对战」。")
-        return
-    _log("SYS", f"重启完成：{launched.get('message')}；"
-                "确认无误后点「开始对战」继续。")
+        return False
+    _log("SYS", f"炉石已重新启动：{launched.get('message')}")
+    return True
+
+
+def _restart_hearthstone_and_resume():
+    """看门狗调用的入口：后台跑「重启 + 恢复」，立刻返回是否成功**派发**。
+
+    返回 False 表示没能派发（比如上一次重启还在跑），此时看门狗应当放弃并告警，
+    不要每 15s 又派一次。
+    """
+    with _restart_lock:
+        if _RESTART_STATE.get("running"):
+            _log("WARN", "看门狗想重启，但上一次「重启炉石」还没结束，本次跳过。")
+            return False
+        _RESTART_STATE["running"] = True
+        _RESTART_STATE["source"] = "watchdog"
+        _RESTART_STATE["started_at"] = datetime.now().isoformat(timespec="seconds")
+
+    def _worker():
+        try:
+            _restart_hearthstone_worker(resume=True, source="watchdog")
+        except Exception as exc:
+            traceback.print_exc()
+            _log("ERROR", f"看门狗自动重启异常：{exc}")
+        finally:
+            with _restart_lock:
+                _RESTART_STATE["running"] = False
+
+    threading.Thread(target=_worker, name="hs-watchdog-restart",
+                     daemon=True).start()
+    return True
 
 
 # 串行化「重启炉石」：并发触发两次会把刚拉起来的炉石再杀一遍。
 _restart_lock = threading.Lock()
-_RESTART_STATE = {"running": False}
+_RESTART_STATE = {"running": False, "source": None, "started_at": None}
+
+
+def _bind_watchdog_restarter() -> None:
+    """给「中断重启」看门狗接上真正的重启动作。
+
+    看门狗模块本身不认识 web_ui（避免循环 import），所以由这里注入。
+    注入时机在启动时调用一次即可；重复调用无害（只是覆盖同一个函数）。
+    """
+    try:
+        from src.safety.restart_watchdog import default_watchdog
+        default_watchdog()._restarter = lambda cfg: _restart_hearthstone_and_resume()
+    except Exception as exc:
+        print(f"[watchdog] 注入重启通道失败（中断重启将不可用）：{exc}")
+
+
+def _as_bool(value) -> bool:
+    """把网页/CLI 传进来的开关值统一成布尔。
+
+    网页复选框给的是真布尔，CLI 给人打的是 ``on/off/1/0/true/false`` ——
+    两种都要认，否则 `hsctl watchdog on` 会被当成 False。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    return text in ("1", "on", "true", "yes", "y", "开", "开启", "启用")
+
+
+def api_watchdog(body: dict = None) -> dict:
+    """读取/保存「中断重启」配置。
+
+    参数（都可省略，省略即保留当前值）：
+      * ``enabled``        开关（"on"/"off"/true/false/1/0 都认）
+      * ``stale_seconds``  日志停滞多少秒算卡住（默认 300 = 5 分钟）
+      * ``max_restarts``   滑动窗口内最多重启几次（默认 3）
+      * ``window_seconds`` 滑动窗口长度（默认 600 = 10 分钟）
+    """
+    from src.safety.restart_watchdog import default_watchdog
+    wd = default_watchdog()
+    current = dict(wd.settings())
+
+    if body:
+        raw_enabled = body.get("enabled")
+        if raw_enabled is not None:
+            current["enabled"] = _as_bool(raw_enabled)
+        for key in ("stale_seconds", "window_seconds"):
+            if body.get(key) not in (None, ""):
+                try:
+                    current[key] = max(30.0, float(body[key]))
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": f"{key} 必须是数字（秒）"}
+        if body.get("max_restarts") not in (None, ""):
+            try:
+                current["max_restarts"] = max(1, int(body["max_restarts"]))
+            except (TypeError, ValueError):
+                return {"ok": False, "error": "max_restarts 必须是正整数"}
+        # 开关从关→开时，重置限流计数：上一轮"已经重启过 3 次"不该继续压着它。
+        turning_on = current["enabled"] and not wd.settings().get("enabled")
+        try:
+            cfg = load_config()
+            cfg["watchdog"] = current
+            save_config(cfg)
+        except Exception as exc:
+            return {"ok": False, "error": f"保存失败：{exc}"}
+        if turning_on:
+            wd.reset()
+        _log("SYS", "「中断重启」已" + ("开启" if current["enabled"] else "关闭")
+                    + f"（停滞 {current['stale_seconds']:.0f}s 触发，"
+                      f"{current['window_seconds'] / 60:.0f} 分钟内最多 "
+                      f"{current['max_restarts']} 次）")
+    return {"ok": True, "watchdog": wd.state()}
+
+
+def _watchdog_state() -> dict:
+    try:
+        from src.safety.restart_watchdog import default_watchdog
+        state = default_watchdog().state()
+    except Exception as exc:
+        state = {"enabled": False, "status": "error", "message": str(exc)}
+    state["restart_running"] = bool(_RESTART_STATE.get("running"))
+    return state
 
 
 # ---------------------------------------------------------------- 界面识别 / 一键进入对战
@@ -2850,6 +3008,7 @@ def status_snapshot():
         "human_like": _current_human_like(),
         "liveness": {**_liveness_state(), **_current_liveness()},
         "liveness_alert": _liveness_state().get("alert"),
+        "watchdog": _watchdog_state(),
         "name_match": _name_match_state(),
         "delays": _current_delays(),
         "selfcheck": selfcheck_summary(),
@@ -3001,6 +3160,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_human_like(body))
             elif path == "/api/liveness":
                 self._json(api_save_liveness(body))
+            elif path == "/api/watchdog":
+                self._json(api_watchdog(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
             elif path == "/api/selfcheck":
@@ -3137,6 +3298,9 @@ def main():
     # 常驻阶段监测线程：停止自动化也继续检测当前阶段（随时可恢复）
     threading.Thread(target=_stage_monitor_loop, name="hs-stage",
                      daemon=True).start()
+    # 「中断重启」看门狗的重启通道：把 web_ui 的重启动作注入给看门狗模块
+    # （看门狗本身不认识 web_ui，靠这里接线，避免循环 import）。
+    _bind_watchdog_restarter()
     # 常驻前台守护线程：每 30 分钟把炉石切回最前台
     threading.Thread(target=_hearthstone_foreground_guard,
                      name="hs-fg-guard", daemon=True).start()
