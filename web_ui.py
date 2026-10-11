@@ -59,7 +59,7 @@ PORT_FILE = ROOT / "log" / "ui_port.txt"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
     DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS,
-    DEFAULT_RANK_STOP, HOST,
+    DEFAULT_RANK_STOP, RANK_STOP_ACTIONS, HOST,
     BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig)
 # 环境自检（Python 3.12 / 依赖包 / 分辨率缩放）与原样截图区域框预览。
 import screen_regions
@@ -190,8 +190,8 @@ def _overlay_key(line: str) -> bool:
     keys = ("回合", "延时", "轮到己方", "等待", "[推荐]", "[执行]",
             "识别换牌", "换牌", "留牌", "阶段", "对局结束", "未对局",
             "本局结束", "失败", "立即停止",
-            # 上分停止条件（每局结束读段位）也要能看到检测结果
-            "段位", "上分",
+            # 段位目标（上分停止 / 控分，在选卡组界面读名次）也要能看到检测结果
+            "段位", "上分", "控分",
             # 浮窗上的「打开日志 / 清理日志」结果要能看见
             "日志",
             # 存活检测 / 昵称校验的告警必须进浮窗（issue 反馈看不到就白做）
@@ -810,8 +810,10 @@ def _automation_worker(fsm):
                 "wins": int(fsm.win_count),
                 "concedes": int(getattr(fsm, "concede_count", 0) or 0),
             }
-            # 上分达标自动停止：状态机的 stop_after_current_game 置位后线程自己退出，
-            # 这里把它记成「上分达标」，让页面出横幅（读的是 last_summary["stopped_by"]）。
+            # 段位目标=「到达即停」时自动停止：状态机的 stop_after_current_game
+            # 置位后线程自己退出，这里把它记成「上分达标」，让页面出横幅
+            # （读的是 last_summary["stopped_by"]）。控分（action=keep）不置位这个
+            # 标志——它只是反复投降压名次，不会让自动化停止。
             rank_reason = getattr(fsm, "_rank_stop_stop_reason", None)
             rank_reached = bool(getattr(fsm, "_rank_stop_triggered", False)
                                 and rank_reason)
@@ -1074,9 +1076,13 @@ def api_save_concede(body):
                         "threshold": threshold, "rounds": rounds}}
 
 
-# ------------------------------------------------------------------ 上分停止条件（可选）
+# ------------------------------------------------------------------ 段位目标（可选）
 def _current_rank_stop() -> dict:
-    """返回当前生效的上分停止配置（默认值叠加 ui_config.json 的 rank_stop 段）。"""
+    """返回当前生效的「段位目标」配置（默认值叠加 ui_config.json 的 rank_stop 段）。
+
+    action="stop"：上分停止（名次达标即停）；
+    action="keep"：控分（名次太靠前就开局投降压低）。
+    """
     cfg = dict(DEFAULT_RANK_STOP)
     saved = load_config().get("rank_stop")
     if isinstance(saved, dict):
@@ -1086,6 +1092,8 @@ def _current_rank_stop() -> dict:
     cfg["enabled"] = bool(cfg["enabled"])
     if cfg["mode"] not in ("legend", "legend_number"):
         cfg["mode"] = DEFAULT_RANK_STOP["mode"]
+    if cfg["action"] not in RANK_STOP_ACTIONS:
+        cfg["action"] = DEFAULT_RANK_STOP["action"]
     try:
         cfg["legend_number"] = int(cfg["legend_number"])
     except (TypeError, ValueError):
@@ -1095,16 +1103,23 @@ def _current_rank_stop() -> dict:
 
 
 def api_save_rank_stop(body):
-    """保存「上分停止条件」（ui_config.json 的 rank_stop 段）。
+    """保存「段位目标」（ui_config.json 的 rank_stop 段）。
 
-    每局结束时读一次结算界面的段位数字，命中条件就让自动化在本局结束后停止。
+    在选择套牌界面读一次名次，按 action 决定动作：
+      stop：名次达标（数值 <= 目标）→ 本局结束后停止自动化；
+      keep：名次太靠前（数值 <  目标）→ 开局即投降把名次压低，直到不超标。
     """
     with CTRL.lock:
         if CTRL.automation_thread is not None and not _hot_requested(body):
-            return {"ok": False, "error": "自动化运行中，请先停止后再修改上分停止条件。"}
+            return {"ok": False, "error": "自动化运行中，请先停止后再修改段位目标。"}
         cfg = load_config()
         rank = _current_rank_stop()
         rank["enabled"] = bool(body.get("enabled", rank["enabled"]))
+        action = str(body.get("action") or rank["action"]).strip()
+        if action not in RANK_STOP_ACTIONS:
+            return {"ok": False,
+                    "error": "处理方式只能选「达到后停止」或「控分（不超过该名次）」。"}
+        rank["action"] = action
         mode = str(body.get("mode") or rank["mode"]).strip()
         if mode not in ("legend", "legend_number"):
             return {"ok": False,
@@ -1119,16 +1134,18 @@ def api_save_rank_stop(body):
         save_config(cfg)
     if not rank["enabled"]:
         detail = "已关闭"
+    elif rank["action"] == "keep":
+        detail = f"控分：名次优于第 {rank['legend_number']} 名时开局投降（名次数值 < {rank['legend_number']}）"
     elif rank["mode"] == "legend":
         detail = "上传说即停"
     else:
         detail = f"上到传说第 {rank['legend_number']} 名或更好时停"
-    _log("SYS", f"上分停止条件已保存：{detail}。")
-    return {"ok": True, "message": "上分停止条件已保存", "rank_stop": rank}
+    _log("SYS", f"段位目标已保存：{detail}。")
+    return {"ok": True, "message": "段位目标已保存", "rank_stop": rank}
 
 
 def _rank_stop_state() -> dict:
-    """上分停止的显示状态：自动化已加载时取状态机实时值，否则用配置兜底。"""
+    """段位目标的显示状态：自动化已加载时取状态机实时值，否则用配置兜底。"""
     with CTRL.lock:
         fsm = CTRL.fsm
     if fsm is not None and hasattr(fsm, "rank_stop_detection_state"):
@@ -1138,9 +1155,10 @@ def _rank_stop_state() -> dict:
             pass
     cfg = _current_rank_stop()
     return {"enabled": cfg["enabled"], "mode": cfg["mode"],
+            "action": cfg.get("action", "stop"),
             "legend_number": cfg["legend_number"], "last_number": None,
             "last_legend": None, "last_raw": None, "last_empty": False,
-            "triggered": False, "stop_reason": None}
+            "triggered": False, "stop_reason": None, "keep_count": 0}
 
 
 # ------------------------------------------------------------------ 活人感（可选）

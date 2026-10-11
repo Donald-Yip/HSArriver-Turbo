@@ -305,29 +305,36 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
     </section>
 
     <section class="card wide">
-      <h2 class="card-title">🏁 上分停止条件（可选）</h2>
+      <h2 class="card-title">🏁 段位目标（可选）</h2>
       <div class="input-row">
         <label class="field" style="flex:none;min-width:150px">
           <span class="field-label">启用</span>
           <input id="chkRankStop" type="checkbox" style="width:auto;height:22px">
         </label>
         <label class="field">
-          <span class="field-label">停止方式</span>
+          <span class="field-label">判定方式</span>
           <select id="inpRankMode">
             <option value="legend">上传说就停</option>
-            <option value="legend_number">上到传说某个名次就停</option>
+            <option value="legend_number">指定传说名次</option>
           </select>
         </label>
         <label class="field">
           <span class="field-label">传说名次（越大越靠后）</span>
           <input id="inpRankNumber" type="number" min="1" max="100000" step="1">
         </label>
+        <label class="field">
+          <span class="field-label">到该名次后</span>
+          <select id="inpRankAction">
+            <option value="stop">达到后停止（上分停止）</option>
+            <option value="keep">控分（不超过该名次）</option>
+          </select>
+        </label>
       </div>
       <div class="btn-row">
-        <button id="btnSaveRankStop" class="btn btn-warn" type="button">💾 保存上分停止条件</button>
+        <button id="btnSaveRankStop" class="btn btn-warn" type="button">💾 保存段位目标</button>
       </div>
-      <div class="hint-line">检测点（读到数字＝已上传说）：<b>①</b> 打完一局、结算界面出现「开始」时<b>先读一次</b>——命中就<b>连「开始」都不点</b>，直接停；<b>②</b> 收尾点掉「开始」后再读一次兜底；<b>③</b> 排队点「开始匹配」之前（选择套牌界面）再读一次，命中就不排队。<br>未上传说时该处是空白的。命中条件就让自动化在本局结束后停止，不会中断正在进行的一局。<br>选「上到传说某个名次」时按「<b>该名次或更好</b>」判定（例如填 <b>1000</b>：名次 ≤ 1000 就停）。默认关闭；自动化运行中不可修改。</div>
-      <div class="hint-line" id="rankStopStatus" style="margin-top:4px;color:var(--text)">上分停止：等待自动化运行…</div>
+      <div class="hint-line">判定点：<b>只在「选择套牌」界面</b>读一次右上角名次（读到的数字就是传说名次，未上传说时该处空白）。<br><b>达到后停止</b>：名次数值 <b>≤</b> 目标 → 本局结束后停止自动化（不中断正在进行的一局）。<br><b>控分</b>：名次数值 <b>&lt;</b> 目标（名次比目标更靠前）→ <b>开局即投降</b>，把名次往后压，压到不超目标就恢复正常对战；单次运行最多投降 40 局。<br>提示：炉石传说里<b>数值越小名次越高</b>。默认关闭；自动化运行中不可修改。</div>
+      <div class="hint-line" id="rankStopStatus" style="margin-top:4px;color:var(--text)">段位目标：等待自动化运行…</div>
     </section>
 
     <section class="card wide">
@@ -440,7 +447,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       <div class="btn-row">
         <button id="btnCalibrate" class="btn btn-ghost" type="button">📐 打开校准窗口（屏幕上）</button>
       </div>
-      <div class="hint-line">📐 <b>校准窗口</b>：对战中启动，屏幕上显示脚本实际使用的全部截图区域（🟩 盒子推荐面板、🟦 换牌确认按钮、🟧 AI胜率浮动条、🟥 AI胜率兜底区域、🩵 结算「开始」按钮、🟪 段位数字、✛ 阶段判定点）+ 屏幕正中央的目标条 + 右侧推荐区域实时 OCR 预览，并提示<b>「请对齐相应UI」</b>。<b>五个区域都能拖、都能存</b>：<b>1 盒子推荐面板</b>（把「打法参考A」面板框进来）、<b>2 换牌「确认」按钮</b>、<b>3 盒子「AI胜率」浮动条</b>（兜底区域自动跟着外扩）、<b>4 结算「开始」按钮</b>（用框中心点击）、<b>5 段位数字</b>（「上分停止」靠它读名次）。<b>Tab</b> 切换目标、拖框边框移动、拖右下角手柄缩放、<b>S</b> 保存（写入 <code>ui_config.json</code>，不覆盖名字/日志目录/延时）、<b>Esc</b> 退出。</div>
+      <div class="hint-line">📐 <b>校准窗口</b>：对战中启动，屏幕上显示脚本实际使用的全部截图区域（🟩 盒子推荐面板、🟦 换牌确认按钮、🟧 AI胜率浮动条、🟥 AI胜率兜底区域、🩵 结算「开始」按钮、🟪 段位数字、✛ 阶段判定点）+ 屏幕正中央的目标条 + 右侧推荐区域实时 OCR 预览，并提示<b>「请对齐相应UI」</b>。<b>五个区域都能拖、都能存</b>：<b>1 盒子推荐面板</b>（把「打法参考A」面板框进来）、<b>2 换牌「确认」按钮</b>、<b>3 盒子「AI胜率」浮动条</b>（兜底区域自动跟着外扩）、<b>4 结算「开始」按钮</b>（用框中心点击）、<b>5 段位数字</b>（「段位目标」靠它读名次，只在选择套牌界面读）。<b>Tab</b> 切换目标、拖框边框移动、拖右下角手柄缩放、<b>S</b> 保存（写入 <code>ui_config.json</code>，不覆盖名字/日志目录/延时）、<b>Esc</b> 退出。</div>
       <div class="hint-line">🧲 拖动/缩放炉石窗口时<b>五个框会实时跟着走</b>：坐标存的是「客户区相对位置」，校准一次之后窗口随便挪都不用重新校准。</div>
       <div class="hint-line">🖱️ 框以外的画面是<b>鼠标穿透</b>的：只有框/手柄/目标条上才拦鼠标，其余点击照常落到炉石上，可以边看游戏画面边调。顶部提示条每 1.5 秒重判一次「绿框里有没有盒子面板」，对齐好了会变绿。</div>
       <div class="hint-line">🧭 右上角<b>日志浮窗</b>的 <b>「校准」</b> 按钮打开的是<b>同一个窗口</b>（再点一次收起），三个入口不用记不同的用法。</div>
@@ -564,9 +571,9 @@ function renderBanners(s){
     var sm = s.last_summary;
     var sumTxt = "共完成 <b>" + sm.games + " 场对战，赢 " + sm.wins + " 场</b>。";
     if (sm.stopped_by === "rank_reached"){
-      html += '<div class="banner banner-ok"><span>🏁</span><div>上分目标已达成，自动化已停止（'
+      html += '<div class="banner banner-ok"><span>🏁</span><div>段位目标已达成，自动化已停止（'
            + esc((s.rank_stop && s.rank_stop.stop_reason) || "已达到设定的段位目标") + '）<br>'
-           + sumTxt + '可修改「上分停止条件」后再次开始对战。</div></div>';
+           + sumTxt + '可修改「段位目标」后再次开始对战。</div></div>';
     } else {
       html += '<div class="banner banner-ok"><span>✅</span><div>定时任务完成：本局对战结束后已自动停止。' + sumTxt + '可再次开始对战或设置新的定时任务。</div></div>';
     }
@@ -659,24 +666,28 @@ function render(s){
     $("concedeDetect").textContent = det;
   }
 
-  /* 上分停止条件（每局结束读一次段位，方便确认“到底在不在检测”） */
+  /* 段位目标（只在选卡组界面读一次名次） */
   $("chkRankStop").disabled = busy;
   $("inpRankMode").disabled = busy;
   $("inpRankNumber").disabled = busy;
+  $("inpRankAction").disabled = busy;
   $("btnSaveRankStop").disabled = busy;
   if (s.rank_stop && !dirtyRankStop){
     $("chkRankStop").checked = !!s.rank_stop.enabled;
     $("inpRankMode").value = s.rank_stop.mode || "legend";
     $("inpRankNumber").value = s.rank_stop.legend_number;
+    $("inpRankAction").value = s.rank_stop.action || "stop";
   }
   var rs = s.rank_stop;
   if (rs){
     var rsTxt;
     if (!rs.enabled){
-      rsTxt = "上分停止：已关闭（打到手动停止/定时结束为止）";
+      rsTxt = "段位目标：已关闭（打到手动停止/定时结束为止）";
     } else {
+      var isKeep = (rs.action === "keep");
       var goal = (rs.mode === "legend_number")
-        ? ("上到传说第 " + rs.legend_number + " 名或更好")
+        ? ((isKeep ? "控分：不超过传说第 " : "上到传说第 ")
+           + rs.legend_number + (isKeep ? " 名" : " 名或更好"))
         : "上传说";
       var condTxt = "条件：" + goal;
       var where = rs.last_phase ? ("（" + rs.last_phase + "）") : "";
@@ -689,12 +700,17 @@ function render(s){
       } else if (rs.last_empty){
         readTxt = "最近一次检测" + where + "：这一段还没有名次（空白，未上传说）";
       } else {
-        readTxt = "最近一次检测" + where + "：没读到数字"
-          + (rs.last_phase ? "" : "（打完一局、进结算界面后才检测）");
+        readTxt = "最近一次检测" + where + "：还没读过（到选择套牌界面时才读）";
       }
-      rsTxt = rs.triggered
-        ? ("上分停止：🏁 已达成目标，本局结束后停止——" + (rs.stop_reason || ""))
-        : ("上分停止：监控中 · " + condTxt + " · " + readTxt);
+      if (rs.triggered){
+        rsTxt = "段位目标：🏁 已达成目标，本局结束后停止——" + (rs.stop_reason || "");
+      } else if (isKeep){
+        var kc = rs.keep_count || 0;
+        rsTxt = "段位目标：控分中 · " + condTxt + " · " + readTxt
+          + " · 本次已投降 " + kc + " 局";
+      } else {
+        rsTxt = "段位目标：监控中 · " + condTxt + " · " + readTxt;
+      }
     }
     $("rankStopStatus").textContent = rsTxt;
   }
@@ -1082,16 +1098,18 @@ $("btnSaveConcede").addEventListener("click", function(){
   });
 });
 
-/* ---------- 上分停止条件 ---------- */
+/* ---------- 段位目标 ---------- */
 $("chkRankStop").addEventListener("change", function(){ dirtyRankStop = true; });
 $("inpRankMode").addEventListener("change", function(){ dirtyRankStop = true; });
 $("inpRankNumber").addEventListener("input", function(){ dirtyRankStop = true; });
+$("inpRankAction").addEventListener("change", function(){ dirtyRankStop = true; });
 
 $("btnSaveRankStop").addEventListener("click", function(){
   post("/api/rank_stop", {
     enabled: $("chkRankStop").checked,
     mode: $("inpRankMode").value,
-    legend_number: $("inpRankNumber").value
+    legend_number: $("inpRankNumber").value,
+    action: $("inpRankAction").value
   }).then(function(r){
     if (r.ok){
       toast(r.message, "ok");

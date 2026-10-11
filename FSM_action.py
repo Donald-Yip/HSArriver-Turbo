@@ -95,13 +95,15 @@ _last_snapshot_write = 0.0
 _oppo_minion_ids = None
 # 一次最多悬停几个新随从：对手一口气铺满场（token/亡语）时不至于长时间发呆。
 OPPO_MINION_HOVER_PER_BATCH = 3
-# ---------------------------------------------------------------- 上分停止条件
+# ---------------------------------------------------------------- 上分停止 / 控分
 # 每局对战结束后读结算界面的段位数字，命中用户设定的目标就把「本局结束后停止」
-# 置位（见 _check_rank_stop / DEFAULT_RANK_STOP）。
+# 置位（见 _read_rank_target / DEFAULT_RANK_STOP）。
 #   _rank_stop_triggered      : 本局已命中并已请求停止（每局由 reset_game_session 复位）。
 #   _rank_stop_stop_reason    : 给网页横幅显示的中文停止原因。
+#   _keep_score_count         : 控分模式已投降的局数（供页面显示"压了几局"）。
 _rank_stop_triggered = False
 _rank_stop_stop_reason = None
+_keep_score_count = 0
 # 最近一次段位读数（供 Web / 浮窗显示，None = 还没读过）与它发生在哪一步
 # （"点「开始」前" / "点「开始」后" / "选择套牌界面"）——页面据此说明"到底检测了没有"。
 _rank_last_read = None
@@ -311,8 +313,8 @@ def reset_game_session():
     _concede_triggered = False
     _concede_last_rate = None
     _concede_last_check = None
-    # 新一局重新允许“上分停止”检测：已触发的停止不再撤销，但本局标志要复位，
-    # 否则下一局打完不会再检查段位。最近读数保留，方便网页继续显示。
+    # 新一局重新允许“段位目标”检测（上分停止 / 控分）：已触发的停止不再撤销，
+    # 但本局标志要复位，否则下一局打完不会再检查段位。最近读数保留，方便网页显示。
     _rank_stop_triggered = False
     _rank_stop_stop_reason = None
     # 新一局重新校验昵称（换号提示按局给一次）。
@@ -334,6 +336,7 @@ def init():
     global _oppo_minion_ids
     global _rank_stop_triggered, _rank_stop_stop_reason
     global _rank_last_read
+    global _keep_score_count
 
     log_state = LogState()
     log_iter = log_iter_func(HEARTHSTONE_LOG_ROOT)
@@ -355,10 +358,12 @@ def init():
     _liveness_alert = None
     _ocr_fail_streak = 0
     _oppo_minion_ids = None
-    # 上分停止条件：新一轮自动化从头开始（最近读数也清掉，避免显示上一次运行的旧值）。
+    # 段位目标（上分停止 / 控分）：新一轮自动化从头开始（最近读数与控分局数
+    # 也清掉，避免显示上一次运行的旧值、或把上一轮的投降局数算进上限）。
     _rank_stop_triggered = False
     _rank_stop_stop_reason = None
     _rank_last_read = None
+    _keep_score_count = 0
     # 存活检测按“本轮自动化”重新开始计数：本轮没见过的炉石进程不算“消失”，
     # 否则“启动脚本 → 脚本拉起炉石”的正常流程会被误判成闪退。
     try:
@@ -533,23 +538,38 @@ def ChoosingHeroAction():
         return FSM_ERROR
 
     time.sleep(2)
-    # 排队前最后一道闸（用户口径「上传说就停止」）：这一段屏幕（选择套牌/选人）
-    # 右上角就是当前段位名次，读到了就**不点「开始匹配」**，把自动化停在本局之后。
+    # 排队前段位闸门（用户口径）：
+    #   action=stop「上分停止」：读到名次已达标 → **不点**「开始匹配」，本局结束后停止；
+    #   action=keep「控分」    ：读到名次比目标更靠前 → 进这一局后**开局即投降**，
+    #                            把名次压后，再回来重新检查（见 _keep_score_once）。
     # 实测漏过：打完一局后画面自己回到这个界面，结算里的段位检测没跑到，
-    # 脚本照样排队进了下一局。
+    # 脚本照样排队进了下一局——所以这道闸放在"点开始之前"。
     try:
-        if _check_rank_stop(
-                attempts=_CHOOSING_HERO_RANK_READ_ATTEMPTS,
-                wait=_CHOOSING_HERO_RANK_RETRY_WAIT,
-                label="选择套牌界面",
-                min_confidence=_POST_GAME_MIN_CONFIDENCE,
-                confirm=True):
-            info_print(
-                "已到上分停止条件：不点「开始匹配」，本局结束后停止"
-                "（要继续打请在页面关掉「🏁 上分停止条件」）。")
-            return FSM_CHOOSING_HERO
+        action = _read_rank_target(
+            attempts=_CHOOSING_HERO_RANK_READ_ATTEMPTS,
+            wait=_CHOOSING_HERO_RANK_RETRY_WAIT,
+            label="选择套牌界面",
+            min_confidence=_POST_GAME_MIN_CONFIDENCE,
+            confirm=True)
     except Exception as exc:
+        action = ""
         warn_print(f"选择套牌界面段位检测失败（忽略，继续匹配）：{exc}")
+
+    if action == "stop":
+        info_print(
+            "已到上分停止条件：不点「开始匹配」，本局结束后停止"
+            "（要继续打请在页面关掉「🏁 段位目标」）。")
+        return FSM_CHOOSING_HERO
+
+    if action == "keep":
+        # 控分：投一局压名次。投完回到这里重新读名次，直到不再"太靠前"才正常开打。
+        if _keep_score_count >= _KEEP_SCORE_MAX_PER_RUN:
+            warn_print(
+                f"[SYS] 控分：本次运行已投降 {_keep_score_count} 局仍未达到目标名次，"
+                "为避免无限投降，改为正常对战（请检查「🏁 段位目标」设置）。")
+        else:
+            _keep_score_once()
+            return FSM_CHOOSING_HERO
 
     # 上分闸门之后、点「开始」之前：按 ui_config.json 的 battle_entry.deck_index
     # 选卡组（没配置就跳过，保持"你手选哪副就用哪副"的历史行为）。放在这里的三个
@@ -962,6 +982,17 @@ _CHOOSING_HERO_RANK_RETRY_WAIT = 1.2
 # 「开始」按钮的 OCR 关键词与最低置信度（繁体/英文一并兜住）。
 _POST_GAME_START_KEYWORDS = ("开始", "開始", "Play")
 _POST_GAME_MIN_CONFIDENCE = 0.5
+# -------------------------------------------------------------- 控分（action=keep）
+# 读到"名次比目标更靠前"时：点开始匹配 → 等进入对局 → 立刻投降 → 回到选卡组界面，
+# 再由主循环重新读名次（每次 dispatch 只投降一局，主循环持续做存活检测）。
+#   _KEEP_SCORE_ENTER_ATTEMPTS/W AIT：点开始后等"进入对局"的轮询次数与间隔；
+#   _KEEP_SCORE_BACK_ATTEMPTS/WAIT  ：投降后等"回到选卡组界面"的轮询次数与间隔；
+#   _KEEP_SCORE_MAX_PER_RUN          ：单次自动化最多投降多少局（防死循环/控分线打不到）。
+_KEEP_SCORE_ENTER_ATTEMPTS = 20
+_KEEP_SCORE_ENTER_WAIT = 2.0
+_KEEP_SCORE_BACK_ATTEMPTS = 20
+_KEEP_SCORE_BACK_WAIT = 2.0
+_KEEP_SCORE_MAX_PER_RUN = 40
 # 段位区域「是否空白」判定：区域内足够亮的像素少于这么多，就当没有数字。
 # 未上传说时该处是纯背景，直接跳过 OCR（省一次推理，也避免空图被误识别成数字）。
 _RANK_MIN_BRIGHT_PIXELS = 8
@@ -1190,24 +1221,51 @@ def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
     return result
 
 
-def _rank_condition_met(reading, cfg) -> bool:
-    """读数是否命中用户设定的上分目标（见 config.DEFAULT_RANK_STOP）。
-
-    mode="legend"        ：上传说即命中；
-    mode="legend_number" ：上了传说且名次 <= 目标（第 N 名或更好）。
-    """
-    if not reading or not cfg.get("enabled"):
-        return False
-    if not reading.get("legend"):
-        return False
-    if cfg.get("mode") != "legend_number":
-        return True
-    number = reading.get("number")
+def _rank_target_number(cfg) -> int:
+    """配置里的目标名次（收敛到合法范围；写坏时退 1）。"""
     try:
         target = int(cfg.get("legend_number", 1))
     except (TypeError, ValueError):
         target = 1
-    return isinstance(number, int) and number <= target
+    return max(1, min(_MAX_RANK_NUMBER, target))
+
+
+def _rank_action_for(reading, cfg) -> str:
+    """读到的名次该做什么：返回 "stop" / "keep" / ""（什么都不做）。
+
+    * 没读到数字（未上传说 / 截图为空）→ ""（不动）；
+    * action="stop"（上分停止）：
+        名次数值 <= 目标 → "stop"（本局结束后停止自动化）；
+    * action="keep"（控分，用户 2026-10-11 口径）：
+        名次数值 < 目标 → "keep"（太靠前了，本局开局即投降把它压后），
+        名次数值 >= 目标 → ""（已在目标之内，正常打）。
+
+    方向提醒：炉石传说名次**数值越小 = 排名越高**，所以「控分」= 太小就投降。
+    """
+    if not reading or not cfg.get("enabled"):
+        return ""
+    if not reading.get("legend"):
+        return ""  # 没上传说、或这段位置没数字 —— 没有名次可判，不动。
+    number = reading.get("number")
+    if not isinstance(number, int):
+        return ""
+    target = _rank_target_number(cfg)
+    if cfg.get("action") == "keep":
+        return "keep" if number < target else ""
+    # 默认按「上分停止」处理。
+    if cfg.get("mode") != "legend_number":
+        return "stop"  # mode=legend：读到名次就说明已上传说 → 停。
+    return "stop" if number <= target else ""
+
+
+def _rank_condition_met(reading, cfg) -> bool:
+    """读数是否命中「上分停止」目标（保持旧语义，供测试与兼容调用）。
+
+    mode="legend"        ：上传说即命中；
+    mode="legend_number" ：上了传说且名次 <= 目标（第 N 名或更好）。
+    注意：这个函数只回答 stop 语义，不看 action；控分请用 _rank_action_for。
+    """
+    return _rank_action_for(reading, {**cfg, "action": "stop"}) == "stop"
 
 
 def _read_rank_with(attempts: int, wait: float, strict: bool = False,
@@ -1226,27 +1284,29 @@ def _read_rank_with(attempts: int, wait: float, strict: bool = False,
     return reading
 
 
-def _check_rank_stop(attempts=None, wait=None, label="结算界面",
-                     strict=False, min_confidence=0.0, confirm=False) -> bool:
-    """读一次段位；命中用户设定的上分目标就请求「本局结束后停止」。
+def _read_rank_target(attempts=None, wait=None, label="选择套牌界面",
+                      strict=False, min_confidence=0.0, confirm=False) -> str:
+    """读一次段位，按用户设定的「段位目标」返回要做的动作。
 
-    label        ：这一步叫什么（写进日志与页面，回答"到底检测了没有、在哪一步读的"）；
-    attempts/wait：重试次数与间隔（空白/截图失败/OCR 没读到都算"还没读到"，
-                   会重试——这是实测踩过的坑：动画还没把名次画出来时第一次读
-                   会得出"未上传说"的错误结论）；
-    strict       ：只认「整行就是数字」（见 is_pure_rank_text）；
+    返回值：``"stop"``（命中上分停止）/ ``"keep"``（控分：太靠前，要投降压低）/
+    ``""``（什么都不做）。判定见 :func:`_rank_action_for`。
+
+    label         ：这一步叫什么（写进日志与页面，回答"到底检测了没有、在哪一步读的"）；
+    attempts/wait ：重试次数与间隔（空白/截图失败/OCR 没读到都算"还没读到"，
+                    会重试——这是实测踩过的坑：动画还没把名次画出来时第一次读
+                    会得出"未上传说"的错误结论）；
+    strict        ：只认「整行就是数字」（见 is_pure_rank_text）；
     min_confidence：丢掉低于该置信度的 OCR 行；
-    confirm      ：读到数字后隔 _POST_GAME_RANK_CONFIRM_WAIT 再读一次，两次都
-                   读到数字才算命中（防止把过渡画面里的误识别当名次）。
-    返回值只表示“是否命中”。
+    confirm       ：读到数字后隔 _POST_GAME_RANK_CONFIRM_WAIT 再读一次，两次都
+                    读到数字才算数（防止把过渡画面里的误识别当名次）。
     """
     global _rank_stop_triggered, _rank_stop_stop_reason, _rank_last_read
     global _rank_last_phase
     if _rank_stop_triggered:
-        return False
+        return ""
     cfg = rank_stop_settings()
     if not cfg.get("enabled"):
-        return False
+        return ""
     total = _POST_GAME_RANK_READ_ATTEMPTS if attempts is None else int(attempts)
     interval = _POST_GAME_RANK_RETRY_WAIT if wait is None else float(wait)
     reading = _read_rank_with(total, interval, strict, min_confidence)
@@ -1255,7 +1315,7 @@ def _check_rank_stop(attempts=None, wait=None, label="结算界面",
         again = read_rank_region(strict=strict,
                                  min_confidence=min_confidence)
         if again.get("number") is None:
-            # 复核失败：当作"还没读到"，绝不因为一次误识别就停掉自动化。
+            # 复核失败：当作"还没读到"，绝不因为一次误识别就停止或投降。
             reading = again
     _rank_last_read = reading
     _rank_last_phase = label
@@ -1270,29 +1330,48 @@ def _check_rank_stop(attempts=None, wait=None, label="结算界面",
         else:
             reason = f"没读到数字（截图/OCR 未读到，已试 {total} 次）"
         manual_controller.output(
-            f"[SYS] 上分停止检测（{label}）：{reason} —— 按「还没上传说」处理。")
-        return False
-    if not _rank_condition_met(reading, cfg):
+            f"[SYS] 段位目标检测（{label}）：{reason} —— 按「还没上传说」处理。")
+        return ""
+    action = _rank_action_for(reading, cfg)
+    target = _rank_target_number(cfg)
+    if action == "keep":
         manual_controller.output(
-            f"[SYS] 上分停止检测（{label}）：当前段位读数「{reading['raw']}」，"
-            f"未达到停止条件。")
-        return False
-    detail = f"传说 {number} 名"
-    _rank_stop_triggered = True
-    _rank_stop_stop_reason = f"已上传说到{detail}，自动化停止（本局结束后生效）。"
+            f"[SYS] 控分检测（{label}）：当前名次 {number} 比目标 {target} 更靠前，"
+            f"本局将开局即投降把名次压后。")
+        return "keep"
+    if action == "stop":
+        _rank_stop_triggered = True
+        _rank_stop_stop_reason = f"已上传说到传说 {number} 名，自动化停止（本局结束后生效）。"
+        manual_controller.output(
+            f"[SYS] 上分目标已达成（{label}）：{_rank_stop_stop_reason}")
+        request_stop_after_game()
+        return "stop"
     manual_controller.output(
-        f"[SYS] 上分目标已达成（{label}）：{_rank_stop_stop_reason}")
-    request_stop_after_game()
-    return True
+        f"[SYS] 段位目标检测（{label}）：当前名次 {number}（目标 {target}），"
+        f"未触发动作。")
+    return ""
+
+
+def _check_rank_stop(attempts=None, wait=None, label="结算界面",
+                     strict=False, min_confidence=0.0, confirm=False) -> bool:
+    """兼容旧调用：读一次段位，命中「上分停止」就请求本局结束后停止。
+
+    返回值只表示"是否命中停止"。控分（action=keep）请用 _read_rank_target，
+    它会额外返回 "keep" 并**不**请求停止。
+    """
+    return _read_rank_target(attempts=attempts, wait=wait, label=label,
+                             strict=strict, min_confidence=min_confidence,
+                             confirm=confirm) == "stop"
 
 
 def rank_stop_detection_state() -> dict:
-    """上分停止条件的当前状态（供 Web 控制台 / 浮窗显示）。"""
+    """段位目标（上分停止 / 控分）的当前状态，供 Web 控制台与浮窗显示。"""
     cfg = rank_stop_settings()
     reading = _rank_last_read or {}
     return {
         "enabled": bool(cfg["enabled"]),
         "mode": cfg["mode"],
+        "action": cfg.get("action", "stop"),
         "legend_number": int(cfg["legend_number"]),
         "last_number": reading.get("number"),
         "last_legend": reading.get("legend"),
@@ -1301,6 +1380,7 @@ def rank_stop_detection_state() -> dict:
         "last_phase": _rank_last_phase,
         "triggered": bool(_rank_stop_triggered),
         "stop_reason": _rank_stop_stop_reason,
+        "keep_count": int(_keep_score_count),
     }
 
 
@@ -1576,6 +1656,109 @@ def _do_concede():
         manual_controller.output(f"[SYS] 自动认输点击失败：{exc}")
 
 
+def _wait_until(predicate, attempts, wait, on_tick=None) -> bool:
+    """轮询等待某个条件成立；predicate() 返回真即成功。
+
+    仅在本函数内轮询（不 sleep 更长），且尝试次数固定，不会无限等。
+    on_tick(attempt) 可选：每轮打一次进度日志，方便用户从日志看到"在等什么"。
+    """
+    total = max(1, int(attempts))
+    for attempt in range(1, total + 1):
+        try:
+            if predicate():
+                return True
+        except Exception:
+            pass
+        if on_tick is not None:
+            try:
+                on_tick(attempt)
+            except Exception:
+                pass
+        if attempt < total:
+            time.sleep(wait)
+    return False
+
+
+def _in_match_state() -> bool:
+    """当前是否已经进入对局（换牌 / 战斗）——用来判断"点开始后进没进局"。
+
+    **主判据 = 界面状态**：只有界面确实停在换牌 / 战斗，才算进局。
+    日志兜底（Power.log 已消费到本局、且回合数 > 0）只作补充——不能用
+    `log_state.game_entity_id != 0` 这种"库里有残留"的弱证据，否则点开始前
+    上一局的日志残留会让"还没进局"被误判成"已进局"，控分就会朝一个并不
+    存在的对局乱点齿轮。
+    """
+    try:
+        if get_screen.get_state() in (FSM_CHOOSING_CARD, FSM_BATTLING):
+            return True
+    except Exception:
+        pass
+    try:
+        if update_log_state() and log_state.game_num_turns_in_play > 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _at_deck_select() -> bool:
+    """当前是否回到了"选卡组/选人"界面（投降收尾完成的判据）。"""
+    try:
+        return get_screen.get_state() == FSM_CHOOSING_HERO
+    except Exception:
+        return False
+
+
+def _keep_score_once() -> bool:
+    """控分：投一局把名次往后压。成功返回 True（已回到选卡组界面）。
+
+    流程（用户 2026-10-11 口径：开局直接投降）：
+      ① 点「开始匹配」进对局 → ② 等到真的进了局 → ③ 立刻认输 →
+      ④ 等回到选卡组界面。调用方随后会重新读名次，决定还要不要再投一局。
+
+    **每次只投一局**，然后交还主循环：这样存活检测照常跑，也不会在这里长时间阻塞。
+    任何一步超时都返回 False（不硬撑、不空转），由调用方决定后续。
+    """
+    global _keep_score_count
+    _keep_score_count += 1
+    manual_controller.output(
+        f"[SYS] 控分：本局名次比目标更靠前，开始「开局即投降」"
+        f"（本次运行第 {_keep_score_count} 局）。")
+    # ① 点「开始匹配」（与正常开局同一个动作，保证语义一致）。
+    try:
+        click.run_hearthstone_action(click.match_opponent)
+    except Exception as exc:
+        warn_print(f"[SYS] 控分：点「开始匹配」失败：{exc}")
+        return False
+    # ② 等进入对局：没进局就不投降（避免在非对局界面乱点）。
+    entered = _wait_until(
+        _in_match_state, _KEEP_SCORE_ENTER_ATTEMPTS, _KEEP_SCORE_ENTER_WAIT,
+        on_tick=lambda n: info_print(
+            f"[SYS] 控分：等待进入对局……（{n}/{_KEEP_SCORE_ENTER_ATTEMPTS}）"))
+    if not entered:
+        warn_print("[SYS] 控分：等了很久也没进对局，放弃本次投降（下局再试）。")
+        return False
+    # ③ 进局后立刻认输（给换牌界面一点时间，免得点空）。
+    time.sleep(1.5)
+    try:
+        click.run_hearthstone_action(_do_concede)
+    except Exception as exc:
+        warn_print(f"[SYS] 控分：认输点击失败：{exc}")
+        return False
+    # ④ 等回到选卡组界面（投降 → 结算画面 → 回选卡组）。
+    back = _wait_until(
+        _at_deck_select, _KEEP_SCORE_BACK_ATTEMPTS, _KEEP_SCORE_BACK_WAIT,
+        on_tick=lambda n: info_print(
+            f"[SYS] 控分：等待回到选择套牌界面……（{n}/{_KEEP_SCORE_BACK_ATTEMPTS}）"))
+    if not back:
+        warn_print("[SYS] 控分：投降后没等到选卡组界面，交由状态机自己找路。")
+        return False
+    time.sleep(1.5)  # 留一点时间让界面稳定，方便下一步读名次。
+    manual_controller.output(
+        f"[SYS] 控分：已投降 {_keep_score_count} 局，重新检查名次。")
+    return True
+
+
 def run_automatic_battle_step():
     """Observe opponent turns; execute one newly validated player action."""
     global player_turn_delay_key, last_automation_diagnostic, _ocr_fail_streak
@@ -1689,7 +1872,7 @@ def Battling():
 
 
 def QuittingBattle():
-    """对局结束收尾：点掉结算界面 → 等「开始」→ 读段位 → 决定要不要点「开始」。
+    """对局结束收尾：点掉结算界面 → 等「开始」→ 点「开始」。
 
     结算界面（胜负横幅 / 段位升降级动画 / 奖励面板）要点好几下才会出现底部
     「开始」按钮。顺序是用户定的：
@@ -1698,11 +1881,12 @@ def QuittingBattle():
        `(960,650)`，原来就是用来应对错误弹窗/断线提示的位置）把结算界面推过去；
     2. 每轮用 OCR 检测「开始」按钮（读的是可校准的 post_game_start_roi，
        读不到再用兜底区域）——**没检测到就继续点，不做别的**；
-    3. 检测到「开始」之后**先读段位**（`_check_rank_stop()`，label="点「开始」前"）：
-       读到名次 → 命中停止条件就直接停，**连「开始」都不点**；没读到名次才收尾；
-    4. 收尾只点**第三个点**：`click_post_game_start()`（「开始」按钮正中心），
-       然后再读一次段位（label="点「开始」后"）兜住名次画得晚的情况；
-    5. 没命中就返回 FSM_CHOOSING_HERO 继续下一局；命中则主循环干净退出。
+    3. 检测到「开始」就点它（`click_post_game_start()`，按钮正中心）收尾；
+    4. 返回 FSM_CHOOSING_HERO 继续下一局。
+
+    段位读取**只在选择套牌界面做**（用户 2026-10-11 口径）：结算界面的名次
+    画得晚、又容易被胜负动画干扰，读它既不准也没必要——回到选卡组界面时
+    右上角就是当前名次，那里的读数才是权威。
     """
     print_out()
 
@@ -1718,38 +1902,11 @@ def QuittingBattle():
             return state
 
         if start_button_present():
-            info_print("检测到结算界面「开始」按钮：先读段位，再决定要不要点「开始」。")
-
-            # ① 用户口径：**检测到「开始」以后先检测段位**。读一次读不到就重试
-            #    （名次有时画得晚），读到数字还要复核一次。命中就**不点**「开始」，
-            #    本局已经结束，主循环会在非对局状态直接退出——绝不会替用户开下一局。
-            hit = False
-            try:
-                hit = _check_rank_stop(
-                    attempts=_POST_GAME_RANK_READ_ATTEMPTS, wait=0.8,
-                    label="点「开始」前",
-                    min_confidence=_POST_GAME_MIN_CONFIDENCE,
-                    confirm=True)
-            except Exception as exc:
-                warn_print(f"点「开始」前段位检测失败（忽略，继续收尾）：{exc}")
-            if hit:
-                info_print(
-                    "段位已到停止条件：不点「开始」，本局结束后直接退出自动化。")
-                return FSM_CHOOSING_HERO
-
-            # ② 没读到名次才收尾：**只点第三个点**——「开始」按钮正中心
-            #    （坐标可以在校准窗口里拖）。前两个点（中间那两个）每轮已经点过了，
-            #    这里不再点右边任何位置。
+            info_print("检测到结算界面「开始」按钮：点掉它，回到选卡组界面。")
+            # 只点「开始」按钮正中心（坐标可以在校准窗口里拖）；段位留到
+            # 选卡组界面再读，这里不做任何停止/投降判断。
             click.run_hearthstone_action(click_post_game_start)
             info_print("结算界面已出现「开始」按钮，收尾完成。")
-
-            # ③ 收尾后再读一次兜底：命中「上分停止条件」时它会请求「本局结束后停止」。
-            try:
-                _check_rank_stop(label="点「开始」后")
-            except Exception as exc:
-                warn_print(f"上分停止检测失败（忽略，继续下一局）：{exc}")
-
-            # ④ 没命中停止就继续下一局；命中了主循环会在非对局状态立刻退出。
             return FSM_CHOOSING_HERO
 
         click_post_game_point()
@@ -1787,7 +1944,7 @@ def MainMenuAction():
 
     识别交给 battle_entry：**认不出来只点画面中心**（关掉挡住弹窗/公告），到超时
     就走错误处理 —— 不再像以前那样每 5 秒盲点一次「传统对战」（那会在别的界面上
-    乱点）。点「开始」仍然由 ChoosingHeroAction 负责，因为**上分停止**那道闸门
+    乱点）。点「开始」仍然由 ChoosingHeroAction 负责，因为**段位目标**那道闸门
     必须在点「开始」之前跑，顺序反了就会在到了目标段位后照样排队。
     """
     print_out()

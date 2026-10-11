@@ -107,7 +107,7 @@ JSON 模式下：
 
 | 命令 | 说明 |
 | --- | --- |
-| `status` | 状态总览：阶段、账号是否匹配、战绩、存活检测、自动投降、上分停止、活人感、延时、自检、最后错误 |
+| `status` | 状态总览：阶段、账号是否匹配、战绩、存活检测、自动投降、段位目标、活人感、延时、自检、最后错误 |
 | `status --watch 2` | 每 2 秒刷一行（Ctrl+C 退出） |
 | `log [-n 50] [-f] [--interval 1]` | `-n` 先打最近 N 行；`-f` 持续跟随（走 `/api/logs?seq=` 增量接口，不重复） |
 | `selfcheck [--refresh]` | 环境自检（Python/依赖/分辨率/管理员） |
@@ -209,7 +209,7 @@ python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每
   → 点「开始」（可选，默认不做）
 ```
 
-**默认不点「开始」**：那等于开始排队，交给 `hsctl start`（它会先做「上分停止」判定）或者
+**默认不点「开始」**：那等于开始排队，交给 `hsctl start`（它会先做「段位目标」判定）或者
 `--start`。安全性质：**认不出界面就只点画面中心，到超时就退出并说明原因 —— 绝不盲点按钮**。
 
 自动化正在跑时这个命令会**被拒绝**（鼠标归 FSM 管，两边同时点会互相打断）。
@@ -250,7 +250,7 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 | `liveness [set …]` | 存活检测：`--enabled/--no-enabled`、`--warn`（秒）、`--stop`（秒） |
 | `concede [set …]` | 自动投降：`--enabled/--no-enabled`、`--threshold`（%）、`--rounds` |
 | `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
-| `rank-stop [set …]` | 上分停止：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N` |
+| `rank-stop [set …]` | 段位目标：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N`、`--action stop\|keep`（`stop`=达到后停止；`keep`=控分，名次数值比目标更靠前就开局投降） |
 | `config [set …]` | 账号与日志目录：`--name`（含 `#编号`）、`--log-root`。带 `hot` 时会立刻注入运行中的日志读取器（`log_state.MY_NAME`），后续昵称判定即用新值 |
 
 延时字段（`_USER_DELAY_KEYS`）与生效时机：

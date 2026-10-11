@@ -709,13 +709,17 @@ def render_status(s: dict, url: str = "") -> str:
                  f"{_num(cd.get('rounds'))} 回合{extra}")
 
     rk = s.get("rank_stop") or {}
+    keep = rk.get("action") == "keep"
     if not rk.get("enabled"):
         rank_text = "关"
     elif rk.get("mode") == "legend":
         rank_text = "开 · 上传说即停"
+    elif keep:
+        rank_text = (f"开 · 控分：名次优于第 {_num(rk.get('legend_number'))} 名"
+                     f"就开局投降（本次已投 {_num(rk.get('keep_count'))} 局）")
     else:
         rank_text = f"开 · 上到传说第 {_num(rk.get('legend_number'))} 名即停"
-    lines.append(f"上分停止 {rank_text}")
+    lines.append(f"段位目标 {rank_text}")
 
     hl = s.get("human_like") or {}
     lines.append(
@@ -1619,22 +1623,26 @@ def cmd_concede_now(args, ctx: Ctx) -> int:
 
 
 def cmd_rank_stop_show(args, ctx: Ctx) -> int:
-    return _print_section(ctx, "rank_stop", "上分停止条件", (
+    return _print_section(ctx, "rank_stop", "段位目标", (
         ("enabled", "总开关"),
         ("mode", "方式（legend/legend_number）"),
         ("legend_number", "目标名次"),
+        ("action", "到该名次后（stop=停止 / keep=控分）"),
+        ("keep_count", "本次运行已投降局数（控分）"),
         ("last_number", "最近读到的名次"),
-        ("triggered", "已触发"),
+        ("triggered", "已触发停止"),
     ))
 
 
 def cmd_rank_stop_set(args, ctx: Ctx) -> int:
     body = {"hot": not args.no_hot}
     mapping = (("enabled", args.enabled), ("mode", args.mode),
-               ("legend_number", args.legend_number))
+               ("legend_number", args.legend_number),
+               ("action", args.action))
     body.update({k: v for k, v in mapping if v is not None})
     if len(body) == 1:
-        raise ApiFailure("没有要改的字段（用 --enabled / --mode / --legend-number）")
+        raise ApiFailure(
+            "没有要改的字段（用 --enabled / --mode / --legend-number / --action）")
     return _ok_message(ctx, ctx.post("/api/rank_stop", body))
 
 
@@ -2583,7 +2591,7 @@ def build_parser() -> argparse.ArgumentParser:
     q.set_defaults(handler=cmd_concede_now)
 
     # ---- rank-stop
-    p = sub.add_parser("rank-stop", parents=[common], help="上分停止条件")
+    p = sub.add_parser("rank-stop", parents=[common], help="段位目标")
     p.set_defaults(handler=cmd_rank_stop_show)
     rsub = p.add_subparsers(dest="action", metavar="<动作>")
     q = rsub.add_parser("show", parents=[common], help="显示当前配置")
@@ -2593,6 +2601,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--mode", choices=("legend", "legend_number"), default=None,
                    help="legend=上传说即停；legend_number=上到指定名次")
     q.add_argument("--legend-number", type=int, default=None, help="目标名次")
+    q.add_argument("--action", choices=("stop", "keep"), default=None,
+                   help="stop=达到后停止；keep=控分（名次比目标更靠前就开局投降）")
     q.add_argument("--no-hot", action="store_true", help="运行中拒绝修改")
     q.set_defaults(handler=cmd_rank_stop_set)
 

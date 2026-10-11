@@ -716,7 +716,7 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
 
     任何一步识别不出来都只点画面中心，到超时就退出并说明原因 —— **绝不盲点**。
     默认 `click_start=False`：点「开始」等于开始排队，交给调用方（FSM 的
-    `ChoosingHeroAction` 会先做「上分停止」判定，顺序不能反）。
+    `ChoosingHeroAction` 会先做「段位目标」判定，顺序不能反）。
     """
     capture = capture or capture_client_frame
     click_at_fn = click_at_fn or click_at

@@ -131,27 +131,34 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 #               避免开局一两次低胜率就误降。
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
-# ---------------------------------------------------------------- 上分停止条件（可选）
-# 每局对战结束后读一次结算界面的段位数字（客户区相对坐标 1230,180 - 1385,225；
-# 未上传说时该处没有数字），命中条件就把「本局结束后停止」置位，让自动化
-# 在回到非对局状态时干净退出。段位框可在校准窗口里拖（post_game_rank_roi）。
+# ------------------------------------------------------ 段位目标：上分停止 / 控分（可选）
+# 在**选择套牌界面**读一次右上角的段位名次（客户区相对坐标，可在校准窗口里拖
+# post_game_rank_roi；未上传说时该处是空白 → 读到数字才表示已上传说，数字就是名次），
+# 再按 action 决定动作。真实值保存在 ui_config.json 的 rank_stop 段。
 #   enabled       : 是否启用。默认 False（需用户在 Web 手动开启）。
-#   mode          : "legend"        上传说即停；
-#                   "legend_number" 上到传说某个名次（数字 <= legend_number）就停。
-#   legend_number : mode=legend_number 时的目标名次（1 = 第一名，越小越靠前）。
-# 真实值保存在 ui_config.json 的 rank_stop 段；这里只提供“没配置时”的兜底。
-DEFAULT_RANK_STOP = {"enabled": False, "mode": "legend", "legend_number": 1}
+#   mode          : "legend"        上传说即停（只对 action=stop 有意义）；
+#                   "legend_number" 用名次数值判断（配合 action 见下）。
+#   legend_number : 目标名次（1 = 第一名，越小越靠前）。
+#   action        : "stop" 名次数值 <= 目标 → 本局结束后停止自动化；
+#                   "keep" 名次数值 <  目标 → 本局开局即投降，把名次往后压，
+#                          直到名次数值 >= 目标才恢复正常对战。
+# 注意方向：炉石传说的名次**数值越小 = 排名越高**。所以「控制不超过某名次」=
+# 名次太靠前（数值太小）时主动投降，数值涨到阈值附近就不再投降。
+DEFAULT_RANK_STOP = {"enabled": False, "mode": "legend",
+                     "legend_number": 1, "action": "stop"}
 # 目标名次的取值范围（防配置写坏成 0 / 负数 / 天文数字）。
 RANK_STOP_MIN_NUMBER = 1
 RANK_STOP_MAX_NUMBER = 100000
+# action 的合法取值（stop = 到点即停；keep = 控分，太靠前就投降压低）。
+RANK_STOP_ACTIONS = ("stop", "keep")
 
 
 def rank_stop_settings() -> dict:
     """读取 ui_config.json 的 rank_stop 段（每次调用都读文件，改完即时生效）。
 
     缺字段/类型不对时回退默认值；mode 只认 "legend"/"legend_number"，
-    目标名次收敛到 RANK_STOP_MIN_NUMBER..RANK_STOP_MAX_NUMBER，
-    避免配置写坏导致“永远不触发”或“莫名停止”。
+    action 只认 "stop"/"keep"，目标名次收敛到 RANK_STOP_MIN_NUMBER..
+    RANK_STOP_MAX_NUMBER，避免配置写坏导致“永远不触发”或“莫名停止/投降”。
     """
     cfg = dict(DEFAULT_RANK_STOP)
     data = _load_ui_config().get("rank_stop")
@@ -162,6 +169,8 @@ def rank_stop_settings() -> dict:
     cfg["enabled"] = bool(cfg["enabled"])
     if cfg["mode"] not in ("legend", "legend_number"):
         cfg["mode"] = DEFAULT_RANK_STOP["mode"]
+    if cfg["action"] not in RANK_STOP_ACTIONS:
+        cfg["action"] = DEFAULT_RANK_STOP["action"]
     try:
         number = int(cfg["legend_number"])
     except (TypeError, ValueError):
