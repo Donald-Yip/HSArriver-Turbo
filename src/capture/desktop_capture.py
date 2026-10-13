@@ -205,9 +205,13 @@ class DesktopCapture:
                 raise CaptureEnvironmentError(
                     f"client_size_mismatch:{width}x{height}"
                     f"!={client_size[0]}x{client_size[1]}")
+        # DPI 只**记录**、不再拦截：所有几何都按物理像素换算（display_mapping
+        # 拿真实客户区做缩放），显示缩放是 100% 还是 150% 都不影响"截到的图"与
+        # "要点的坐标"之间的对应关系。历史上这里会因 DPI≠config.desktop_dpi 直接
+        # 判失败，但进程声明 DPI 感知后（display_mapping.dpi_aware），
+        # GetDpiForSystem 返回的是真实值（150% → 144），那条门槛会把整条自动化
+        # 卡死在 dpi_mismatch 上（换牌推荐反复重试到超时）。
         effective_dpi = self.config.desktop_dpi if dpi is None else int(dpi)
-        if validate_environment and effective_dpi != self.config.desktop_dpi:
-            raise CaptureEnvironmentError(f"dpi_mismatch:{effective_dpi}")
 
         roi = (pixels[:, :, :3] if roi_frame
                else self._crop_array(pixels))

@@ -685,12 +685,12 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
             checks.append(_check("dpi", "显示缩放（DPI）", STATUS_OK,
                                  f"{dpi}（{round(dpi / 96 * 100)}%）"))
         else:
-            # 不再当致命错误：换算是按物理像素做的，只是非 100% 缩放下
-            # 物理/逻辑像素会分裂，容易被别的东西搞乱，所以给提示。
+            # 非 100% 缩放不影响运行：坐标按物理像素换算，进程也声明了 DPI
+            # 感知，截图与点击的对应关系与缩放无关，这里只把真实值报出来。
             checks.append(_check(
                 "dpi", "显示缩放（DPI）", STATUS_WARN,
-                f"{dpi}（{round(dpi / 96 * 100)}%，建议 100%）",
-                "显示设置 → 缩放建议改成 100%：不是 100% 时物理/逻辑像素会分裂。",
+                f"{dpi}（{round(dpi / 96 * 100)}%）",
+                "不需要改：缩放不影响截图与点击的对应关系（坐标按物理像素换算）。",
                 required=False))
 
     # --- 换算可用性：客户区比例与尺寸（这两条才是真正的判定）

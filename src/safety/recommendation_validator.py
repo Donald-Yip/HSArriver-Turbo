@@ -66,8 +66,8 @@ class RecommendationValidator:
             return ValidationResult.reject("recommendation_changed")
         if not _client_size_matches(current_frame, self.config):
             return ValidationResult.reject("desktop_size")
-        if current_frame.dpi != self.config.desktop_dpi:
-            return ValidationResult.reject("dpi")
+        # DPI 不再参与判定：坐标按物理像素换算，显示缩放不影响截图与点击的对应
+        # 关系（进程已声明 DPI 感知）。保留 frame.dpi 只作记录/诊断。
         if not current_frame.window_handle or not current_frame.foreground:
             return ValidationResult.reject("window")
         if not current_frame.panel_visible:

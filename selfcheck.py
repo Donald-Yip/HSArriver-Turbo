@@ -439,7 +439,7 @@ def environment_items(config=None) -> list[dict]:
 
     expected_dpi = _expected_dpi(config)
     dpi = _current_dpi()
-    purpose = "缩放不是 100% 时物理像素与逻辑像素会分裂"
+    purpose = "缩放不影响识别与点击：坐标按物理像素换算"
     if dpi == 0:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_WARN, "读取失败", "",
                         False, purpose)
@@ -447,12 +447,14 @@ def environment_items(config=None) -> list[dict]:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_OK,
                         f"{dpi}（{round(dpi / 96 * 100)}%）", "", False, purpose)
     else:
-        # 不再当致命错误：换算是按物理像素做的，这里只提醒可能引起坐标分裂。
+        # 非 100% 缩放**不影响运行**（坐标按物理像素换算，进程已声明 DPI 感知），
+        # 这里只把真实值报出来备查，不再劝用户改成 100%。
         scaling = _item(
             "dpi", "显示缩放（DPI）", STATUS_WARN,
-            f"{dpi}（{round(dpi / 96 * 100)}%，建议 100%）",
-            "显示设置 → 缩放建议改成 100%：不是 100% 时物理像素与逻辑像素会分裂，"
-            "截图与点击可能对不上。", False, purpose)
+            f"{dpi}（{round(dpi / 96 * 100)}%）",
+            "不需要改：缩放不影响识别与点击（进程已声明 DPI 感知，坐标按物理"
+            "像素换算）。只有在跟旧截图/教程里的像素值对照时才注意这不是 100%。",
+            False, purpose)
 
     return ([admin] + _client_mapping_items(config) + [scaling]
             + [_hearthstone_item(), _log_dir_item(), _ocr_model_item()])

@@ -319,7 +319,8 @@ class RegionPreviewTests(unittest.TestCase):
         self.assertTrue(result["ok"], result["checks"])
         dpi = next(c for c in result["checks"] if c["key"] == "dpi")
         self.assertFalse(dpi["required"])
-        self.assertIn("100%", dpi["hint"])
+        # 提示不再劝人改成 100%（缩放不影响识别），但仍要说明它只是信息。
+        self.assertIn("不影响", dpi["hint"])
 
     def test_missing_client_mapping_is_only_a_hint(self):
         result = self.preview()
