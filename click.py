@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from constants.constants import *
 from print_info import *
 from get_screen import *
+from get_screen import _bitblt_region
 from config import DEFAULT_HUMAN_LIKE, human_like_settings
 from display_mapping import to_screen as _to_screen
 from display_mapping import display_mapping as _display_mapping
@@ -641,6 +642,82 @@ def _finish_attack():
     right_click(*side_point(get_HS_hwnd(), preferred=(1700, 400)))
 
 
+# 战网「开始游戏」按钮：位置随战网窗口大小/DPI 变化（用户随手一拖窗口，
+# 写死的偏移就对不上了），所以优先在窗口左下角扫 Blizzard 蓝播放键，取最大
+# 色块的中心；扫不到（按钮还没画好、被别的窗口挡住、或游戏正在运行时的
+# 灰色「正在游戏中」态）再退回这套历史偏移（上游项目一直用的值）。
+BATTLENET_PLAY_FALLBACK_DX = 180
+BATTLENET_PLAY_FALLBACK_DY = 110
+# 扫描区：左下角。横向到 45% 宽就够（再往右是主内容/好友列，蓝色元素多，
+# 容易扫错）；纵向从 70% 高度起（播放键在底部约 10% 处）。
+BATTLENET_PLAY_ZONE_X = 0.45
+BATTLENET_PLAY_ZONE_Y = 0.70
+# 色块最小面积（px²）：播放键是实心大蓝块，小于这个的多半是图标/链接。
+BATTLENET_PLAY_MIN_AREA = 1500
+
+
+def _find_blue_play_button(left, top, right, bottom, grabber=None):
+    """在战网窗口左下角找「开始游戏」蓝键，返回**屏幕坐标**中心。
+
+    找不到返回 None（调用方负责退回历史偏移）。grabber 供测试注入。
+    """
+    width, height = right - left, bottom - top
+    if width <= 0 or height <= 0:
+        return None
+    zone = (left, top + int(height * BATTLENET_PLAY_ZONE_Y),
+            left + int(width * BATTLENET_PLAY_ZONE_X), bottom)
+    frame = (grabber or _bitblt_region)(zone)
+    if frame is None:
+        return None
+    try:
+        import numpy
+        import cv2
+    except Exception:
+        return None
+    img = numpy.asarray(frame)[:, :, :3]
+    if img.size == 0:
+        return None
+    blue, green, red = (img[:, :, i].astype(int) for i in range(3))
+    mask = ((blue > 140) & (blue - red > 50) & (blue - green > 30))
+    mask = mask.astype("uint8")
+    if not mask.any():
+        return None
+    count, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    if count <= 1:
+        return None
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    best = int(areas.argmax()) + 1
+    if int(stats[best, cv2.CC_STAT_AREA]) < BATTLENET_PLAY_MIN_AREA:
+        return None
+    cx = int(stats[best, cv2.CC_STAT_LEFT] + stats[best, cv2.CC_STAT_WIDTH] // 2)
+    cy = int(stats[best, cv2.CC_STAT_TOP] + stats[best, cv2.CC_STAT_HEIGHT] // 2)
+    return (zone[0] + cx, zone[1] + cy)
+
+
+def battlenet_play_point(left, top, right, bottom, grabber=None):
+    """战网「开始游戏」的点击点（屏幕坐标）：优先蓝键中心，扫不到用历史偏移。"""
+    try:
+        found = _find_blue_play_button(left, top, right, bottom, grabber=grabber)
+    except Exception:
+        found = None
+    if found is not None:
+        return found
+    return (left + BATTLENET_PLAY_FALLBACK_DX,
+            bottom - BATTLENET_PLAY_FALLBACK_DY)
+
+
+def _point_targets_window(x, y, hwnd):
+    """这个屏幕坐标的点击会不会真的落到 hwnd 上（WindowFromPoint 会自动跳过
+    点击穿透窗，比如炉石盒子的浮窗）。判不了时返回 True——照点，不拦。"""
+    try:
+        hit = win32gui.WindowFromPoint((int(x), int(y)))
+        if not hit:
+            return True
+        return win32gui.GetAncestor(hit, win32con.GA_ROOT) == int(hwnd)
+    except Exception:
+        return True
+
+
 def enter_HS():
     rand_sleep(1)
 
@@ -659,7 +736,15 @@ def enter_HS():
     rand_sleep(1)
 
     left, top, right, bottom = win32gui.GetWindowRect(battlenet_hwnd)
-    left_click(left + 180, bottom - 110, require_hearthstone=False)
+    # GetWindowRect 给的是**屏幕坐标**，必须走 click_button（屏幕坐标出口）。
+    # 早年走的是 left_click，坐标被 to_screen 按炉石客户区又换算一遍：炉石
+    # 窗口不在屏幕原点时（窗口化/多屏）点击点整体偏移，落到战网窗外——按钮
+    # 「点不到」就是这么来的（实机：想点 (1406,1614)，实际点 (2313,2089)）。
+    x, y = battlenet_play_point(left, top, right, bottom)
+    if not _point_targets_window(x, y, battlenet_hwnd):
+        warn_print(f"战网「开始游戏」按钮位置 ({x}, {y}) 被其它窗口盖住，"
+                   "这一下可能点空")
+    click_button(x, y, Button.left, require_hearthstone=False)
     return True
 
 
