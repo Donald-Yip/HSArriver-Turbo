@@ -135,6 +135,49 @@ MINIMIZED_HEIGHT = 34
 MINIMIZE_TEXT = "最小化"
 RESTORE_TEXT = "展开"
 
+# ---- DPI 缩放 -------------------------------------------------------------
+# 上面这些宽高/行高/内边距都是按 96 DPI（100% 缩放）写死的「设计值」；字体却是
+# 按「磅」定义的，Tk 会随系统 DPI 自动放大。高缩放屏（如 4K + 150%）下字变大、
+# 窗口不变 → 内容挤成一团（用户反馈的「浮窗在不同分辨率下被压缩」）。
+# UI_SCALE 在开窗时按 Tk 报告的屏幕 DPI 算出（96 DPI = 1.0），几何一律经 px()
+# 换算；100% 屏下 px() 原样返回，与旧版逐像素一致。测试锁的基线常量
+# （263/693/34）保持「设计值」口径不变。
+UI_SCALE = 1.0
+
+
+def compute_ui_scale(root) -> float:
+    """按 Tk 报告的屏幕 DPI 算几何缩放系数（96 DPI = 1.0，夹在 1.0~3.0）。"""
+    try:
+        dpi = float(root.winfo_fpixels("1i"))
+    except Exception:
+        return 1.0
+    if not dpi or dpi <= 0:
+        return 1.0
+    return max(1.0, min(3.0, dpi / 96.0))
+
+
+def px(value, scale=None) -> int:
+    """把 96 DPI 基准的「设计像素」换算成当前 DPI 的实际像素（至少 1px）。
+
+    用 +0.5 截断（不是银行家舍入）：394.5 这类半像素统一进位，150% 缩放下
+    263 → 395，与"按比例放大"的直觉一致。
+    """
+    s = UI_SCALE if scale is None else scale
+    try:
+        return max(1, int(int(value) * float(s) + 0.5))
+    except Exception:
+        return 1
+
+
+def _marker_pad(scale=None) -> tuple[int, int]:
+    """● 圆点的左右内边距（按当前 DPI 缩放后的 pack padx）。"""
+    return (px(_MARKER_PAD[0], scale), px(_MARKER_PAD[1], scale))
+
+
+def _eye_pad(scale=None) -> tuple[int, int]:
+    """眼睛按钮的左右内边距（按当前 DPI 缩放后的 pack padx）。"""
+    return (px(_EYE_PAD[0], scale), px(_EYE_PAD[1], scale))
+
 # 状态行内布局（左→右）：● 名称 数值 说明 …（「账号」行最右还有眼睛按钮）。
 # 说明列能用的宽度 = 窗口宽 - 这一行其它列，实测按控件真实宽度算（见 _status_row），
 # 所以缩放/字体不同也不会算歪。
@@ -248,9 +291,14 @@ def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
 
 
 def minimized_geometry(width: int, height: int, x: int, y: int,
-                       collapsed: bool) -> str:
-    """折叠/展开时的窗口几何串（折叠只剩标题条那么高）。"""
-    size = MINIMIZED_HEIGHT if collapsed else height
+                       collapsed: bool, min_height: int = MINIMIZED_HEIGHT
+                       ) -> str:
+    """折叠/展开时的窗口几何串（折叠只剩标题条那么高）。
+
+    min_height 默认取设计值 MINIMIZED_HEIGHT（测试按 96 DPI 基准断言）；
+    开窗时按 DPI 缩放过，实际调用会传 px(MINIMIZED_HEIGHT)。
+    """
+    size = min_height if collapsed else height
     return f"{width}x{size}+{x}+{y}"
 
 
@@ -946,24 +994,24 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
     except Exception:
         return False
     try:
-        width, height = 344, 208
+        width, height = px(344), px(208)
         dialog.overrideredirect(True)
         dialog.attributes("-topmost", True)
         dialog.configure(bg=BG)
         root.update_idletasks()
         x = root.winfo_x() + (root.winfo_width() - width) // 2
         y = root.winfo_y() + (root.winfo_height() - height) // 2
-        x = max(8, min(x, root.winfo_screenwidth() - width - 8))
-        y = max(8, min(y, root.winfo_screenheight() - height - 8))
+        x = max(px(8), min(x, root.winfo_screenwidth() - width - px(8)))
+        y = max(px(8), min(y, root.winfo_screenheight() - height - px(8)))
         dialog.geometry(f"{width}x{height}+{x}+{y}")
 
-        tk.Frame(dialog, bg=confirm_bg, height=3).pack(fill="x")
+        tk.Frame(dialog, bg=confirm_bg, height=px(3)).pack(fill="x")
         tk.Label(dialog, text=title, bg=BG, fg=confirm_bg,
                  font=("Microsoft YaHei", 11, "bold"),
-                 anchor="w").pack(fill="x", padx=12, pady=(10, 4))
+                 anchor="w").pack(fill="x", padx=px(12), pady=(px(10), px(4)))
         tk.Label(dialog, text=detail, bg=BG, fg=TEXT, justify="left",
                  font=("Microsoft YaHei", 9),
-                 wraplength=width - 28).pack(fill="x", padx=12)
+                 wraplength=width - px(28)).pack(fill="x", padx=px(12))
 
         def _close(confirm: bool):
             outcome["ok"] = bool(confirm)
@@ -977,19 +1025,21 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
                 pass
 
         row = tk.Frame(dialog, bg=BG)
-        row.pack(fill="x", padx=12, pady=(12, 12), side="bottom")
+        row.pack(fill="x", padx=px(12), pady=(px(12), px(12)), side="bottom")
         row.columnconfigure(0, weight=1)
         row.columnconfigure(1, weight=1)
         tk.Button(row, text=confirm_text, bg=confirm_bg, fg="#ffffff",
                   activebackground=confirm_bg, activeforeground="#ffffff", bd=0,
                   font=("Microsoft YaHei", 10, "bold"), cursor="hand2",
                   command=lambda: _close(True)
-                  ).grid(row=0, column=0, sticky="ew", padx=(0, 4), ipady=6)
+                  ).grid(row=0, column=0, sticky="ew", padx=(0, px(4)),
+                         ipady=px(6))
         tk.Button(row, text="取消", bg=NEUTRAL, fg=TEXT,
                   activebackground=NEUTRAL, activeforeground=TEXT, bd=0,
                   font=("Microsoft YaHei", 10), cursor="hand2",
                   command=lambda: _close(False)
-                  ).grid(row=0, column=1, sticky="ew", padx=(4, 0), ipady=6)
+                  ).grid(row=0, column=1, sticky="ew", padx=(px(4), 0),
+                         ipady=px(6))
         dialog.bind("<Escape>", lambda _event: _close(False))
         dialog.bind("<Return>", lambda _event: _close(True))
 
@@ -1038,13 +1088,23 @@ def _run() -> None:
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.attributes("-alpha", ALPHA)
+        # 几何随 DPI 缩放（96 DPI = 1.0）：字体 Tk 本来就按 DPI 放大，几何不跟
+        # 的话高缩放屏下内容会被压扁（用户反馈的浮窗压缩）。100% 屏 = 旧行为。
+        global UI_SCALE
+        UI_SCALE = compute_ui_scale(root)
+        try:
+            # 把 Tk 的「磅 → 像素」比例也钉在同一个 DPI 上（pixels/point =
+            # DPI/72），保证字体与几何永远按同一个系数缩放。
+            root.tk.call("tk", "scaling", UI_SCALE * 96.0 / 72.0)
+        except Exception:
+            pass
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         # 高度：品牌行 + 状态面板（5 行）+ 六行按钮都要放得下，日志区还要有
         # 9 行左右（删掉副标题、加日志行/按钮行后的尺寸见 WINDOW_HEIGHT 注释）。
-        W, H = WINDOW_WIDTH, WINDOW_HEIGHT
-        x = sw - W - 12
-        y = 12
+        W, H = px(WINDOW_WIDTH), px(WINDOW_HEIGHT)
+        x = sw - W - px(12)
+        y = px(12)
         root.geometry(f"{W}x{H}+{x}+{y}")
         root.configure(bg=TITLE_BG)
         _disable_overlay_activation(root)
@@ -1054,15 +1114,16 @@ def _run() -> None:
         collapsed = [False]
         content = tk.Frame(root, bg=TITLE_BG)
         content.pack(fill="both", expand=True)
-        mini_bar = tk.Frame(root, bg=TITLE_BG, height=MINIMIZED_HEIGHT)
+        mini_bar = tk.Frame(root, bg=TITLE_BG, height=px(MINIMIZED_HEIGHT))
         mini_bar.pack_propagate(False)
         tk.Label(mini_bar, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
-                 font=("Georgia", 12, "bold")).pack(side="left", padx=(10, 0))
+                 font=("Georgia", 12, "bold")).pack(side="left",
+                                                    padx=(px(10), 0))
         # 「展开」做成一个小小的面板按钮：只有文字、悬停提亮，不再靠特殊字形。
         restore_btn = tk.Label(mini_bar, text=RESTORE_TEXT, bg=PANEL, fg=DIM,
                                font=("Microsoft YaHei", 8), cursor="hand2",
-                               padx=8, pady=2)
-        restore_btn.pack(side="right", padx=(0, 8), pady=6)
+                               padx=px(8), pady=px(2))
+        restore_btn.pack(side="right", padx=(0, px(8)), pady=px(6))
         restore_btn.bind("<Enter>", lambda _e: restore_btn.config(
             fg=TEXT, bg=_hover(PANEL)))
         restore_btn.bind("<Leave>", lambda _e: restore_btn.config(
@@ -1081,7 +1142,8 @@ def _run() -> None:
             # 不该把它弹回右上角。
             root.geometry(minimized_geometry(W, H, root.winfo_x(),
                                              root.winfo_y(),
-                                             collapsed=collapsed[0]))
+                                             collapsed=collapsed[0],
+                                             min_height=px(MINIMIZED_HEIGHT)))
 
         def _on_minimize(_event=None):
             _set_collapsed(not collapsed[0])
@@ -1121,7 +1183,7 @@ def _run() -> None:
             btn = tk.Button(
                 parent, text=text_, bg=bg, fg="white",
                 font=("Microsoft YaHei", BTN_FONT_SIZE, "bold"),
-                relief="flat", bd=0, pady=BTN_PADY, cursor="hand2",
+                relief="flat", bd=0, pady=px(BTN_PADY), cursor="hand2",
                 activebackground=bg, activeforeground="white",
                 command=command)
             btn.bind(
@@ -1134,8 +1196,8 @@ def _run() -> None:
         brand = tk.Frame(content, bg=TITLE_BG)
         brand.pack(fill="x")
         tk.Label(brand, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
-                 font=("Georgia", 13, "bold")).pack(pady=(9, 7))
-        tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=10)
+                 font=("Georgia", 13, "bold")).pack(pady=(px(9), px(7)))
+        tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=px(10))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- header ----------------------------------------------------
@@ -1143,16 +1205,16 @@ def _run() -> None:
         head.pack(fill="x")
         dot = tk.Label(head, text="●", bg=TITLE_BG, fg=GREEN,
                        font=("Segoe UI", 10))
-        dot.pack(side="left", padx=(10, 4), pady=8)
+        dot.pack(side="left", padx=(px(10), px(4)), pady=px(8))
         title = tk.Label(head, text="自动化日志", bg=TITLE_BG, fg=TEXT,
                          font=("Microsoft YaHei", 10, "bold"))
-        title.pack(side="left", pady=8)
+        title.pack(side="left", pady=px(8))
         # 标题行右侧的「最小化」：折叠成标题条，再点标题条上的「展开」还原。
         # 做成一枚小小的面板按钮（悬停提亮），只用文字，不再拿块状字形当图标。
         mini_btn = tk.Label(head, text=MINIMIZE_TEXT, bg=PANEL, fg=DIM,
                             font=("Microsoft YaHei", 8), cursor="hand2",
-                            padx=8, pady=2)
-        mini_btn.pack(side="right", padx=(0, 10), pady=6)
+                            padx=px(8), pady=px(2))
+        mini_btn.pack(side="right", padx=(0, px(10)), pady=px(6))
         mini_btn.bind("<Button-1>", _on_minimize)
         mini_btn.bind("<Enter>", lambda _e: mini_btn.config(
             fg=TEXT, bg=_hover(PANEL)))
@@ -1163,7 +1225,7 @@ def _run() -> None:
         # ---- 战绩行 -------------------------------------------------
         score_label = tk.Label(content, text="战绩： —", bg=TITLE_BG, fg=DIM,
                                font=("Microsoft YaHei", 9), anchor="w")
-        score_label.pack(fill="x", padx=8, pady=(6, 0))
+        score_label.pack(fill="x", padx=px(8), pady=(px(6), 0))
         # ---- 状态面板：活人感 / 投降检测 / 炉石 / 账号 ----------------
         # 每行一个独立 Frame（**不用**共享 grid 列）：grid 会把每一列按"所有行里
         # 最宽的那个单元格"定宽，于是「投降检测」那行的长说明会把「账号」行的
@@ -1191,34 +1253,36 @@ def _run() -> None:
                 # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间
                 # 互换（隐藏状态会记住），适合截图/录屏/开直播。
                 # 固定尺寸的小容器能让整行布局绝对稳定（Tk 重排偶尔留重影）。
-                eye_box = tk.Frame(row, bg=PANEL, width=_EYE_W, height=18)
-                eye_box.pack(side="right", padx=_EYE_PAD, pady=1)
+                eye_box = tk.Frame(row, bg=PANEL, width=px(_EYE_W),
+                                   height=px(18))
+                eye_box.pack(side="right", padx=_eye_pad(), pady=1)
                 eye_box.pack_propagate(False)
-                eye_px = _EYE_W + sum(_EYE_PAD)
+                eye_px = px(_EYE_W) + sum(_eye_pad())
             marker = tk.Label(row, text="●", bg=PANEL, fg=DIM,
                               font=("Segoe UI", 7))
-            marker.pack(side="left", padx=_MARKER_PAD, pady=1)
+            marker.pack(side="left", padx=_marker_pad(), pady=1)
             name = tk.Label(row, text=name_text, bg=PANEL, fg=DIM,
                             font=("Microsoft YaHei", 8))
             name.pack(side="left", pady=1)
             value = tk.Label(row, text="—", bg=PANEL, fg=TEXT,
                              font=("Microsoft YaHei", 8, "bold"))
-            value.pack(side="left", padx=(_CELL_GAP, 0), pady=1)
+            value.pack(side="left", padx=(px(_CELL_GAP), 0), pady=1)
             detail = tk.Label(row, text="", bg=PANEL, fg=DIM,
                               font=("Microsoft YaHei", 8), justify="left",
-                              anchor="w", wraplength=_DETAIL_MIN_PX)
+                              anchor="w", wraplength=px(_DETAIL_MIN_PX))
             detail.pack(side="left", fill="x", expand=True,
-                        padx=(_CELL_GAP, _DETAIL_PAD), pady=1)
+                        padx=(px(_CELL_GAP), px(_DETAIL_PAD)), pady=1)
             # 这一行"圆点 + 名称 + 数值 + 间距"实际占掉的宽度（用来算说明列）。
-            used_px = (marker.winfo_reqwidth() + sum(_MARKER_PAD)
+            used_px = (marker.winfo_reqwidth() + sum(_marker_pad())
                        + name.winfo_reqwidth()
-                       + 2 * _CELL_GAP + _DETAIL_PAD + eye_px)
+                       + 2 * px(_CELL_GAP) + px(_DETAIL_PAD) + eye_px)
             return marker, value, detail, eye_box, used_px
 
         def _set_detail(detail, used_px, value_text, info, fg=DIM):
             """说明文字：按这一行剩余宽度换行（放不下换行，绝不被窗口边缘切掉）。"""
             wrap_px = detail_wrap_px(
-                WINDOW_WIDTH, used_px + value_font.measure(str(value_text)))
+                px(WINDOW_WIDTH),
+                used_px + value_font.measure(str(value_text)))
             _set(detail, text=fit_text(info, wrap_px * _DETAIL_MAX_LINES,
                                        detail_font.measure),
                  wraplength=wrap_px, fg=fg)
@@ -1255,17 +1319,17 @@ def _run() -> None:
         # 一行两个，「本局结束后停止」单独一行；字号/内边距都比原来小，
         # 省下的高度全部留给日志区（见 BTN_LAYOUT / BTN_FONT_SIZE）。
         btn_frame = tk.Frame(content, bg=BG)
-        btn_frame.pack(fill="x", padx=8, pady=(8, 0))
+        btn_frame.pack(fill="x", padx=px(8), pady=(px(8), 0))
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
 
         def _place(btn, key):
             row, column = BTN_LAYOUT[key]
             span = BTN_SPAN.get(key, 1)
-            left = 0 if column == 0 else 3
-            right = 0 if column + span >= 2 else 3
+            left = 0 if column == 0 else px(3)
+            right = 0 if column + span >= 2 else px(3)
             btn.grid(row=row, column=column, columnspan=span, sticky="ew",
-                     padx=(left, right), pady=2)
+                     padx=(left, right), pady=px(2))
 
         def _call_start():
             try:
@@ -1458,23 +1522,24 @@ def _run() -> None:
 
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
         delay_frame = tk.Frame(content, bg=BG)
-        delay_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
-        delay_canvas = tk.Canvas(delay_frame, height=8, bg=PANEL,
+        delay_frame.pack(side="bottom", fill="x", padx=px(8), pady=(0, px(8)))
+        delay_canvas = tk.Canvas(delay_frame, height=px(8), bg=PANEL,
                                  highlightthickness=0)
-        delay_canvas.pack(fill="x", pady=(0, 2))
+        delay_canvas.pack(fill="x", pady=(0, px(2)))
         delay_label = tk.Label(delay_frame, text="延时：无", bg=BG, fg=DIM,
                                font=("Microsoft YaHei", 8), anchor="w")
         delay_label.pack(fill="x")
 
         # ---- log body --------------------------------------------------
         body = tk.Frame(content, bg=BG)
-        body.pack(fill="both", expand=True, padx=8, pady=(6, 8))
+        body.pack(fill="both", expand=True, padx=px(8), pady=(px(6), px(8)))
         text = tk.Text(body, bg=BG, fg=TEXT, font=("Microsoft YaHei", 9),
                        bd=0, highlightthickness=0, wrap="word",
-                       height=12, padx=2, pady=2, spacing1=2, spacing3=2)
+                       height=12, padx=px(2), pady=px(2),
+                       spacing1=px(2), spacing3=px(2))
         text.pack(side="left", fill="both", expand=True)
         scroll = tk.Scrollbar(body, orient="vertical", command=text.yview,
-                              width=10)
+                              width=px(10))
         scroll.pack(side="right", fill="y")
         text.config(yscrollcommand=scroll.set)
         # 正文按标签着色：盒子意见、实际操作、系统提示、警告、报错各一色，

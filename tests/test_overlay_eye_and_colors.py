@@ -336,7 +336,7 @@ class ButtonLayoutTests(unittest.TestCase):
     def test_status_rows_put_name_and_value_next_to_each_other(self):
         """说明列绝不能右对齐：名称和数值之间不能空出一大块。"""
         source = inspect.getsource(log_overlay._run)
-        self.assertIn('marker.pack(side="left", padx=_MARKER_PAD', source)
+        self.assertIn('marker.pack(side="left", padx=_marker_pad()', source)
         self.assertIn('name.pack(side="left"', source)
         self.assertIn('value.pack(side="left"', source)
         self.assertIn('detail.pack(side="left", fill="x", expand=True',
