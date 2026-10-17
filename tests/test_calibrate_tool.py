@@ -753,6 +753,16 @@ class WindowFollowTests(unittest.TestCase):
         # 真实的 4K 桌面：窗口挪到右下角时框也仍在屏幕内（不被 _clamp 收边）。
         session.width, session.height = 3840, 2160
         self.session = session
+        # `box_to_screen()` 默认按**真实桌面**（display_mapping.desktop_bounds）
+        # 夹取。本机桌面是 2560×1440：窗口挪到右下角时框底会被切掉，和"跟随窗口"
+        # 的偏移断言无关，换台小屏机器就会失败。把桌面钉成上面注释里的 4K 尺寸，
+        # 用例在任何屏幕上结果一致。
+        self._desktop_patch = patch.object(
+            display_mapping, "desktop_bounds", return_value=(0, 0, 3840, 2160))
+        self._desktop_patch.start()
+
+    def tearDown(self):
+        self._desktop_patch.stop()
 
     def _mapping(self):
         return display_mapping.DisplayMapping(

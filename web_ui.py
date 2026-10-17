@@ -799,7 +799,8 @@ def _automation_worker(fsm):
             CTRL.last_error = "自动化运行异常：请查看页面「实时日志」中的 ERROR 详情。"
     finally:
         _stdout_capture_stop()
-        _remove_hotkey()
+        # 热键**不注销**：Ctrl+Q 要在空闲、手动进对战、等界面这些阶段都有效
+        # （它由控制台启动时注册，生命周期跟控制台一致，不跟自动化走）。
         try:
             fsm.print_info_close()
         except Exception:
@@ -844,6 +845,13 @@ def _automation_worker(fsm):
 
 # ---------------------------------------------------------------- 热键
 def _register_hotkey():
+    """注册全局 Ctrl+Q 急停。
+
+    **必须常驻**：以前只在自动化启动时注册、自动化结束就注销，导致手动
+    「进入对战」正在连点画面中心时按 Ctrl+Q 毫无反应（用户 2026-10-17 明确
+    要求「在任何地方 Ctrl+Q 都要能停」）。现在随控制台启动注册一次，不再随
+    自动化生死。
+    """
     try:
         import keyboard
         try:
@@ -852,10 +860,10 @@ def _register_hotkey():
             pass
         keyboard.add_hotkey("ctrl+q", _on_ctrl_q)
         CTRL.hotkey_registered = True
-        _log("SYS", "热键 Ctrl+Q 已注册（立即停止）。")
+        _log("SYS", "热键 Ctrl+Q 已注册（随时急停：自动化 / 手动进对战都停）。")
     except Exception as exc:
         CTRL.hotkey_registered = False
-        _log("WARN", f"注册 Ctrl+Q 热键失败：{exc}（仍可通过页面停止）")
+        _log("WARN", f"注册 Ctrl+Q 热键失败：{exc}（仍可用网页/hsctl cancel 取消）")
 
 
 def _remove_hotkey():
@@ -868,16 +876,21 @@ def _remove_hotkey():
 
 
 def _on_ctrl_q():
-    _log("WARN", "收到 Ctrl+Q，立即停止自动化。")
-    with CTRL.lock:
-        CTRL.phase = "idle"
-        CTRL.stopped_by = "ctrlq"
-        CTRL.schedule = {"start": None, "end": None}
-    _persist_schedule(None, None)
+    """Ctrl+Q：全局急停，任何时候按都有效。
+
+    与 `hsctl cancel` / 网页取消走**同一条通道**（`api_cancel`）：叫停正在
+    连点的「进入对战 / 等界面」、停掉自动化、清掉命令队列，日志统一记一条。
+    """
     try:
-        CTRL.fsm.request_immediate_stop()
+        with CTRL.lock:
+            CTRL.schedule = {"start": None, "end": None}
+        _persist_schedule(None, None)
     except Exception:
         pass
+    try:
+        api_cancel({"source": "hotkey"})
+    except Exception as exc:
+        _log("ERROR", f"Ctrl+Q 取消失败：{exc}")
 
 
 # ---------------------------------------------------------------- 定时调度
@@ -1338,8 +1351,10 @@ def api_start(body: dict):
     # 只有“重新开始”才从 0 计。
     keep_score = bool(body.get("keep_score"))
     with CTRL.lock:
-        if CTRL.automation_thread is not None or CTRL.starting:
+        if CTRL.automation_thread is not None:
             return {"ok": False, "error": "自动化已经在运行中。"}
+        if CTRL.starting:
+            return {"ok": False, "error": "自动化正在启动中，请稍候……"}
         cfg = load_config()
         name = (cfg.get("name") or "").strip()
         log_root = (cfg.get("log_root") or "").strip()
@@ -1351,20 +1366,38 @@ def api_start(body: dict):
             return {"ok": False, "error": f"日志目录不存在：{log_root}"}
         # 手动开始会取消尚未开始的定时计划
         CTRL.schedule = {"start": None, "end": None}
-    _persist_schedule(None, None)
+        # 从这一刻到 _start_automation 真正把自动化线程挂上之前，网页/浮窗要显示
+        # 「启动中…」（以前这个标志从未置位，等于没有），并挡住并发的第二次点击。
+        CTRL.starting = True
+    try:
+        _persist_schedule(None, None)
+    except Exception:
+        with CTRL.lock:
+            CTRL.starting = False
+        raise
     if keep_score:
         _log("SYS", "收到恢复请求，正在续跑自动化（战绩继续累计，不清零）……")
     else:
         _log("SYS", "收到启动请求，正在初始化自动化组件（首次启动可能较慢，请稍候）……")
 
     def _boot():
-        ok, msg = _start_automation(reset_stats=not keep_score)
-        if not ok:
+        try:
+            ok, msg = _start_automation(reset_stats=not keep_score)
+            if not ok:
+                with CTRL.lock:
+                    CTRL.last_error = msg
+                _log("ERROR", msg)
+        finally:
+            # 成功/失败都必须清掉，否则网页会一直显示「启动中…」、后续开始也被挡住。
             with CTRL.lock:
-                CTRL.last_error = msg
-            _log("ERROR", msg)
+                CTRL.starting = False
 
-    threading.Thread(target=_boot, name="hs-boot", daemon=True).start()
+    try:
+        threading.Thread(target=_boot, name="hs-boot", daemon=True).start()
+    except Exception:
+        with CTRL.lock:
+            CTRL.starting = False
+        raise
     if keep_score:
         return {"ok": True, "message": "正在恢复自动化（战绩继续累计），请稍候……"}
     return {"ok": True, "message": "正在启动自动化，请稍候……"}
@@ -1398,8 +1431,10 @@ def api_prepare(body=None):
     后从网页点开始，浮窗再也弹不出来）。
     """
     with CTRL.lock:
-        if CTRL.automation_thread is not None or CTRL.starting:
+        if CTRL.automation_thread is not None:
             return {"ok": False, "error": "自动化已经在运行中。"}
+        if CTRL.starting:
+            return {"ok": False, "error": "自动化正在启动中，请稍候……"}
         CTRL.prepared = True
     status = None
     if log_overlay is not None and not log_overlay.is_running():
@@ -1463,6 +1498,66 @@ def api_stop(body: dict):
         return {"ok": False, "error": f"发送停止指令失败：{exc}"}
     _log("WARN", "已发送立即停止指令。")
     return {"ok": True, "message": "正在停止……"}
+
+
+def api_cancel(body=None) -> dict:
+    """急停：把正在跑的**手动流程**也一起叫停（enter-battle / 重启后自动恢复）。
+
+    `api_stop` 只管 FSM 自动化：自动化没在跑时它会直接回「当前没有正在运行的
+    自动化」，而手动「进入对战」还在一遍遍点画面中心 —— 这就是用户说的
+    「让它取消它不停」。所以取消要单独一条：置位 `battle_entry` 的全局急停
+    开关，等待/点击循环下一轮（≤ interval，默认 0.5s）就退出，不再点任何坐标。
+
+    同时尽量把能停的都停掉：FSM 自动化（立即停）、命令队列、排队中的重启。
+    返回体里的 `cancelled` 只列**真正在跑**的部件；一个都没有时不置位急停
+    开关（避免把取消信号留给下一次单击），只如实回「没有在跑的动作」。
+    """
+    import battle_entry
+    cancelled = []
+    notes = []
+    with _ENTER_LOCK:
+        entering = bool(_ENTER_STATE.get("running"))
+    with _restart_lock:
+        restarting = bool(_RESTART_STATE.get("running"))
+    with CTRL.lock:
+        fsm = CTRL.fsm
+        automating = CTRL.automation_thread is not None
+    with _QUEUE_LOCK:
+        queued = bool(_QUEUE_STATE.get("running"))
+
+    if entering or restarting:
+        # 只有真有循环在跑才置位，否则会给下一次单击留个"已取消"的坑。
+        battle_entry.request_cancel()
+        if entering:
+            cancelled.append("进入对战（等待/点击循环）")
+        if restarting:
+            cancelled.append("重启炉石后的等待")
+    if automating and fsm is not None:
+        try:
+            CTRL.phase = "idle"
+            CTRL.stopped_by = "user_cancel"
+            fsm.request_immediate_stop()
+            cancelled.append("自动化（立即停）")
+        except Exception as exc:
+            notes.append(f"停自动化失败：{exc}")
+    if queued:
+        with _QUEUE_LOCK:
+            _QUEUE_STATE["running"] = False
+            _QUEUE_STATE["message"] = "已被用户取消"
+        cancelled.append("命令队列")
+
+    if not cancelled:
+        message = "当前没有正在跑的动作，无需取消。"
+    else:
+        message = ("已取消：" + "、".join(cancelled)
+                   + "；正在点的动作会在 0.5 秒内停手，之后不再点任何坐标")
+        if notes:
+            message += "（" + "；".join(notes) + "）"
+    source = str((body or {}).get("source") or "")
+    if source == "hotkey":
+        message = "Ctrl+Q —— " + message
+    _log("WARN", message)
+    return {"ok": True, "cancelled": cancelled, "message": message}
 
 
 def api_schedule(body: dict):
@@ -1713,6 +1808,16 @@ def _overlay_is_running():
         return CTRL.automation_thread is not None
 
 
+def _overlay_is_starting():
+    """自动化是否正在启动中（已点开始、后台线程还没挂上）。
+
+    浮窗据此在「开始对战」上显示「启动中…」：用户反馈点完开始后按钮先没变化、
+    过一会才变「对局进行中」，中间这段看起来像没反应。
+    """
+    with CTRL.lock:
+        return bool(CTRL.starting)
+
+
 def _overlay_is_in_game():
     """对局是否已开始（换牌/出牌/对手回合），或自动化正在运行。
 
@@ -1887,6 +1992,7 @@ def _bind_overlay():
         on_start=lambda: api_start({}),
         on_halt=_overlay_halt,
         is_running=_overlay_is_running,
+        is_starting=_overlay_is_starting,
         on_stop_after=_overlay_stop_after,
         is_stop_after=_overlay_is_stop_after,
         is_in_game=_overlay_is_in_game,
@@ -2098,20 +2204,27 @@ def _restart_hearthstone_worker(resume=False, source="manual"):
     每一步都往网页/浮窗写日志；任何一步失败都立刻停下并说明原因，绝不在拿不准
     的状态下继续删文件。
 
-    ``resume=True`` 时（看门狗自动重启）再多走两步：**等主界面 → 进入对战 →
-    重新开始自动化**，真正做到"日志卡住就自己爬回来继续打"。
+    **重启的完成判据不是"进程起来了"，而是"认到主界面（「传统对战」可点）"**：
+    炉石从启动到能操作还要过战网、登录、公告弹窗，只拉起进程就报成功会让后面的
+    「进入对战」直接撞在加载画面上（用户 2026-10-17 明确要求）。
+
+    ``resume=True`` 时（看门狗自动重启）再多走两步：**进对战 → 重新开始自动化**，
+    真正做到"日志卡住就自己爬回来继续打"。
     ``source`` 只用于日志文案（``watchdog`` / ``manual``）。
     """
+    _restart_stage("restarting")
     ok = _restart_hearthstone_steps()
     if not ok:
         if source == "watchdog":
             _log("ERROR", "看门狗重启未成功；已放弃本次自动恢复，等待人工处理。")
+        _restart_finish("restart_failed", False, "重启炉石失败（见日志）")
         return False
     if not resume:
-        return True
+        return _restart_wait_main_menu()
 
     # ---- 恢复：等主界面 → 进入对战 → 重开自动化 ----
     import battle_entry
+    _restart_stage("recovering")
     _log("SYS", "重启完成，开始自动恢复：等待主界面 → 进入对战 → 重新开始……")
     try:
         result = battle_entry.enter_battle(
@@ -2119,8 +2232,13 @@ def _restart_hearthstone_worker(resume=False, source="manual"):
             logger=lambda text: _log("SYS", text))
     except Exception as exc:
         _log("ERROR", f"自动进入对战失败：{exc}；请手动「进入传统对战」后再点开始。")
+        _restart_finish("recover_failed", False, f"自动进入对战失败：{exc}")
         return False
     if not result.get("ok"):
+        if result.get("stage") == "aborted":
+            _log("WARN", "收到取消请求，已停在自动恢复这一步；不会重新开始自动化。")
+            _restart_finish("cancelled", False, "已取消自动恢复")
+            return False
         _log("WARN", f"自动进入对战未完成：{result.get('message')}"
                      "（可能已在选套牌界面；继续尝试开始自动化）")
     else:
@@ -2129,14 +2247,51 @@ def _restart_hearthstone_worker(resume=False, source="manual"):
     started = api_start({"keep_score": True})
     if not started.get("ok"):
         _log("ERROR", f"重启后重新开始自动化失败：{started.get('error')}")
+        _restart_finish("recover_failed", False,
+                        f"重启后重新开始自动化失败：{started.get('error')}")
         return False
     _log("SYS", "✅ 重启并恢复成功：自动化已重新开始，继续挂机。")
+    _restart_finish("recovered", True, "已重启并恢复自动化（继续挂机）")
     try:
         from src.safety.restart_watchdog import default_watchdog
         default_watchdog().note_restarted()
     except Exception:
         pass
     return True
+
+
+def _restart_wait_main_menu() -> bool:
+    """重启后等炉石回到主界面（「传统对战」可点）——手工重启的完成判据。
+
+    ``battle_entry.wait_for_main_menu`` 认不出界面时只会点画面中心（安全点），
+    不盲点按钮；到超时就如实报「没到主界面」，不谎报成功。
+    """
+    import battle_entry
+    _restart_stage("wait_main_menu")
+    _log("SYS", "炉石进程已拉起，等待回到主界面（「传统对战」可点）……")
+    try:
+        result = battle_entry.wait_for_main_menu(
+            timeout=RESTART_MAIN_MENU_TIMEOUT_SECONDS,
+            logger=lambda text: _log("SYS", text))
+    except Exception as exc:
+        _log("ERROR", f"等待主界面出错：{exc}")
+        _restart_finish("main_menu_error", False, f"等待主界面出错：{exc}")
+        return False
+    if result.get("ok"):
+        _log("SYS", "已到达主界面（「传统对战」可点）。")
+        _restart_finish("main_menu", True, "已重启并到达主界面（「传统对战」可点）")
+        return True
+    if result.get("reason") == "aborted":
+        _log("WARN", "收到取消请求，已停止等待主界面（不再点任何坐标）。")
+        _restart_finish("cancelled", False, "已取消等待主界面")
+        return False
+    detail = (result.get("message") or result.get("state")
+              or "没认出「传统对战」")
+    text = (f"炉石已重启，但 {RESTART_MAIN_MENU_TIMEOUT_SECONDS:.0f}s 内没到主界面"
+            f"（{detail}）")
+    _log("WARN", text + "；请手动切到主界面后再继续。")
+    _restart_finish("main_menu_timeout", False, text)
+    return False
 
 
 def _restart_hearthstone_steps() -> bool:
@@ -2231,9 +2386,7 @@ def _restart_hearthstone_and_resume():
         if _RESTART_STATE.get("running"):
             _log("WARN", "看门狗想重启，但上一次「重启炉石」还没结束，本次跳过。")
             return False
-        _RESTART_STATE["running"] = True
-        _RESTART_STATE["source"] = "watchdog"
-        _RESTART_STATE["started_at"] = datetime.now().isoformat(timespec="seconds")
+        _restart_begin("watchdog")
 
     def _worker():
         try:
@@ -2241,6 +2394,7 @@ def _restart_hearthstone_and_resume():
         except Exception as exc:
             traceback.print_exc()
             _log("ERROR", f"看门狗自动重启异常：{exc}")
+            _restart_finish("exception", False, f"看门狗自动重启异常：{exc}")
         finally:
             with _restart_lock:
                 _RESTART_STATE["running"] = False
@@ -2252,7 +2406,46 @@ def _restart_hearthstone_and_resume():
 
 # 串行化「重启炉石」：并发触发两次会把刚拉起来的炉石再杀一遍。
 _restart_lock = threading.Lock()
-_RESTART_STATE = {"running": False, "source": None, "started_at": None}
+# 「重启炉石」的进度：CLI / agent 靠它判断"到底重启完了没"，不用自己 sleep 猜。
+# stage 取值：restarting → wait_main_menu → main_menu（成功）；失败落 *_failed /
+# main_menu_timeout / main_menu_error。ok=None 表示还没结束。
+_RESTART_STATE = {
+    "running": False,
+    "source": None,
+    "stage": None,
+    "ok": None,
+    "message": None,
+    "started_at": None,
+    "finished_at": None,
+}
+# 重启后等主界面的上限：炉石从进程启动到能点「传统对战」要过战网+登录+公告，
+# 实测 30–90s，留到 180s（与 battle_entry.MAIN_MENU_TIMEOUT_SECONDS 一致）。
+RESTART_MAIN_MENU_TIMEOUT_SECONDS = 180.0
+
+
+def _now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _restart_begin(source: str) -> None:
+    """标记一次重启开始（调用方需已持有 _restart_lock 或确认没有并发）。"""
+    _RESTART_STATE.update({"running": True, "source": source,
+                           "stage": "restarting", "ok": None, "message": None,
+                           "started_at": _now_iso(), "finished_at": None})
+
+
+def _restart_stage(stage: str) -> None:
+    _RESTART_STATE["stage"] = stage
+
+
+def _restart_finish(stage: str, ok: bool, message: str) -> None:
+    _RESTART_STATE.update({"running": False, "stage": stage, "ok": bool(ok),
+                           "message": message, "finished_at": _now_iso()})
+
+
+def _restart_snapshot() -> dict:
+    with _restart_lock:
+        return dict(_RESTART_STATE)
 
 
 def _bind_watchdog_restarter() -> None:
@@ -2472,6 +2665,8 @@ def api_enter_battle(body=None) -> dict:
     if CTRL.automation_thread is not None or CTRL.starting:
         return {"ok": False,
                 "error": "自动化已经在运行中；它会自己进对战，不需要手动进。"}
+    # 新的一次手动流程开始：先清掉上一轮可能残留的取消信号，否则会立刻自停。
+    battle_entry.clear_cancel()
     raw_index = body.get("deck_index")
     deck_index = None
     if raw_index not in ("", None):
@@ -2554,6 +2749,8 @@ def api_deck_click(body=None) -> dict:
         index = int(body.get("index"))
     except (TypeError, ValueError):
         return {"ok": False, "error": "index 必须是 1-9 的整数"}
+    # 一次性点击：先清掉上一轮残留的取消信号，否则这一下会被急停开关挡掉。
+    battle_entry.clear_cancel()
     result = battle_entry.select_deck(index, logger=lambda text: _log("SYS", text))
     if result.get("ok"):
         _log("SYS", result.get("message") or f"已快速点第 {index} 个卡组")
@@ -2837,11 +3034,18 @@ def api_restart_hearthstone(body=None):
     with _restart_lock:
         if _RESTART_STATE["running"]:
             return {"ok": False, "error": "上一次重启炉石还没结束，请稍候。"}
-        _RESTART_STATE["running"] = True
+        _restart_begin("manual")
+    # 新流程开始 → 清掉上一轮残留的取消信号（否则「等主界面」会立刻自停）。
+    import battle_entry as _be
+    _be.clear_cancel()
 
     def _worker():
         try:
             _restart_hearthstone_worker()
+        except Exception as exc:
+            traceback.print_exc()
+            _log("ERROR", f"重启炉石异常：{exc}")
+            _restart_finish("exception", False, f"重启炉石异常：{exc}")
         finally:
             with _restart_lock:
                 _RESTART_STATE["running"] = False
@@ -2850,7 +3054,7 @@ def api_restart_hearthstone(body=None):
                      daemon=True).start()
     return {"ok": True,
             "message": "已开始重启炉石（停止自动化 → 结束进程 → 清空日志目录 "
-                       "→ 重新启动），进度见日志。"}
+                       "→ 重新启动 → 等主界面），进度见 /api/restart_hearthstone。"}
 
 
 def _overlay_exit_overlay():
@@ -3099,6 +3303,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_ui_state(frame_name=q.get("frame", [""])[0]))
             elif path == "/api/enter_battle":
                 self._json(api_enter_battle_status())
+            elif path == "/api/restart_hearthstone":
+                self._json({"ok": True, "restart": _restart_snapshot()})
             elif path == "/api/queue":
                 self._json(api_queue_get())
             else:
@@ -3124,6 +3330,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_prepare(body))
             elif path == "/api/stop":
                 self._json(api_stop(body))
+            elif path == "/api/cancel":
+                self._json(api_cancel(body))
             elif path == "/api/schedule":
                 self._json(api_schedule(body))
             elif path == "/api/schedule/cancel":
@@ -3301,6 +3509,9 @@ def main():
     # 「中断重启」看门狗的重启通道：把 web_ui 的重启动作注入给看门狗模块
     # （看门狗本身不认识 web_ui，靠这里接线，避免循环 import）。
     _bind_watchdog_restarter()
+    # 全局 Ctrl+Q 急停：随控制台常驻（不跟自动化的生死走），空闲/手动进对战
+    # 期间也能一键叫停正在点的动作。
+    _register_hotkey()
     # 常驻前台守护线程：每 30 分钟把炉石切回最前台
     threading.Thread(target=_hearthstone_foreground_guard,
                      name="hs-fg-guard", daemon=True).start()
@@ -3331,7 +3542,7 @@ def main():
     if not IS_ADMIN:
         print("  [!] 当前不是管理员权限，自动化鼠标/键盘操作可能失效，")
     print("      建议以管理员身份重新运行本程序。")
-    print("  按 Ctrl+C 或直接关闭窗口即可退出控制台。")
+    print("  随时按 Ctrl+Q 急停（自动化 / 手动进对战都停）；关闭本窗口即退出控制台。")
     print("=" * 64)
     if "--no-browser" not in sys.argv:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()

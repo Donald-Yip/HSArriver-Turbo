@@ -459,6 +459,11 @@ def interpreter_report(*, probe=None) -> dict:
 ENTER_BATTLE_WAIT_SECONDS = 600.0
 ENTER_BATTLE_POLL_SECONDS = 2.0
 
+# 「重启炉石」的最长等待：控制台侧等主界面上限 180s（RESTART_MAIN_MENU_TIMEOUT_SECONDS），
+# 前面还有停自动化 + 杀进程 + 清日志 + 拉战网/炉石，再留一点余量。
+RESTART_WAIT_SECONDS = 300.0
+RESTART_POLL_SECONDS = 2.0
+
 # 延时字段：与 config.py 的 _USER_DELAY_KEYS 一一对应（这里只用于帮助文本）。
 DELAY_KEYS = (
     "mulligan_ready_delay_seconds",
@@ -1109,6 +1114,21 @@ def cmd_stop(args, ctx: Ctx) -> int:
         "/api/stop", {"mode": "after_game" if args.after_game else "now"}))
 
 
+def cmd_cancel(args, ctx: Ctx) -> int:
+    """急停：叫停正在跑的手动流程（进对战 / 重启后的等待）以及自动化。
+
+    与 `stop` 的关键区别：`stop` 只管 FSM 自动化，自动化没在跑时它会回
+    「当前没有正在运行的自动化」，而手动 `enter-battle` 的等待循环还在反复点
+    画面中心 —— 用户喊"取消"却停不下来就是这事。这条命令把两边一起停，并且
+    **立刻生效**：置位控制台的急停开关，等待循环下一轮（≤0.5 秒）退出，
+    之后不再点任何坐标。
+    """
+    payload = ctx.post("/api/cancel", {})
+    if not payload.get("ok"):
+        return _fail(ctx, "api", payload.get("error") or "取消失败")
+    return _ok_message(ctx, payload)
+
+
 def cmd_calibrate(args, ctx: Ctx) -> int:
     body = {}
     target = getattr(args, "target", None)
@@ -1348,8 +1368,11 @@ def cmd_enter_battle(args, ctx: Ctx) -> int:
     认不出界面时只会点画面中心（安全点），到超时就退出并说明原因 —— 不会盲点。
     默认**不点「开始」**（那等于开始排队）；要一路打到排队加 `--start`。
     """
-    body = {"click_start": bool(getattr(args, "start", False)),
-            "interval": float(getattr(args, "interval", 3.0))}
+    body = {"click_start": bool(getattr(args, "start", False))}
+    # 只有用户显式给了 --interval 才下发：原来默认发 3.0，把控制台默认的
+    # 0.5 秒轮询盖掉了，界面认出来要慢一拍，「取消」也要多等 3 秒。
+    if getattr(args, "interval", None):
+        body["interval"] = float(args.interval)
     deck = getattr(args, "deck", None)
     if deck is not None:
         if not 1 <= int(deck) <= 9:
@@ -1371,7 +1394,30 @@ def cmd_enter_battle(args, ctx: Ctx) -> int:
 
 
 def _wait_enter_battle(ctx: Ctx) -> int:
-    """等这次「进入对战」跑完（轮询便宜的进度接口，不反复截屏）。"""
+    """等这次「进入对战」跑完（轮询便宜的进度接口，不反复截屏）。
+
+    用户在终端按 Ctrl+C 时**必须先把控制台那边喊停**：真正的点击跑在控制台的
+    后台线程里，只杀掉本地 CLI 的话它还在那儿一遍遍点画面中心 —— 这就是
+    「让它取消它不听话」的根因。所以这里捕获 KeyboardInterrupt → POST
+    /api/cancel，确认急停已生效后才退出。
+    """
+    try:
+        return _wait_enter_battle_loop(ctx)
+    except KeyboardInterrupt:
+        # 兜底：正常做法是**在任何地方按 Ctrl+Q**（控制台常驻的全局热键），
+        # 这里只防"终端里手滑按了 Ctrl+C 就以为停了"——点击跑在控制台线程里，
+        # 本地退出等于什么都没停，所以要顺手替用户发一次取消。
+        print("\n收到终端中断，正在替你在控制台叫停……", file=sys.stderr)
+        try:
+            result = ctx.post("/api/cancel", {"source": "cli-interrupt"})
+            text = result.get("message") or "已发送取消请求"
+        except Exception as exc:
+            text = f"取消请求没发出去（{exc}）；请手动执行 python hsctl.py cancel"
+        print(f"  {text}", file=sys.stderr)
+        return EXIT_API
+
+
+def _wait_enter_battle_loop(ctx: Ctx) -> int:
     last_stage = ""
     deadline = time.monotonic() + ENTER_BATTLE_WAIT_SECONDS
     while time.monotonic() < deadline:
@@ -1529,8 +1575,41 @@ def cmd_restart_hearthstone(args, ctx: Ctx) -> int:
         if answer.strip().lower() not in ("y", "yes"):
             print("已取消。")
             return EXIT_OK
-    return _ok_message(ctx, ctx.post("/api/restart_hearthstone",
-                                     {"confirm": True}))
+    payload = ctx.post("/api/restart_hearthstone", {"confirm": True})
+    if not payload.get("ok"):
+        return _fail(ctx, "api", payload.get("error") or "重启炉石没能开始")
+    if ctx.json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(f"✓ {payload.get('message')}")
+    if getattr(args, "no_wait", False):
+        return EXIT_OK
+    return _wait_restart_hearthstone(ctx)
+
+
+def _wait_restart_hearthstone(ctx: Ctx) -> int:
+    """等到重启真正完成（= 认到主界面、「传统对战」可点），不靠调用方自己 sleep。
+
+    只轮询轻量的进度接口；超时就把最后阶段说清楚并返回失败，不谎报成功。
+    """
+    last_stage = ""
+    deadline = time.monotonic() + RESTART_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        state = (ctx.get("/api/restart_hearthstone") or {}).get("restart") or {}
+        stage = str(state.get("stage") or "")
+        if stage != last_stage and not ctx.json and stage:
+            print(f"  … {stage}")
+            last_stage = stage
+        if not state.get("running"):
+            if ctx.json:
+                print(json.dumps(state, ensure_ascii=False))
+            else:
+                print(f"{'✅' if state.get('ok') else '❌'} {state.get('message')}")
+            return EXIT_OK if state.get("ok") else EXIT_API
+        time.sleep(RESTART_POLL_SECONDS)
+    print("等待超时：后台可能还在跑，用 python hsctl.py log -f 看进度。",
+          file=sys.stderr)
+    return EXIT_API
 
 
 # ---- 配置 / 参数：show 都复用 /api/status 里已经算好的那一节
@@ -2475,6 +2554,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="打完当前这一局再停（默认立即停）")
     p.set_defaults(handler=cmd_stop)
 
+    p = sub.add_parser("cancel", parents=[common],
+                       help="急停：叫停正在点的「进对战/等界面」并停止自动化")
+    p.set_defaults(handler=cmd_cancel)
+
     p = sub.add_parser("calibrate", parents=[common],
                        help="打开屏幕上的校准窗口")
     p.add_argument("--target", default=None, metavar="目标",
@@ -2536,8 +2619,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="进入后自动选第 N 个卡组（1-9）")
     p.add_argument("--start", action="store_true",
                    help="选完卡组再点「开始」（等于开始排队；默认只到选择套牌界面）")
-    p.add_argument("--interval", type=float, default=3.0, metavar="秒",
-                   help="等界面时每次识别/点中心的间隔（默认 3 秒）")
+    p.add_argument("--interval", type=float, default=None, metavar="秒",
+                   help="等界面时每次识别/点中心的间隔（默认用控制台的 0.5 秒；"
+                        "调大只会让「取消」反应更慢，一般不用改）")
     p.add_argument("--wait-timeout", type=float, default=None, metavar="秒",
                    help="等主界面的超时（默认 180 秒）")
     p.add_argument("--no-wait", action="store_true",
@@ -2577,8 +2661,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(handler=cmd_queue)
 
     p = sub.add_parser("restart-hearthstone", parents=[common],
-                       help="重启炉石（会结束进程并清空其日志目录，高风险）")
+                       help="重启炉石并等到主界面（会结束进程并清空其日志目录，高风险）")
     p.add_argument("--yes", action="store_true", help="跳过交互确认")
+    p.add_argument("--no-wait", action="store_true",
+                   help="只派发、不等结果（默认等到「传统对战」可点才算完成）")
     p.set_defaults(handler=cmd_restart_hearthstone)
 
     # ---- config

@@ -81,8 +81,18 @@ class MeasuredOffsetTests(unittest.TestCase):
                          self.mapping.box_to_screen((1, 296, 196, 544)))
 
     def test_post_game_button_gets_the_offset(self):
+        # 只看"加偏移"的数学：框底 1486 很可能超出本机真实桌面高度
+        # （本机 2560×1440），默认 clamp 会把它夹到屏幕内 —— 那是抓图安全行为，
+        # 不属于这个用例要验的偏移。所以这里显式 clamp=False。
         self.assertEqual((2285, 1416, 2435, 1486),
-                         self.mapping.box_to_screen((1325, 865, 1475, 935)))
+                         self.mapping.box_to_screen((1325, 865, 1475, 935),
+                                                    clamp=False))
+        # 生产路径（默认 clamp）仍然必须把越界框夹进真实桌面，不能交给抓图抛异常。
+        bounds = dm.desktop_bounds()
+        clamped = self.mapping.box_to_screen((1325, 865, 1475, 935))
+        self.assertEqual(
+            (2285, 1416, 2435, min(1486, bounds[3])), clamped)
+        self.assertLessEqual(clamped[3], bounds[3])
 
     def test_client_screen_box(self):
         self.assertEqual((960, 551, 2880, 1631), self.mapping.client_box)

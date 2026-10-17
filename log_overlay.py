@@ -490,6 +490,9 @@ _IS_RUNNING = None
 _ON_STOP_AFTER = None
 _IS_STOP_AFTER = None
 _IS_IN_GAME = None
+# 「开始」按下后、自动化线程挂上之前的启动状态：按钮显示「启动中…」并禁用，
+# 否则这段时间（首次启动要导入组件 + 初始化）看起来像点了没反应。
+_IS_STARTING = None
 _SCORE = None
 _ON_EXIT = None
 _HUMAN_LIKE = None
@@ -763,7 +766,7 @@ def _deferred_open_worker(args: dict, timeout: float = OPEN_WAIT_SECONDS,
 
 def start(on_start=None, on_halt=None, is_running=None,
           on_stop_after=None, is_stop_after=None,
-          is_in_game=None, score_callback=None, on_exit=None,
+          is_in_game=None, is_starting=None, score_callback=None, on_exit=None,
           human_like_callback=None, concede_callback=None,
           liveness_callback=None, account_callback=None,
           account_visible_setting=None, on_toggle_account=None,
@@ -777,7 +780,7 @@ def start(on_start=None, on_halt=None, is_running=None,
     任何提示（用户反馈："退出浮窗以后，再从 web 点开始就不会弹出浮窗了"）。
     """
     global _ON_START, _ON_HALT, _IS_RUNNING, _ON_STOP_AFTER, _IS_STOP_AFTER
-    global _IS_IN_GAME, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
+    global _IS_IN_GAME, _IS_STARTING, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
     global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS
@@ -785,7 +788,8 @@ def start(on_start=None, on_halt=None, is_running=None,
     args = {
         "on_start": on_start, "on_halt": on_halt, "is_running": is_running,
         "on_stop_after": on_stop_after, "is_stop_after": is_stop_after,
-        "is_in_game": is_in_game, "score_callback": score_callback,
+        "is_in_game": is_in_game, "is_starting": is_starting,
+        "score_callback": score_callback,
         "on_exit": on_exit, "human_like_callback": human_like_callback,
         "concede_callback": concede_callback,
         "liveness_callback": liveness_callback,
@@ -819,6 +823,7 @@ def start(on_start=None, on_halt=None, is_running=None,
         _ON_STOP_AFTER = on_stop_after
         _IS_STOP_AFTER = is_stop_after
         _IS_IN_GAME = is_in_game
+        _IS_STARTING = is_starting
         _SCORE = score_callback
         _ON_EXIT = on_exit
         _HUMAN_LIKE = human_like_callback
@@ -1338,6 +1343,12 @@ def _run() -> None:
                     return
                 if _ON_START is not None:
                     _ON_START()
+                # 立即反馈，不等下一次 350ms 刷新：首次启动要导入组件/初始化，
+                # 这段空窗里按钮若不变化，看起来就像"点了没反应"。
+                if _IS_STARTING is not None and _IS_STARTING():
+                    _set(start_btn, state="disabled", text="启动中…",
+                         bg=DISABLED, activebackground=DISABLED,
+                         disabledforeground=DIM, cursor="arrow")
             finally:
                 _raise_hearthstone()
 
@@ -1602,7 +1613,14 @@ def _run() -> None:
                          activebackground=DANGER)
                 else:
                     _set(halt_btn, text="恢复", bg=OK, activebackground=OK)
-            if _IS_IN_GAME is not None and _IS_IN_GAME():
+            starting = bool(_IS_STARTING()) if _IS_STARTING is not None else False
+            if starting and not (_IS_RUNNING is not None and _IS_RUNNING()):
+                # 点完「开始」到自动化线程挂上之间：给个「启动中…」，别让用户以为
+                # 点了没反应（首次启动要导入组件 + 初始化，会有一小段空窗）。
+                _set(start_btn, state="disabled", text="启动中…",
+                     bg=DISABLED, activebackground=DISABLED,
+                     disabledforeground=DIM, cursor="arrow")
+            elif _IS_IN_GAME is not None and _IS_IN_GAME():
                 _set(start_btn, state="disabled", text="对局进行中",
                      bg=DISABLED, activebackground=DISABLED,
                      disabledforeground=DIM, cursor="arrow")

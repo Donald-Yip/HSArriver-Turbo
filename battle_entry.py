@@ -49,6 +49,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Optional
@@ -110,9 +111,37 @@ DECK_MIN_SLOTS_FOUND = 6
 CENTER_DISMISS_POINT = (960, 650)
 
 # ---------------------------------------------------------------- 时序
-CHECK_INTERVAL_SECONDS = 3.0
+# 识别轮询间隔：0.5s（原来 3s）。界面画出来就立刻往下走，不用等满 3 秒；
+# 抓一帧 + NCC 只有几十毫秒，0.5s 一次的 CPU 开销可以忽略。
+CHECK_INTERVAL_SECONDS = 0.5
+# 没认出界面时「点一下画面中心」的最小间隔：点中心是为了关掉挡住文字的弹窗/
+# 公告，不是探测手段——0.5s 轮询不能变成连点，仍然保持「最多每 3 秒一下」。
+CENTER_CLICK_INTERVAL_SECONDS = 3.0
 MAIN_MENU_TIMEOUT_SECONDS = 180.0
 DECK_SELECT_TIMEOUT_SECONDS = 90.0
+
+# ---------------------------------------------------------------- 取消信号
+# 手动流程（进入对战 / 重启后自动恢复）可能连着点几十秒到几分钟。用户按 Ctrl+C、
+# 在网页点「停止」、或者 agent 说「取消」时，必须**立刻停手**，不能再点一下。
+# 这里用一个进程级事件做「急停开关」：任何等待/点击循环每轮都问一次，置位就退出。
+# 单次点击类动作（deck-click / mode）本身就是一遍过，不需要它。
+_CANCEL = threading.Event()
+
+
+def request_cancel() -> None:
+    """置位急停开关：所有正在等待/点击的手动流程在下一轮（≤ interval）退出。"""
+    _CANCEL.set()
+
+
+def clear_cancel() -> None:
+    """清除急停开关。**每个新手动流程开始前必须调**，否则上一次的取消会立刻生效。"""
+    _CANCEL.clear()
+
+
+def is_cancelled() -> bool:
+    """当前是否处于「已请求取消」状态（也直接当 should_abort 回调用）。"""
+    return _CANCEL.is_set()
+
 
 # ---------------------------------------------------------------- 模板资源
 TEMPLATE_DIR = ROOT / "assets" / "ui_templates"
@@ -576,18 +605,33 @@ def _capture_frame(capture, config):
     return frame
 
 
+def _identify_now(capture, config):
+    """抓一帧认一下当前界面（不点击）。抓不到/认不出返回 None。"""
+    frame = _capture_frame(capture, config)
+    if frame is None:
+        return None
+    try:
+        return identify(frame, config)
+    except Exception:
+        return None
+
+
 def _wait_for_state(kind: str, *, timeout, interval, capture, click_at_fn, sleep,
                     clock, should_abort, logger, config) -> dict:
-    """等某个界面出现：每 `interval` 秒识别一次，没认出就点一次画面中心。
+    """等某个界面出现：每 `interval` 秒识别一次；没认出且距上次点中心 ≥
+    CENTER_CLICK_INTERVAL_SECONDS 时，才点一次画面中心（关掉挡字的弹窗/公告）。
 
     **安全性质**：只有识别到才返回成功；到超时就退出并说明原因 —— 全程不会
-    盲点「传统对战」或卡组格。
+    盲点「传统对战」或卡组格；点中心也保持「最多每 3 秒一下」的原有节奏，
+    不会因为轮询变快而连点。
     """
     label = ("主界面（传统对战）" if kind == "main_menu"
              else "选择套牌界面（选择套牌标题）")
+    interval = max(0.05, float(interval))
     deadline = clock() + max(0.0, float(timeout))
     polls = 0
     last = None
+    last_click = None
     while True:
         if should_abort():
             return {"ok": False, "reason": "aborted", "polls": polls, "ui": last,
@@ -612,9 +656,13 @@ def _wait_for_state(kind: str, *, timeout, interval, capture, click_at_fn, sleep
                     break
             return {"ok": False, "reason": f"timeout_{kind}", "polls": polls,
                     "ui": last, "message": f"等待{label}超时{detail}"}
-        click_at_fn(*CENTER_DISMISS_POINT)
+        now = clock()
+        if last_click is None or now - last_click >= CENTER_CLICK_INTERVAL_SECONDS:
+            click_at_fn(*CENTER_DISMISS_POINT)
+            last_click = now
+            logger(f"还没识别到{label}，已点击画面中心一次，"
+                   f"{interval:.1f}s 后重试……")
         polls += 1
-        logger(f"还没识别到{label}，已点击画面中心一次，{interval:.0f}s 后重试……")
         sleep(interval)
 
 
@@ -627,12 +675,16 @@ def wait_for_main_menu(*, timeout: float = MAIN_MENU_TIMEOUT_SECONDS,
                        should_abort: Optional[Callable] = None,
                        logger: Optional[Callable] = None,
                        config=None) -> dict:
-    """等到主界面（认出「传统对战」）为止；不是就点一次画面中心。"""
+    """等到主界面（认出「传统对战」）为止；不是就点一次画面中心。
+
+    `should_abort` 缺省用全局急停开关（`hsctl cancel` / 网页「停止」置位），
+    所以**默认就是可取消的**。
+    """
     return _wait_for_state(
         "main_menu", timeout=timeout, interval=interval,
         capture=capture or capture_client_frame, click_at_fn=click_at_fn or click_at,
         sleep=sleep or time.sleep, clock=clock or time.monotonic,
-        should_abort=should_abort or (lambda: False),
+        should_abort=should_abort or is_cancelled,
         logger=logger or (lambda text: None), config=config)
 
 
@@ -645,25 +697,30 @@ def wait_for_deck_select(*, timeout: float = DECK_SELECT_TIMEOUT_SECONDS,
                          should_abort: Optional[Callable] = None,
                          logger: Optional[Callable] = None,
                          config=None) -> dict:
-    """等到选择套牌界面（认出「开始」按钮）为止。"""
+    """等到选择套牌界面（认出「选择套牌」标题）为止。"""
     return _wait_for_state(
         "deck_select", timeout=timeout, interval=interval,
         capture=capture or capture_client_frame, click_at_fn=click_at_fn or click_at,
         sleep=sleep or time.sleep, clock=clock or time.monotonic,
-        should_abort=should_abort or (lambda: False),
+        should_abort=should_abort or is_cancelled,
         logger=logger or (lambda text: None), config=config)
 
 
 # ================================================================ 选卡组
 def select_deck(index: int, *, capture: Optional[Callable] = None,
                 click_at_fn: Optional[Callable] = None,
-                logger: Optional[Callable] = None, config=None) -> dict:
+                logger: Optional[Callable] = None,
+                should_abort: Optional[Callable] = None, config=None) -> dict:
     """点第 `index`（1-9）个卡组。
 
     **单格保护**：先抓一帧，确认这一格名牌上有白字（真的像个卡组）才点 ——
     否则一格都不点，直接回报原因。这样即使界面不是"选择套牌"（例如结算界面），
     也不会在别的地方乱点。
+
+    抓图/判断之间用户可能已经喊停，所以**真正点下去之前再问一次**急停开关。
     """
+    if (should_abort or is_cancelled)():
+        return {"ok": False, "cancelled": True, "error": "收到取消请求，未点卡组"}
     try:
         point = deck_slot_point(index, config)
     except ValueError as exc:
@@ -676,6 +733,8 @@ def select_deck(index: int, *, capture: Optional[Callable] = None,
         return {"ok": False, "skipped": True, "plate_pixels": count,
                 "error": (f"第 {index} 格不像卡组（名牌文字 {count} 像素 < "
                           f"{DECK_PLATE_MIN_PIXELS}），已跳过不点")}
+    if (should_abort or is_cancelled)():
+        return {"ok": False, "cancelled": True, "error": "收到取消请求，未点卡组"}
     (click_at_fn or click_at)(*point)
     if logger:
         logger(f"已选择第 {index} 个卡组 {point}")
@@ -683,13 +742,30 @@ def select_deck(index: int, *, capture: Optional[Callable] = None,
             "message": f"已点第 {index} 个卡组 {point}"}
 
 
-def select_deck_if_configured(*, settings: Optional[dict] = None, **kwargs) -> dict:
-    """按 ui_config.json 的 `battle_entry.deck_index` 选卡组；没配置就跳过。"""
+def select_deck_if_configured(*, settings: Optional[dict] = None,
+                              attempts: int = 3, wait: float = 0.3,
+                              sleep: Optional[Callable] = None,
+                              **kwargs) -> dict:
+    """按 ui_config.json 的 `battle_entry.deck_index` 选卡组；没配置就跳过。
+
+    名牌还没画出来时（`skipped`）短重试几次：调用方原来靠「进界面后先等 2 秒」
+    兜住动画，现在那 2 秒去掉了，这里用 3 × 0.3s 重抓代替。重试只重新抓图
+    判断、不会点任何东西，硬件/界面不对时行为与以前一致（跳过 + 报原因）。
+    """
     cfg = settings if settings is not None else battle_entry_settings()
     index = cfg.get("deck_index")
     if not index:
         return {"ok": True, "skipped": True, "message": "没有配置自动选卡组，跳过"}
-    return select_deck(int(index), **kwargs)
+    sleep = sleep or time.sleep
+    total = max(1, int(attempts))
+    result = None
+    for attempt in range(total):
+        result = select_deck(int(index), **kwargs)
+        if result.get("ok") or not result.get("skipped"):
+            return result
+        if attempt < total - 1:
+            sleep(max(0.0, float(wait)))
+    return result
 
 
 # ================================================================ 一键进入对战
@@ -717,13 +793,17 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
     任何一步识别不出来都只点画面中心，到超时就退出并说明原因 —— **绝不盲点**。
     默认 `click_start=False`：点「开始」等于开始排队，交给调用方（FSM 的
     `ChoosingHeroAction` 会先做「段位目标」判定，顺序不能反）。
+
+    **可随时取消**：`should_abort` 缺省读全局急停开关（`request_cancel()` /
+    `hsctl cancel`），置位后下一次轮询（≤ interval）就停手，且不会再点任何
+    坐标；返回 `stage="aborted"`。
     """
     capture = capture or capture_client_frame
     click_at_fn = click_at_fn or click_at
     start_clicker = start_clicker or click_start_button
     sleep = sleep or time.sleep
     clock = clock or time.monotonic
-    abort = should_abort or (lambda: False)
+    abort = should_abort or is_cancelled
     log = logger or (lambda text: None)
     steps = []
     started = clock()
@@ -756,43 +836,61 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
     else:
         record("launch", None, "炉石已在运行")
 
-    # ② 等主界面（认出「传统对战」）
-    waited = wait_for_main_menu(timeout=main_menu_timeout, interval=interval,
-                                capture=capture, click_at_fn=click_at_fn,
-                                sleep=sleep, clock=clock,
-                                should_abort=abort, logger=log, config=config)
-    if not waited["ok"]:
-        record("wait_main_menu", None, waited["message"])
-        stage = "aborted" if waited["reason"] == "aborted" else "timeout_main_menu"
-        return done(False, stage, waited["message"])
-    point = waited["ui"]["traditional"]["point"]
-    record("wait_main_menu", point, waited["message"])
+    # ② 已经停在「选择套牌」界面就直接从选卡组接手
+    #    这里必须**先认一眼当前界面**：原来一律先等主界面，如果人已经站在选套牌
+    #    界面，就会白等 180 秒、期间还一遍遍点画面中心（用户 2026-10-17 反馈的
+    #    「让它取消它还在点」也是这条路上的）。认到选套牌就直接跳过 ②③④。
+    here = _identify_now(capture, config)
+    if here is not None and here.get("state") == "deck_select":
+        ui = here
+        record("already_deck_select", ui["deck_title"]["point"],
+               "当前已经在选择套牌界面，跳过「等主界面 → 点传统对战」")
+        log("当前已在选择套牌界面，直接选卡组。")
+    else:
+        # ② 等主界面（认出「传统对战」）
+        waited = wait_for_main_menu(timeout=main_menu_timeout, interval=interval,
+                                    capture=capture, click_at_fn=click_at_fn,
+                                    sleep=sleep, clock=clock,
+                                    should_abort=abort, logger=log, config=config)
+        if not waited["ok"]:
+            record("wait_main_menu", None, waited["message"])
+            stage = ("aborted" if waited["reason"] == "aborted"
+                     else "timeout_main_menu")
+            return done(False, stage, waited["message"])
+        point = waited["ui"]["traditional"]["point"]
+        record("wait_main_menu", point, waited["message"])
 
-    # ③ 点「传统对战」
-    if abort():
-        return done(False, "aborted", "收到停止请求，未点击「传统对战」")
-    click_at_fn(*point)
-    record("click_traditional", point, "已点击「传统对战」（框内匹配到的位置）")
-    log(f"已点击「传统对战」{tuple(point)}，等待选择套牌界面……")
+        # ③ 点「传统对战」
+        if abort():
+            return done(False, "aborted", "收到停止请求，未点击「传统对战」")
+        click_at_fn(*point)
+        record("click_traditional", point, "已点击「传统对战」（框内匹配到的位置）")
+        log(f"已点击「传统对战」{tuple(point)}，等待选择套牌界面……")
 
-    # ④ 等「开始」按钮出现 = 已进入选择套牌界面
-    waited = wait_for_deck_select(timeout=deck_select_timeout, interval=interval,
-                                  capture=capture, click_at_fn=click_at_fn,
-                                  sleep=sleep, clock=clock,
-                                  should_abort=abort, logger=log, config=config)
-    if not waited["ok"]:
-        record("wait_deck_select", None, waited["message"])
-        stage = "aborted" if waited["reason"] == "aborted" else "timeout_deck_select"
-        return done(False, stage, waited["message"])
-    ui = waited["ui"]
-    record("wait_deck_select", ui["deck_title"]["point"], waited["message"])
+        # ④ 等「开始」按钮出现 = 已进入选择套牌界面
+        waited = wait_for_deck_select(timeout=deck_select_timeout,
+                                      interval=interval,
+                                      capture=capture, click_at_fn=click_at_fn,
+                                      sleep=sleep, clock=clock,
+                                      should_abort=abort, logger=log,
+                                      config=config)
+        if not waited["ok"]:
+            record("wait_deck_select", None, waited["message"])
+            stage = ("aborted" if waited["reason"] == "aborted"
+                     else "timeout_deck_select")
+            return done(False, stage, waited["message"])
+        ui = waited["ui"]
+        record("wait_deck_select", ui["deck_title"]["point"], waited["message"])
 
     # ⑤ 选卡组（可选，带单格保护）
     if deck_index:
         picked = select_deck(int(deck_index), capture=capture,
-                             click_at_fn=click_at_fn, logger=log, config=config)
+                             click_at_fn=click_at_fn, logger=log,
+                             should_abort=abort, config=config)
         record("select_deck", picked.get("at"),
                picked.get("message") or picked.get("error") or "")
+        if picked.get("cancelled"):
+            return done(False, "aborted", "收到取消请求，已停在「选卡组」这一步")
         if not picked.get("ok"):
             log(f"卡组没有点：{picked.get('error')}")
 

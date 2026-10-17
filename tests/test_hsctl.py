@@ -416,12 +416,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.console.posts(), [])
 
     def test_restart_hearthstone_with_yes_sends_confirm(self):
+        """--yes：派发后继续等到主界面，完成才返回 0。"""
         self.console.httpd.routes["/api/restart_hearthstone"] = {
-            "ok": True, "message": "已开始重启炉石"}
-        code, out, _ = run_cli([*self._base(), "restart-hearthstone", "--yes"])
+            "ok": True, "message": "已开始重启炉石（……等主界面）"}
+        finished = {"ok": True, "restart": {
+            "running": False, "stage": "main_menu", "ok": True,
+            "message": "已重启并到达主界面（「传统对战」可点）"}}
+        with unittest.mock.patch.object(hsctl.Ctx, "get",
+                                        return_value=finished):
+            code, out, _ = run_cli([*self._base(), "restart-hearthstone", "--yes"])
         self.assertEqual(code, hsctl.EXIT_OK)
         self.assertIn("已开始重启炉石", out)
+        self.assertIn("传统对战", out)
         self.assertEqual(self.console.posts()[-1][2], {"confirm": True})
+
+    def test_restart_hearthstone_reports_main_menu_timeout(self):
+        """进程起来了但没到主界面 = 失败（不能"派发即成功"）。"""
+        self.console.httpd.routes["/api/restart_hearthstone"] = {
+            "ok": True, "message": "已开始重启炉石"}
+        timed_out = {"ok": True, "restart": {
+            "running": False, "stage": "main_menu_timeout", "ok": False,
+            "message": "炉石已重启，但 180s 内没到主界面（最近一次匹配分 0.29）"}}
+        with unittest.mock.patch.object(hsctl.Ctx, "get",
+                                        return_value=timed_out):
+            code, out, _ = run_cli([*self._base(), "restart-hearthstone", "--yes"])
+        self.assertEqual(code, hsctl.EXIT_API)
+        self.assertIn("没到主界面", out)
+
+    def test_restart_hearthstone_no_wait_skips_polling(self):
+        self.console.httpd.routes["/api/restart_hearthstone"] = {
+            "ok": True, "message": "已开始重启炉石"}
+        with unittest.mock.patch.object(hsctl.Ctx, "get",
+                                        side_effect=AssertionError("不该轮询")):
+            code, out, _ = run_cli([*self._base(), "restart-hearthstone",
+                                    "--yes", "--no-wait"])
+        self.assertEqual(code, hsctl.EXIT_OK)
+        self.assertIn("已开始重启炉石", out)
 
     # ------------------------------------------------ 抓图（看画面）
     def test_screenshot_defaults_to_client_kind(self):

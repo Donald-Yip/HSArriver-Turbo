@@ -111,6 +111,36 @@ _keep_score_count = 0
 _rank_last_read = None
 _rank_last_phase = None
 
+# ---------------------------------------------------------------- 启动耗时
+# 用户反馈「浮窗点开始后按钮变了，但鼠标要等好一会才动」。启动链路里原先有几段
+# 固定等待（主界面 sleep 3s、选套牌 sleep 2s、界面识别 3s 一次），光看现象无法
+# 判断停在哪一步。这里给每个阶段打一行「进入对战 +x.xs：阶段」，一次自动化最多
+# 打几条；里程碑只在本轮启动后的 _START_LOG_LIMIT 秒内输出，避免长时间运行后误报。
+_START_T0 = None
+_START_MILESTONES = set()
+_START_LOG_LIMIT = 30.0
+
+
+def _start_milestone(label: str) -> None:
+    """记录并打印一条启动阶段耗时（同一阶段本轮只打一次）。"""
+    if _START_T0 is None or label in _START_MILESTONES:
+        return
+    elapsed = time.monotonic() - _START_T0
+    if elapsed > _START_LOG_LIMIT:
+        return
+    _START_MILESTONES.add(label)
+    try:
+        sys_print(f"[SYS] 进入对战 +{elapsed:.1f}s：{label}")
+    except Exception:
+        pass
+
+
+def _reset_start_milestones() -> None:
+    """每轮自动化开始：重新计时、清空已打过的阶段。"""
+    global _START_T0
+    _START_T0 = time.monotonic()
+    _START_MILESTONES.clear()
+
 
 def _automation_state():
     snapshot = refresh_snapshot()
@@ -539,7 +569,9 @@ def ChoosingHeroAction():
     if choose_hero_count >= 20:
         return FSM_ERROR
 
-    time.sleep(2)
+    # 只留一帧的 UI 稳定时间：原来固定等 2 秒，段位读取本身有重试（卡面没画出来
+    # 会重读），这里再死等只会把「点开始匹配」整体往后推。
+    time.sleep(0.2)
     # 排队前段位闸门（用户口径）：
     #   action=stop「上分停止」：读到名次已达标 → **不点**「开始匹配」，本局结束后停止；
     #   action=keep「控分」    ：读到名次比目标更靠前 → 进这一局后**开局即投降**，
@@ -556,6 +588,7 @@ def ChoosingHeroAction():
     except Exception as exc:
         action = ""
         warn_print(f"选择套牌界面段位检测失败（忽略，继续匹配）：{exc}")
+    _start_milestone("段位检测完成")
 
     if action == "stop":
         info_print(
@@ -588,6 +621,7 @@ def ChoosingHeroAction():
         warn_print(f"自动选卡组失败（忽略，继续匹配）：{exc}")
 
     click.run_hearthstone_action(click.match_opponent)
+    _start_milestone("已点「开始匹配」")
     time.sleep(1)
     return FSM_MATCHING
 
@@ -1026,8 +1060,10 @@ _POST_GAME_RANK_CONFIRM_WAIT = 0.6
 # 「选择套牌/选人」界面（点「开始匹配」之前）的名次检测：名次是**点完「开始」
 # 之后那一屏**才画出来的，实测要 ~3 秒，所以这里多试几次；读到名次就不点
 # 「开始匹配」，直接停在本局之后。
+# 重试间隔从 1.2s 缩到 0.6s：卡面还没画出来时照样能重读到，但不会让「点开始匹配」
+# 白等（用户反馈按开始后要等好一会鼠标才动）。
 _CHOOSING_HERO_RANK_READ_ATTEMPTS = 4
-_CHOOSING_HERO_RANK_RETRY_WAIT = 1.2
+_CHOOSING_HERO_RANK_RETRY_WAIT = 0.6
 # 「开始」按钮的 OCR 关键词与最低置信度（繁体/英文一并兜住）。
 _POST_GAME_START_KEYWORDS = ("开始", "開始", "Play")
 _POST_GAME_MIN_CONFIDENCE = 0.5
@@ -1346,8 +1382,9 @@ def _read_rank_target(attempts=None, wait=None, label="选择套牌界面",
                     会得出"未上传说"的错误结论）；
     strict        ：只认「整行就是数字」（见 is_pure_rank_text）；
     min_confidence：丢掉低于该置信度的 OCR 行；
-    confirm       ：读到数字后隔 _POST_GAME_RANK_CONFIRM_WAIT 再读一次，两次都
-                    读到数字才算数（防止把过渡画面里的误识别当名次）。
+    confirm       ：读数会触发动作（stop/keep）时，隔 _POST_GAME_RANK_CONFIRM_WAIT
+                    再读一次，两次都读到数字才算数（防止把过渡画面里的误识别当真）。
+                    不会触发动作的读数不复核——复核没有意义，还会拖慢「点开始匹配」。
     """
     global _rank_stop_triggered, _rank_stop_stop_reason, _rank_last_read
     global _rank_last_phase
@@ -1359,7 +1396,11 @@ def _read_rank_target(attempts=None, wait=None, label="选择套牌界面",
     total = _POST_GAME_RANK_READ_ATTEMPTS if attempts is None else int(attempts)
     interval = _POST_GAME_RANK_RETRY_WAIT if wait is None else float(wait)
     reading = _read_rank_with(total, interval, strict, min_confidence)
-    if confirm and reading.get("number") is not None:
+    if confirm and reading.get("number") is not None \
+            and _rank_action_for(reading, cfg):
+        # 只有这次读数**会触发动作**（上分停止 / 控分投降）才二次复核：复核的
+        # 目的就是「一次误识别不能停/投降」；不会触发动作的读数复核没有意义，
+        # 还会让「点开始匹配」白等 0.6s + 一次 OCR（用户反馈启动慢）。
         time.sleep(max(interval, _POST_GAME_RANK_CONFIRM_WAIT))
         again = read_rank_region(strict=strict,
                                  min_confidence=min_confidence)
@@ -1998,7 +2039,10 @@ def MainMenuAction():
     """
     print_out()
 
-    time.sleep(3)
+    # 只留一帧的 UI 稳定时间：能走到这里说明 _initial_fsm_state 已经认出主界面，
+    # enter_battle 自己会「识别 → 点中心 → 再识别」，原来固定等 3 秒纯属白等
+    # （用户反馈：点开始后鼠标要等好一会才动）。
+    time.sleep(0.2)
 
     import battle_entry
     result = battle_entry.enter_battle(
@@ -2006,6 +2050,7 @@ def MainMenuAction():
         should_abort=lambda: bool(quitting_flag or stop_after_current_game),
         logger=lambda text: sys_print(f"[SYS] {text}"))
     if result.get("ok"):
+        _start_milestone("已点「传统对战」并认出选套牌界面")
         return FSM_CHOOSING_HERO
     if result.get("stage") == "aborted":
         sys.exit(0)
@@ -2094,14 +2139,19 @@ def _initial_fsm_state():
         pass
     if log_state.game_entity_id != 0 and not log_state.is_end:
         if log_state.game_num_turns_in_play > 0:
+            _start_milestone("初始状态=对战中（Power.log）")
             return FSM_BATTLING
+        _start_milestone("初始状态=换牌（Power.log）")
         return FSM_CHOOSING_CARD
     state = get_screen.get_state()
+    _start_milestone(f"初始状态={state or FSM_MAIN_MENU}（屏幕识别）")
     return state if state else FSM_MAIN_MENU
 
 
 def AutoHS_automata():
     global FSM_state, quitting_flag
+
+    _reset_start_milestones()
 
     if get_screen.test_hs_available():
         hs_hwnd = get_screen.get_HS_hwnd()

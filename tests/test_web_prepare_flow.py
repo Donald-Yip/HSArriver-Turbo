@@ -88,7 +88,7 @@ class PrepareTests(unittest.TestCase):
         result = web_ui.api_prepare({})
 
         self.assertFalse(result["ok"])
-        self.assertIn("运行中", result["error"])
+        self.assertIn("启动中", result["error"])
 
     def test_status_exposes_prepared_flag(self):
         web_ui.CTRL.prepared = False

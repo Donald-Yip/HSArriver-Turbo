@@ -115,9 +115,20 @@ class RestartWorkerTests(unittest.TestCase):
         )
         return module
 
-    def _run(self, module, config=None):
+    def _fake_battle_entry(self, result=None):
+        """假的 battle_entry：只记一步 wait_main_menu，不回真屏幕。"""
+        calls = self.calls
+        return SimpleNamespace(
+            wait_for_main_menu=lambda **kwargs:
+            calls.append(("wait_main_menu",)) or (
+                result if result is not None
+                else {"ok": True, "state": "main_menu", "message": "已到主界面"}))
+
+    def _run(self, module, config=None, menu_result=None):
         with (
-            patch.dict("sys.modules", {"hs_restart": module}),
+            patch.dict("sys.modules", {
+                "hs_restart": module,
+                "battle_entry": self._fake_battle_entry(menu_result)}),
             patch.object(web_ui, "load_config",
                          return_value=config if config is not None
                          else {"log_root": "C:/Logs"}),
@@ -133,11 +144,28 @@ class RestartWorkerTests(unittest.TestCase):
     def test_runs_every_step_in_order(self):
         logger = self._run(self._fake_hs_restart())
 
-        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch"],
+        # 重启的完成判据是「认到主界面」：launch 之后必须还有 wait_main_menu。
+        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch",
+                          "wait_main_menu"],
                          [call[0] for call in self.calls])
         self.assertEqual("C:/Logs", self.calls[0][1])
-        self.assertEqual(Path("C:/Hearthstone.exe"), self.calls[-1][1])
+        self.assertEqual(Path("C:/Hearthstone.exe"), self.calls[4][1])
         self.assertTrue(any("炉石已重新启动" in msg for msg in self._messages(logger)))
+        self.assertTrue(any("主界面" in msg for msg in self._messages(logger)))
+
+    def test_fails_when_main_menu_never_shows_up(self):
+        """炉石进程起来了但一直没到主界面：不能谎报重启成功。"""
+        logger = self._run(
+            self._fake_hs_restart(),
+            menu_result={"ok": False, "state": "unknown",
+                         "message": "等待主界面（传统对战）超时（最近一次匹配分 0.29）"})
+
+        self.assertEqual("wait_main_menu", self.calls[-1][0])
+        self.assertEqual("WARN", logger.call_args_list[-1].args[0])
+        self.assertIn("没到主界面", logger.call_args_list[-1].args[1])
+        # 状态要对得上：没成功就不能是 running
+        self.assertFalse(web_ui._restart_snapshot()["running"])
+        self.assertFalse(web_ui._restart_snapshot()["ok"])
 
     def test_stops_a_running_automation_before_touching_anything(self):
         def fake_stop(body):
@@ -151,7 +179,7 @@ class RestartWorkerTests(unittest.TestCase):
 
         stop.assert_called_once_with({"mode": "now"})
         self.assertEqual(["resolve", "stop", "fsm_init", "kill", "clear",
-                          "launch"],
+                          "launch", "wait_main_menu"],
                          [call[0] for call in self.calls])
         self.assertTrue(any("自动化已停止" in msg for msg in self._messages(logger)))
 
@@ -220,7 +248,8 @@ class RestartWorkerTests(unittest.TestCase):
 
         logger = self._run(module)
 
-        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch"],
+        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch",
+                          "wait_main_menu"],
                          [call[0] for call in self.calls])
         self.assertTrue(any("继续尝试把炉石拉起来" in msg
                             for msg in self._messages(logger)))

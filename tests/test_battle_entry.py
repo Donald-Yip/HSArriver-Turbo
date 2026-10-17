@@ -293,6 +293,33 @@ class DeckSlotGuardTests(unittest.TestCase):
         self.assertTrue(hit["ok"])
         self.assertEqual([(727, 750)], clicker.clicks)
 
+    def test_configured_deck_retries_while_the_plates_are_not_drawn(self):
+        """去掉「进界面先等 2 秒」后：名牌还没画出来要短重试，而不是直接不选。"""
+        config = make_config()
+        clicker, clock = Recorder(), FakeClock()
+        result = be.select_deck_if_configured(
+            settings={"deck_index": 8},
+            capture=sequence_capture([blank_frame(),
+                                      deck_select_frame(config)]),
+            click_at_fn=clicker, sleep=clock.sleep, config=config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(0.3, clock.slept)
+        self.assertEqual([(727, 750)], clicker.clicks)
+
+    def test_configured_deck_gives_up_after_the_short_retries(self):
+        """一直画不出来：重试 3 次后按原逻辑跳过，一次都不点。"""
+        clicker, clock = Recorder(), FakeClock()
+        result = be.select_deck_if_configured(
+            settings={"deck_index": 8},
+            capture=lambda config=None: (blank_frame(), None),
+            click_at_fn=clicker, sleep=clock.sleep, config=make_config())
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["skipped"])
+        self.assertEqual([], clicker.clicks)
+        self.assertEqual(0.6, clock.slept)
+
 
 # ================================================================ ⑥ 流程不乱点
 class FlowSafetyTests(unittest.TestCase):
@@ -324,7 +351,10 @@ class FlowSafetyTests(unittest.TestCase):
         clicker, clock = Recorder(), FakeClock()
         result = be.enter_battle(
             deck_index=8, click_start=False, window_present=lambda: True,
+            # 多一帧：enter_battle 会先抓一帧判断"是不是已经站在选套牌界面"
+            # （是就直接从选卡组接手，不再等主界面也不会点画面中心）。
             capture=sequence_capture([main_menu_frame(config),
+                                      main_menu_frame(config),
                                       deck_select_frame(config)]),
             click_at_fn=clicker, sleep=clock.sleep, clock=clock, interval=3.0,
             main_menu_timeout=30.0, deck_select_timeout=30.0, config=config)
@@ -346,6 +376,35 @@ class FlowSafetyTests(unittest.TestCase):
         self.assertFalse(aborted["ok"])
         self.assertEqual("aborted", aborted["stage"])
         self.assertEqual([], clicker.clicks, "收到停止请求后一次都不该点")
+
+    def test_polling_is_fast_but_center_clicks_stay_slow(self):
+        """0.5s 轮询：界面画出来 1 秒内就走；但点中心仍只每 3 秒最多一下。"""
+        config = make_config()
+        clicker, clock = Recorder(), FakeClock()
+        result = be.wait_for_main_menu(
+            timeout=10.0, interval=0.5,
+            capture=sequence_capture([blank_frame(), blank_frame(),
+                                      main_menu_frame(config)]),
+            click_at_fn=clicker, sleep=clock.sleep, clock=clock, config=config)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1.0, clock.slept, "不能再等满一个 3 秒轮询")
+        # t=0 空白 → 点一次中心；t=0.5 还没到 3 秒 → 不点
+        self.assertEqual([be.CENTER_DISMISS_POINT], clicker.clicks)
+
+    def test_timeout_keeps_the_three_second_click_cadence(self):
+        """0.5s 轮询下超时路径也不连点：2 秒里只点 1 下中心。"""
+        clicker, clock = Recorder(), FakeClock()
+        result = be.wait_for_main_menu(
+            timeout=2.0, interval=0.5,
+            capture=lambda config=None: (blank_frame(), None),
+            click_at_fn=clicker, sleep=clock.sleep, clock=clock,
+            config=make_config())
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("timeout_main_menu", result["reason"])
+        self.assertEqual([be.CENTER_DISMISS_POINT], clicker.clicks)
+        self.assertEqual(2.0, clock.slept)
 
 
 if __name__ == "__main__":
