@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HSLegendArriver 安装与使用</title>
+<style>
+  :root{
+    --ink:#1b1d21; --ink-2:#3d434b; --ink-3:#6b7280;
+    --line:#e2e5ea; --line-2:#eef0f4;
+    --bg:#ffffff; --bg-2:#f7f8fa; --code-bg:#f5f6f8;
+    --accent:#1f4e79; --accent-2:#2f6da3;
+    --ok:#1a7f4b; --warn:#a8620a; --bad:#b3261e;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.75 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{display:flex; max-width:1180px; margin:0 auto; gap:40px; padding:0 24px}
+
+  /* 目录 */
+  nav{
+    position:sticky; top:0; align-self:flex-start; flex:0 0 208px;
+    max-height:100vh; overflow:auto; padding:28px 0 40px;
+  }
+  nav .nav-t{font-size:12px; letter-spacing:.12em; color:var(--ink-3); margin:0 0 10px}
+  nav a{
+    display:block; padding:5px 10px; margin-left:-10px; border-radius:6px;
+    color:var(--ink-2); text-decoration:none; font-size:14px;
+  }
+  nav a:hover{background:var(--bg-2); color:var(--accent)}
+  nav a.sub{padding-left:22px; font-size:13px; color:var(--ink-3)}
+
+  main{flex:1; min-width:0; padding:28px 0 96px}
+
+  header.hd{border-bottom:1px solid var(--line); padding-bottom:22px; margin-bottom:34px}
+  header.hd h1{font-size:28px; line-height:1.35; margin:0 0 10px; letter-spacing:.01em}
+  header.hd p{margin:0; color:var(--ink-2)}
+  .meta{margin-top:14px; font-size:13px; color:var(--ink-3)}
+  .meta code{font-size:12.5px}
+
+  h2{
+    font-size:21px; margin:52px 0 14px; padding-top:6px;
+    border-top:1px solid var(--line-2);
+  }
+  h2:first-of-type{border-top:0; margin-top:36px}
+  h3{font-size:16.5px; margin:28px 0 8px}
+  p{margin:10px 0}
+  ul,ol{margin:10px 0; padding-left:22px}
+  li{margin:5px 0}
+
+  code{
+    font-family:ui-monospace,Consolas,"Cascadia Mono","Courier New",monospace;
+    font-size:13.5px; background:var(--code-bg); border:1px solid var(--line-2);
+    padding:1px 5px; border-radius:4px; color:#243b53;
+  }
+  pre{
+    background:var(--code-bg); border:1px solid var(--line-2); border-radius:8px;
+    padding:14px 16px; overflow:auto; margin:12px 0;
+  }
+  pre code{background:none; border:0; padding:0; font-size:13px; line-height:1.65}
+  pre .c{color:var(--ink-3)}
+
+  table{border-collapse:collapse; width:100%; margin:14px 0; font-size:14.5px}
+  th,td{border:1px solid var(--line); padding:9px 11px; text-align:left; vertical-align:top}
+  th{background:var(--bg-2); font-weight:600; white-space:nowrap}
+  td code{white-space:nowrap}
+
+  .box{border-left:3px solid var(--accent); background:var(--bg-2); padding:12px 16px; margin:16px 0; border-radius:0 6px 6px 0}
+  .box.warn{border-left-color:var(--warn)}
+  .box.bad{border-left-color:var(--bad)}
+  .box .t{font-weight:600; display:block; margin-bottom:2px}
+  .box p{margin:4px 0}
+
+  .steps{counter-reset:s; list-style:none; padding-left:0}
+  .steps>li{counter-increment:s; position:relative; padding-left:38px; margin:22px 0}
+  .steps>li::before{
+    content:counter(s); position:absolute; left:0; top:1px;
+    width:25px; height:25px; border-radius:50%; background:var(--accent); color:#fff;
+    font-size:13px; font-weight:600; display:flex; align-items:center; justify-content:center;
+  }
+  .steps>li>b{display:block; margin-bottom:2px}
+
+  .chk{color:var(--ok); font-weight:600}
+  .x{color:var(--bad); font-weight:600}
+
+  footer{margin-top:64px; padding-top:18px; border-top:1px solid var(--line); color:var(--ink-3); font-size:13px}
+
+  @media (max-width:900px){
+    .wrap{display:block; padding:0 18px}
+    nav{position:static; max-height:none; padding:18px 0 0; border-bottom:1px solid var(--line-2); margin-bottom:8px}
+    nav a{display:inline-block; padding:4px 8px}
+    main{padding-top:8px}
+  }
+  @media print{
+    nav{display:none}
+    .wrap{display:block; max-width:none}
+    pre,table,.box{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav>
+  <p class="nav-t">目录</p>
+  <a href="#what">这是什么</a>
+  <a href="#before">装之前先确认</a>
+  <a href="#install">安装</a>
+  <a href="#install-py" class="sub">1 装 Python 3.12</a>
+  <a href="#install-dep" class="sub">2 装依赖</a>
+  <a href="#install-run" class="sub">3 第一次启动</a>
+  <a href="#install-task" class="sub">4 免 UAC 常驻</a>
+  <a href="#install-pin" class="sub">5 固定解释器</a>
+  <a href="#setup">首次配置</a>
+  <a href="#setup-account" class="sub">1 填账号</a>
+  <a href="#setup-log" class="sub">2 填日志目录</a>
+  <a href="#setup-calib" class="sub">3 校准</a>
+  <a href="#setup-check" class="sub">4 环境自检</a>
+  <a href="#play">开始打</a>
+  <a href="#daily">日常操作</a>
+  <a href="#optional">可选开关</a>
+  <a href="#concede">两套认输</a>
+  <a href="#trouble">出问题先看这里</a>
+  <a href="#files">文件都在哪</a>
+  <a href="#portable">换机器 / 交给 agent</a>
+  <a href="#cmd">命令速查</a>
+</nav>
+
+<main>
+
+<header class="hd">
+  <h1>HSLegendArriver 安装与使用</h1>
+  <p>从一台干净的 Windows 机器开始，到能正常挂机为止。</p>
+  <div class="meta">
+    适用于 2026-10-17 之后的版本 · 命令都在 PowerShell 里执行 · 其它文档：
+    <code>README.md</code>（全量说明）、<code>docs/CLI.md</code>（命令手册）、
+    <code>docs/FEATURES.md</code>（功能目录）
+  </div>
+</header>
+
+<h2 id="what">这是什么</h2>
+<p>一个自动打炉石的脚本。它截取炉石盒子（HSAng）给出的 AI 推荐，用 OCR 认出动作，再模拟鼠标点出去；同时读炉石的 <code>Power.log</code> 确认自己的操作有没有生效。所有功能既能在网页控制台点，也能用命令行 <code>hsctl</code> 发。</p>
+<p>三个部件的关系：</p>
+<table>
+  <tr><th>部件</th><th>干什么</th><th>怎么开</th></tr>
+  <tr><td>控制台（<code>web_ui.py</code>）</td><td>常驻后台，是唯一的状态源；网页、命令行、浮窗都只是它的客户端</td><td><code>python web_ui.py</code></td></tr>
+  <tr><td>网页（<code>http://127.0.0.1:8765</code>）</td><td>所有开关、参数、校准、日志</td><td>启动控制台后自动打开</td></tr>
+  <tr><td>浮窗</td><td>游戏画面右上角的置顶小窗：实时日志、战绩、开始/停止/重启炉石</td><td>网页「日志浮窗」或 <code>hsctl overlay on</code></td></tr>
+</table>
+
+<h2 id="before">装之前先确认</h2>
+<table>
+  <tr><th>前提</th><th>为什么</th></tr>
+  <tr><td><b>Windows + Python 3.12（64 位）</b></td><td>OCR 后端 paddlepaddle 2.6.2 只有 3.12 及以下的轮子。装成 3.13 会「能启动、能点开始游戏，但一进对局就卡在换牌」</td></tr>
+  <tr><td><b>管理员权限启动</b></td><td>游戏不接受普通权限进程的鼠标注入。不提权的现象是「脚本在跑，但点了没反应」</td></tr>
+  <tr><td><b>炉石窗口设成 1920×1080，然后校准一次</b></td><td><b>窗口化就行，不必全屏</b>：走「选项 → 图形 → 分辨率」把窗口固定成 1920×1080（和代码里的坐标基准一致）。唯一别用的是「最大化窗口」——客户区不是 1920×1080，坐标基准错位时法术指定目标会一直失败重试</td></tr>
+  <tr><td><b>项目路径不含中文</b></td><td>OCR 与部分依赖对中文路径支持不好</td></tr>
+  <tr><td>炉石盒子开<b>简体中文</b>，左侧「打法参考A / 推荐打法」面板完整可见</td><td>脚本截的就是这一块。被别的窗口挡住就识别不到</td></tr>
+</table>
+<div class="box">
+  <span class="t">分辨率与缩放不限</span>
+  <p>4K 桌面配 150% 缩放也能跑：脚本按炉石客户区的实际几何实时换算所有坐标。<b>屏幕</b>分辨率与缩放都随意。</p>
+  <p>要固定的是<b>炉石窗口自己的客户区 = 1920×1080</b>：和代码里的坐标基准一致，盒子面板（固定像素的独立窗口）也不会被挤出去。窗口化、全屏都行，<b>唯独别用「最大化窗口」</b>。</p>
+  <p>改完尺寸后打开校准窗口拖一次（<b>S</b> 保存），之后只要不换尺寸、不换机器就不用再校准。</p>
+</div>
+
+<h2 id="install">安装</h2>
+
+<ol class="steps">
+<li id="install-py">
+  <b>装 Python 3.12</b>
+  <p>到 <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a> 下 <b>Python 3.12</b>，安装时勾上 <code>Add python.exe to PATH</code>。装完验证：</p>
+<pre><code>python --version</code></pre>
+  <p>必须是 <code>Python 3.12.x</code>。如果显示 3.13 或别的版本，说明机器上有多个 Python——后面每条命令都要写 3.12 那个的完整路径（例如 <code>C:\Python312\python.exe</code>）。用 conda 的话：</p>
+<pre><code>conda create -n HTL python=3.12 -y
+conda activate HTL</code></pre>
+</li>
+
+<li id="install-dep">
+  <b>装依赖</b>
+  <p>在项目根目录打开 PowerShell：</p>
+<pre><code>pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple</code></pre>
+  <p>里面有 PaddleOCR 和 PaddlePaddle，首次要下几百 MB，慢是正常的。装完验证：</p>
+<pre><code>python -c "import cv2, paddleocr, win32api, keyboard; print('ok')"</code></pre>
+  <p>打印 <code>ok</code> 就算齐了。</p>
+</li>
+
+<li id="install-run">
+  <b>第一次启动</b>
+  <p>用<b>管理员</b> PowerShell（开始菜单搜 PowerShell → 右键 → 以管理员身份运行）：</p>
+<pre><code>cd &lt;项目根目录&gt;
+python web_ui.py</code></pre>
+  <p>浏览器会在 1 秒内自动打开 <code>http://127.0.0.1:8765</code>。端口被占用时会自动往后顺延（8765–8785），以控制台窗口打印的地址为准。</p>
+  <p><span class="chk">验收</span>：网页打开、「运行概览」有数据。<b>这个 PowerShell 窗口别关</b>，关掉服务就停了。</p>
+</li>
+
+<li id="install-task">
+  <b>免 UAC 常驻（可选，建议做）</b>
+  <p>每次手动开管理员窗口很麻烦，也没法手机远程。注册一次计划任务，之后普通权限就能拉起最高权限的控制台：</p>
+<pre><code><span class="c"># 管理员 PowerShell 里跑一次</span>
+python hsctl.py serve install-task
+
+<span class="c"># 之后随时（普通窗口即可，不弹 UAC）</span>
+python hsctl.py serve start --via-task</code></pre>
+  <p><span class="chk">验收</span>：<code>python hsctl.py serve task-status</code> 显示任务存在且勾了最高权限。</p>
+</li>
+
+<li id="install-pin">
+  <b>固定解释器（换机器 / 换 agent 必做）</b>
+  <p>机器上 Python 不止一个时，别靠猜，让脚本自己找并记住：</p>
+<pre><code>python hsctl.py env discover                        <span class="c"># 列候选，逐个校验版本与依赖，不写盘</span>
+python hsctl.py env pin "C:\Python312\python.exe"   <span class="c"># 选合格的存进 log/env.json</span>
+python hsctl.py --json doctor                       <span class="c"># 复验，verdict 应为 env_ok</span></code></pre>
+  <p><code>log/env.json</code> 是本机专属配置，不进仓库。之后无论用哪个 Python 跑 <code>hsctl</code>，都会自动切到合格的那个解释器。</p>
+</li>
+</ol>
+
+<h2 id="setup">首次配置</h2>
+<p>打开网页，从上往下做这四件。</p>
+
+<h3 id="setup-account">1. 填账号</h3>
+<p>「基础配置」→ <b>用户 ID</b>：填当前战网的<b>完整昵称，含 <code>#编号</code></b>，例如 <code>异灵术#54321</code>。</p>
+<div class="box warn">
+  <span class="t">这一项填错，整局不出牌</span>
+  <p>脚本靠昵称区分「我」和「对手」。填错或不填，会把整局都当成对手回合，表现为一直不出牌。换账号一定要同步改。</p>
+</div>
+
+<h3 id="setup-log">2. 填日志目录</h3>
+<p>同一张卡片里填炉石的 <code>Logs</code> 文件夹，例如 <code>D:\Hearthstone\Logs</code>，点旁边的「检测」验证。</p>
+<p>两个输入框失去焦点时会自动保存，不用找保存按钮；自动化运行期间不可修改。</p>
+
+<h3 id="setup-calib">3. 校准（只需一次）</h3>
+<p>「校准区域」卡片 →「打开校准窗口（屏幕上）」。一共 <b>12 个目标</b>：8 个截图区域 + 4 个模式点击点（模式按钮、狂野、标准、休闲）。</p>
+<table>
+  <tr><th>操作</th><th>说明</th></tr>
+  <tr><td>对齐</td><td>鼠标拖框。第一块是盒子「打法参考A」面板，拖对后提示条变绿并显示「已检测到盒子面板」</td></tr>
+  <tr><td>切换目标</td><td>按 <code>Tab</code>，或直接点目标条里的一行</td></tr>
+  <tr><td>保存</td><td>按 <code>S</code>，或点网页上「保存全部区域」（12 个一起存）</td></tr>
+  <tr><td>退出</td><td>点「退出」或按 <code>Esc</code></td></tr>
+</table>
+<p>换分辨率、改窗口大小、换盒子皮肤之后要重新校准。窗口位置移动<b>不用</b>重新校准——框会跟着炉石窗口走。</p>
+
+<h3 id="setup-check">4. 看环境自检</h3>
+<p>页面顶部「环境自检」每项一行：</p>
+<table>
+  <tr><td><span class="chk">✅</span></td><td>达标</td></tr>
+  <tr><td><span style="color:var(--warn);font-weight:600">⚠️</span></td><td>和推荐值不同，但还能跑</td></tr>
+  <tr><td><span class="x">❌</span></td><td>不满足，<b>必须先修</b>。缺依赖会直接给出 pip 命令</td></tr>
+</table>
+<p>没有 ❌，安装部分就结束了。</p>
+<p>其中「窗口化尺寸」这一项只在炉石<b>窗口化</b>时出现：<b>✅ 窗口化 1920×1080</b> 就是标准配置；显示 <b>⚠️ 窗口化 1600×900（基准 1920×1080）</b> 表示还能跑，但建议把窗口改成 1920×1080 后重新校准。全屏时这一项不显示。</p>
+
+<h2 id="play">开始打</h2>
+
+<h3>第一步：准备</h3>
+<p>点「<b>开始运行（准备）</b>」。它只做两件事：打开右上角日志浮窗、把炉石切到前台，<b>不会自动开打</b>。</p>
+<p>检查浮窗状态行里的「账号」是不是<b>匹配</b>。不是的话回上一步改用户 ID。</p>
+
+<h3>第二步：开始对战</h3>
+<p>点「<b>开始对战</b>」（或浮窗上的同名按钮），二次确认后开打。</p>
+<p>从按下到鼠标第一次动是 1–3 秒：先认「传统对战」/选套牌界面，再点卡组格，然后进换牌。日志里会有 <code>[SYS] 进入对战 +x.xs：…</code> 的阶段分解，慢的时候看这几行停在哪。</p>
+
+<h3>第三步：怎么停</h3>
+<table>
+  <tr><th>方式</th><th>什么时候用</th></tr>
+  <tr><td><b>Ctrl+Q</b></td><td>任何时候按都能停，包括正在点「进对战」的过程中（热键注册在控制台进程里，控制台没跑时无效）</td></tr>
+  <tr><td>「立即停止」/ <code>hsctl stop</code></td><td>网页上点，立刻停</td></tr>
+  <tr><td>「本局结束后停止」</td><td>手里这局还在打，不想弃</td></tr>
+  <tr><td><code>hsctl cancel</code></td><td>和 Ctrl+Q 同一条通道，给命令行 / agent 用</td></tr>
+</table>
+
+<h2 id="daily">日常操作</h2>
+<p>同一个功能三处都能到，认一个顺手的就行。</p>
+<table>
+  <tr><th>要做的事</th><th>网页</th><th>浮窗</th><th>命令行</th></tr>
+  <tr><td>开始打</td><td>开始对战</td><td>开始对战</td><td><code>hsctl start</code></td></tr>
+  <tr><td>暂停 / 继续</td><td>立即停止</td><td>中止 / 恢复</td><td><code>hsctl stop</code></td></tr>
+  <tr><td>打完这局再停</td><td>本局结束后停止</td><td>本局结束后停止</td><td><code>hsctl stop --after-game</code></td></tr>
+  <tr><td>换自动选的卡组</td><td>基础配置</td><td>—</td><td><code>hsctl deck 3</code></td></tr>
+  <tr><td>切对战模式</td><td>—</td><td>—</td><td><code>hsctl mode wild</code></td></tr>
+  <tr><td>改延时</td><td>延时设置</td><td>—</td><td><code>hsctl delays set ...</code></td></tr>
+  <tr><td>开浮窗</td><td>日志浮窗</td><td>—</td><td><code>hsctl overlay on</code></td></tr>
+  <tr><td>重启炉石</td><td>—</td><td>重启炉石</td><td><code>hsctl restart-hearthstone</code></td></tr>
+  <tr><td>看状态</td><td>运行概览</td><td>五行状态</td><td><code>hsctl status</code></td></tr>
+</table>
+
+<h3>浮窗上的按钮</h3>
+<table>
+  <tr><th>按钮</th><th>作用</th></tr>
+  <tr><td>开始对战 / 中止（恢复）</td><td>开始或暂停自动化</td></tr>
+  <tr><td>本局结束后停止</td><td>打完当前这局再停；再点一次取消</td></tr>
+  <tr><td>保存日志</td><td>另存一份对战日志到 <code>logs\</code></td></tr>
+  <tr><td>校准</td><td>开 / 关屏幕上的校准窗口（和网页那个是同一个）</td></tr>
+  <tr><td>打开日志 / 清理日志</td><td>用资源管理器打开日志位置 / 一键清掉脚本日志</td></tr>
+  <tr><td>重启炉石</td><td>会先弹确认：停自动化 → 结束 <code>Hearthstone.exe</code> → 清空日志目录（保留 <code>Log.config</code>）→ 重新拉起，<b>认到主界面才算成功</b></td></tr>
+  <tr><td>退出浮窗</td><td>只关窗口，脚本继续跑。关掉后会回到「未就绪」，再点网页上的「日志浮窗」能拉回来</td></tr>
+  <tr><td>退出脚本</td><td>停自动化并结束整个进程</td></tr>
+</table>
+<p>浮窗只移动鼠标、不点击，不会干扰出牌；标题行右侧有「最小化」可以把整个浮窗折叠成一条。</p>
+
+<h2 id="optional">可选开关</h2>
+<p>默认关着的都不影响第一次跑通，按需要开。</p>
+<table>
+  <tr><th>卡片</th><th>默认</th><th>干什么</th></tr>
+  <tr><td>存活检测</td><td><b>开</b></td><td>每个循环确认炉石进程还在、对局中日志还在更新；判死立即告警并停止，不空转。日志停滞 120s 告警、300s 自动停止</td></tr>
+  <tr><td>中断重启</td><td>关</td><td>日志超过设定秒数（默认 300s）不更新 → 重启炉石 + 重开一局。默认 10 分钟内最多重启 3 次</td></tr>
+  <tr><td>自动投降（胜率）</td><td>关</td><td>盒子 AI 胜率低于阈值（默认 10%）且连续 3 回合都低 → 认输进下一局</td></tr>
+  <tr><td>卡组识别投降</td><td>关</td><td>认出对面是哪套卡组就立刻投，见下一节</td></tr>
+  <tr><td>段位目标</td><td>关</td><td>打到设定段位（或传说某名次）就停，不打断正在进行的一局</td></tr>
+  <tr><td>活人感</td><td>关</td><td>操作后用随机延时（0.5–3s），并在手牌区随手悬停；对手出新随从会移上去停一停。只移动鼠标，不点击</td></tr>
+  <tr><td>定时任务</td><td>—</td><td>设开始与结束时间；到点收工前会先等本局打完</td></tr>
+</table>
+
+<h2 id="concede">两套认输</h2>
+<p>两个开关互相独立，任一命中都会投降，别混：</p>
+<table>
+  <tr><th></th><th>自动投降（胜率）</th><th>卡组识别投降</th></tr>
+  <tr><td>触发条件</td><td>盒子 AI 胜率持续偏低</td><td>对面出现了你配置的特征牌（或满足你写的条件组合）</td></tr>
+  <tr><td>怎么配</td><td>填阈值和连续回合数</td><td>建「卡组库」，每套写若干特征牌，用「与 / 或 / 非」组合，可任意层嵌套</td></tr>
+  <tr><td>判谁</td><td>全局状态</td><td><b>只判对方</b>：自己手里有同名卡永远不会触发</td></tr>
+  <tr><td>能否调试</td><td>看浮窗「投降检测」行</td><td><code>hsctl surrender check</code> 列对方职业 + 每条条件的 ✓/✗</td></tr>
+</table>
+<p>卡组识别投降的三条规则：</p>
+<ul>
+  <li>「打出来」「亮出来」「开局生效的全局卡」都算数。裂魂者阿扎莉娜这类开局生效的卡永远打不出来，脚本从开局日志里抓。</li>
+  <li>对手回合也判，对方一打出来就投，不用等自己回合。</li>
+  <li>对局中热保存时，如果这套规则<b>当场就能命中</b>，会先问一次再写盘。</li>
+</ul>
+<p>卡名直接打中文，会弹候选卡；写错字会自动纠正（<code>阿莉扎娜</code> → <code>阿扎莉娜</code>）。</p>
+
+<h2 id="trouble">出问题先看这里</h2>
+<table>
+  <tr><th>现象</th><th>多半是</th><th>怎么办</th></tr>
+  <tr><td>脚本在跑，但<b>点了没反应</b></td><td>没用管理员权限启动</td><td>重开一个管理员 PowerShell 再 <code>python web_ui.py</code>；或装计划任务后用 <code>serve start --via-task</code></td></tr>
+  <tr><td>进对局后<b>卡在换牌</b>、识别不工作</td><td>Python 不是 3.12</td><td>看「环境自检」第一项；用 <code>hsctl env pin</code> 固定合格的解释器</td></tr>
+  <tr><td><b>一直不出牌</b></td><td>用户 ID 没带 <code>#编号</code>，或换了账号没改</td><td>填完整战网昵称；浮窗「账号」行应显示匹配</td></tr>
+  <tr><td>点击<b>整体偏掉</b>、老是点空</td><td>炉石用了「最大化窗口」、窗口尺寸不是 1920×1080，或 ROI 是很久以前在别的界面量的</td><td>把窗口设成 1920×1080（别用最大化），再打开校准窗口重拖一次保存</td></tr>
+  <tr><td>校准框跑到屏幕外、还拖不动</td><td>当初在炉石<b>最小化</b>时保存的（标记是客户区，值其实是屏幕坐标）</td><td>打开校准窗口会自动识别并复原位置，拖好按 <code>S</code></td></tr>
+  <tr><td>浮窗状态和游戏<b>对不上</b></td><td>上一局残留的 <code>Power.log</code></td><td>点浮窗「重启炉石」，再重新开始对战</td></tr>
+  <tr><td>按 <b>Ctrl+Q 没反应</b></td><td>控制台没在跑，热键没注册</td><td><code>python hsctl.py status</code> 确认控制台在；不在就 <code>serve start --via-task</code></td></tr>
+  <tr><td>提示<b>端口连不上</b></td><td>控制台换到 8766 等别的端口了</td><td>看控制台窗口打印的地址，或 <code>hsctl --json doctor</code></td></tr>
+  <tr><td>卡组识别投降<b>不投</b></td><td>条件类型选错（对面那张是「亮出/开局生效」不是「打出」）</td><td><code>hsctl surrender check</code> 看每条 ✓/✗，改成 <code>played_or_revealed</code> 或 <code>start_of_game</code></td></tr>
+  <tr><td>规则一保存就<b>立刻投降</b></td><td>这套规则在当前这局已经成立</td><td>属正常。调规则时先 <code>surrender off</code>，配好再 <code>on</code></td></tr>
+  <tr><td>段位目标不生效</td><td>段位数字没校准，或功能没开</td><td>校准窗口 <code>Tab</code> 到「段位数字（名次）」拖好保存；网页「段位目标」里开启</td></tr>
+  <tr><td>OCR 报错 / 缺依赖</td><td>依赖没装全</td><td>看「环境自检」的 ❌ 项，它会给出 pip 命令</td></tr>
+</table>
+
+<div class="box">
+  <span class="t">一条命令先自诊</span>
+  <p>不知道该查哪儿时：<code>python hsctl.py --json doctor</code>。它一条命令回答环境对不对、控制台在不在跑、权限够不够，并直接给出下一步该跑什么。</p>
+</div>
+
+<h2 id="files">文件都在哪</h2>
+<table>
+  <tr><th>文件</th><th>内容</th><th>能不能手改</th></tr>
+  <tr><td><code>ui_config.json</code></td><td>你的全部配置：账号、日志目录、延时可、各开关、校准坐标、投降规则</td><td>建议通过网页改；手改要保证 JSON 合法</td></tr>
+  <tr><td><code>log/env.json</code></td><td>本机合格的 Python 解释器路径（本机专属，不进仓库）</td><td>用 <code>hsctl env pin</code> 写</td></tr>
+  <tr><td><code>log/ui_port.txt</code></td><td>控制台端口、pid、自停 token</td><td>别动，删了会影响停止/重启</td></tr>
+  <tr><td><code>ui_log_last.txt</code></td><td>运行日志（超过 2 MB 自动裁到最近 800 行）</td><td>可以删</td></tr>
+  <tr><td><code>logs\对战日志_*.txt</code></td><td>浮窗「保存日志」另存的对战日志</td><td>可以删；浮窗上有「清理日志」</td></tr>
+  <tr><td>炉石自己的 <code>Logs\</code></td><td><code>Power.log</code> 等游戏日志</td><td>「重启炉石」会清空它（保留 <code>Log.config</code>）</td></tr>
+</table>
+
+<h2 id="portable">换机器 / 交给 agent</h2>
+<p>换机器只有一件事要做：把解释器固定到新机器上。</p>
+<pre><code>python hsctl.py --json doctor
+python hsctl.py env discover
+python hsctl.py env pin "&lt;新机器上 3.12 的路径&gt;"
+python hsctl.py --json doctor     <span class="c"># verdict 应为 env_ok</span></code></pre>
+<p>交给本机 agent（WorkBuddy / DSH / Claude Code 等）时，最短闭环是四条：</p>
+<pre><code>python hsctl.py --json doctor     <span class="c"># 拿到 verdict + next_steps</span>
+<span class="c"># 照抄 next_steps 里的命令，把环境和控制台修好</span>
+python hsctl.py --json doctor     <span class="c"># 复验到 env_ok</span>
+python hsctl.py --json status     <span class="c"># 之后按需探活、干活</span></code></pre>
+<ul>
+  <li>命令一律加 <code>--json</code>：输出机器可读，错误也走 stdout，退出码可判断。</li>
+  <li>退出码：<code>0</code> 成功 · <code>1</code> 业务失败 · <code>2</code> 参数错误 · <code>3</code> 连不上控制台 · <code>4</code> 本机没有合格的 Python 环境。</li>
+  <li>控制台只绑 <code>127.0.0.1</code>，不做端口转发。</li>
+  <li><code>screenshot</code> 只抓图返回路径；判断界面的活交给人，别让 agent 自己读图下结论。</li>
+</ul>
+
+<h2 id="cmd">命令速查</h2>
+<pre><code><span class="c"># 状态与自检</span>
+python hsctl.py --json doctor        <span class="c"># 一条命令自诊（会话第一条）</span>
+python hsctl.py status               <span class="c"># 阶段 / 账号 / 战绩 / 参数</span>
+python hsctl.py log -f               <span class="c"># 实时跟随日志</span>
+python hsctl.py selfcheck            <span class="c"># 环境自检</span>
+
+<span class="c"># 控制台</span>
+python hsctl.py serve start --via-task
+python hsctl.py serve stop
+python hsctl.py serve task-status
+
+<span class="c"># 打一局</span>
+python hsctl.py prepare              <span class="c"># 开浮窗 + 切前台，不开打</span>
+python hsctl.py start                <span class="c"># 开打</span>
+python hsctl.py stop                 <span class="c"># 立刻停</span>
+python hsctl.py stop --after-game    <span class="c"># 打完这局再停</span>
+python hsctl.py cancel               <span class="c"># 急停（同 Ctrl+Q）</span>
+
+<span class="c"># 进对战 / 选卡组 / 切模式</span>
+python hsctl.py enter-battle --deck 6 --start
+python hsctl.py deck-click 6         <span class="c"># 秒级快选第 6 格</span>
+python hsctl.py mode wild
+
+<span class="c"># 认输</span>
+python hsctl.py concede now          <span class="c"># 手动投降（运行中可用）</span>
+python hsctl.py surrender            <span class="c"># 看卡组识别规则</span>
+python hsctl.py surrender check      <span class="c"># 这局的判定进度</span>
+python hsctl.py surrender on         <span class="c"># 打开总闸（off 关掉，卡组保留）</span>
+
+<span class="c"># 排查</span>
+python hsctl.py screenshot           <span class="c"># 抓一帧，返回路径</span>
+python hsctl.py ui                   <span class="c"># 现在在哪个界面</span>
+python hsctl.py regions              <span class="c"># 所有区域框画在图上</span>
+python hsctl.py card 神秘            <span class="c"># 查卡（本地，不联网）</span></code></pre>
+<p>完整参数见 <code>docs/CLI.md</code>，或 <code>python hsctl.py --help</code>。</p>
+
+<footer>
+  HSLegendArriver · 仅用于技术研究与代码交流，请勿用于商业用途。<br>
+  文档与当前版本可能有细微出入，以程序实际输出为准（<code>hsctl doctor</code> / 「环境自检」）。
+</footer>
+
+</main>
+</div>
+</body>
+</html>

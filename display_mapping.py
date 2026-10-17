@@ -81,6 +81,12 @@ ASPECT_TOLERANCE = 0.08
 # 炉石窗口太小会把它挤出屏幕，OCR 区域也没法同时装下面板和游戏 UI。
 MIN_CLIENT_SCALE = 0.5
 
+# 窗口样式里带标题栏 = 窗口化；全屏（独占/无边）没有标题栏。
+# 用样式判定而不是"客户区是否等于屏幕"，是因为窗口拖到别的显示器、
+# 或桌面缩放变化时尺寸会骗人，标题栏不会。
+WS_CAPTION = 0x00C00000
+GWL_STYLE = -16
+
 # 换算结果缓存时长（秒）：自动化循环里每帧都要换算，别每次都问 Win32。
 #
 # **事件驱动优先**：window_tracker 订阅了窗口移动/缩放事件，缓存一旦"动过"就
@@ -650,6 +656,41 @@ def ui_scale() -> float:
     if dpi <= 0:
         return 1.0
     return max(1.0, round(dpi / 96.0, 2))
+
+
+def classify_window_mode(style) -> str:
+    """按 Win32 窗口样式判模式：``fullscreen`` / ``windowed`` / ``unknown``。
+
+    纯函数（不碰窗口），方便测试。判据只有一条：有没有标题栏。
+    """
+    try:
+        return "windowed" if int(style) & WS_CAPTION else "fullscreen"
+    except Exception:
+        return "unknown"
+
+
+def window_mode(hwnd: int = 0) -> str:
+    """炉石现在是 ``fullscreen`` 还是 ``windowed``（读不到返回 ``unknown``）。
+
+    **为什么用样式判**：客户区尺寸会骗人（窗口最大化了、拖到另一块屏、
+    桌面缩放不同都可能是 1920×1080），标题栏不会。全屏（独占或无边）没有
+    ``WS_CAPTION``，窗口化一定有。
+
+    只用于自检提示，**不参与坐标换算**，也绝不抛异常。
+    """
+    if not hwnd:
+        try:
+            from get_screen import get_HS_hwnd
+            hwnd = int(get_HS_hwnd())
+        except Exception:
+            return "unknown"
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetWindowLongW.restype = ctypes.c_long
+        style = user32.GetWindowLongW(ctypes.c_void_p(int(hwnd)), GWL_STYLE)
+    except Exception:
+        return "unknown"
+    return classify_window_mode(style)
 
 
 def system_dpi() -> int:

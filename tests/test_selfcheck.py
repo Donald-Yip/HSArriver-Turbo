@@ -4,6 +4,7 @@
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import selfcheck
 
@@ -214,6 +215,40 @@ class RunChecksTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(1, result["warned"])
         self.assertIn("提示", result["summary"])
+
+
+class WindowedClientSizeTests(unittest.TestCase):
+    """窗口化时客户区必须是 1920×1080（只提示，不拦）。"""
+
+    def _items(self, width, height, mode):
+        import display_mapping
+
+        mapping = display_mapping.DisplayMapping(
+            hwnd=1, client=(0, 0, width, height), screen_left=0, screen_top=0)
+        with patch.object(display_mapping, "display_mapping",
+                          return_value=mapping), \
+                patch.object(display_mapping, "window_mode", return_value=mode):
+            items = selfcheck._client_mapping_items(None)
+        return {item["key"]: item for item in items}
+
+    def test_windowed_at_1920x1080_is_ok(self):
+        items = self._items(1920, 1080, "windowed")
+
+        self.assertEqual(selfcheck.STATUS_OK, items["client-windowed"]["status"])
+
+    def test_windowed_at_other_size_warns_without_blocking(self):
+        items = self._items(1600, 900, "windowed")
+        item = items["client-windowed"]
+
+        self.assertEqual(selfcheck.STATUS_WARN, item["status"])
+        self.assertFalse(item["required"], "只是口径建议，不该拦运行")
+        self.assertIn("1920×1080", item["hint"])
+        self.assertIn("1600×900", item["detail"])
+
+    def test_fullscreen_has_no_size_item(self):
+        items = self._items(1600, 900, "fullscreen")
+
+        self.assertNotIn("client-windowed", items)
 
 
 class RealEnvironmentTests(unittest.TestCase):

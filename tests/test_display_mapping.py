@@ -685,5 +685,53 @@ class CaptureRegionTests(unittest.TestCase):
         self.assertIsNotNone(mapping, "抓图失败也要把几何给调用方")
 
 
+class _StyleReader:
+    """假 GetWindowLongW：只回样式值，`restype`/`argtypes` 可写。"""
+
+    restype = None
+    argtypes = None
+
+    def __init__(self, style):
+        self.style = style
+
+    def __call__(self, hwnd, index):
+        return self.style
+
+
+class WindowModeTests(unittest.TestCase):
+    """全屏 / 窗口化的判定：只认标题栏，不认尺寸。"""
+
+    def test_caption_means_windowed(self):
+        self.assertEqual("windowed", dm.classify_window_mode(dm.WS_CAPTION))
+        self.assertEqual("windowed", dm.classify_window_mode(0x16CF0000))
+
+    def test_popup_without_caption_means_fullscreen(self):
+        self.assertEqual("fullscreen", dm.classify_window_mode(0x80000000))
+        self.assertEqual("fullscreen", dm.classify_window_mode(0x86000000))
+
+    def test_broken_style_is_unknown(self):
+        self.assertEqual("unknown", dm.classify_window_mode(None))
+        self.assertEqual("unknown", dm.classify_window_mode("x"))
+
+    def test_window_mode_reads_the_window_style(self):
+        import types
+
+        fake = types.SimpleNamespace(user32=types.SimpleNamespace(
+            GetWindowLongW=_StyleReader(dm.WS_CAPTION)))
+        with patch.object(dm.ctypes, "windll", fake, create=True):
+            self.assertEqual("windowed", dm.window_mode(hwnd=123))
+
+    def test_window_mode_never_raises(self):
+        """拿不到窗口/样式时安静返回 unknown（自检不能因为辅助调用炸掉）。"""
+        import types
+
+        fake = types.SimpleNamespace(user32=types.SimpleNamespace(
+            GetWindowLongW=_StyleReader(None)))
+        with patch.object(dm.ctypes, "windll", fake, create=True):
+            self.assertEqual("unknown", dm.window_mode(hwnd=123))
+        with patch("display_mapping.ctypes.windll", None, create=True):
+            self.assertEqual("unknown", dm.window_mode(hwnd=123))
+
+
 if __name__ == "__main__":
     unittest.main()

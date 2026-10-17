@@ -410,6 +410,26 @@ def _client_mapping_items(config) -> list[dict]:
             "盒子面板是固定像素的独立窗口，炉石窗口太小会把它挤出屏幕："
             "请把窗口调大（客户区至少 960×540）。", True, purpose))
 
+    # 窗口化时的尺寸口径：**统一 1920×1080**（与代码里的坐标基准一致）。
+    # 只提示不拦：别的 16:9 尺寸靠等比换算也能跑，但盒子面板是固定像素的
+    # 独立窗口，窗口越小越容易被挤出屏幕；换尺寸后校准框也更容易看着"偏"。
+    if display_mapping.window_mode(mapping.hwnd) == "windowed":
+        reference = display_mapping.REFERENCE_CLIENT
+        if (mapping.width, mapping.height) == tuple(reference):
+            items.append(_item(
+                "client-windowed", "窗口化尺寸", STATUS_OK,
+                f"窗口化 {mapping.width}×{mapping.height}", "",
+                False, "窗口化时的客户区尺寸口径"))
+        else:
+            items.append(_item(
+                "client-windowed", "窗口化尺寸", STATUS_WARN,
+                f"窗口化 {mapping.width}×{mapping.height}"
+                f"（基准 {reference[0]}×{reference[1]}）",
+                "把炉石窗口设成 1920×1080（选项 → 图形 → 分辨率；窗口化就行，不必全屏），"
+                "改完打开校准窗口拖一次保存。其它尺寸靠等比换算也能跑，但盒子面板是"
+                "固定像素的独立窗口，窗口越小越容易被挤出屏幕；尺寸与基准一致时，"
+                "校准框与卡牌点击的容错也最大。", False, "窗口化时的客户区尺寸口径"))
+
     try:
         from get_screen import get_HS_hwnd, is_allowed_hearthstone_foreground
         hwnd = int(get_HS_hwnd())
