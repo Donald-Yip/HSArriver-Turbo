@@ -58,12 +58,14 @@ CONFIG_PATH = ROOT / "ui_config.json"
 PORT_FILE = ROOT / "log" / "ui_port.txt"
 # 站点/端口/日志缓冲来自 config.py（可通过环境变量覆盖，见 HS_HOST/HS_PORT/HS_LOG_BUFFER_SIZE）。
 from config import (
-    DEFAULT_AUTO_CONCEDE, DEFAULT_HUMAN_LIKE, DEFAULT_LIVENESS,
-    DEFAULT_RANK_STOP, RANK_STOP_ACTIONS, HOST,
+    DEFAULT_AUTO_CONCEDE, DEFAULT_AUTO_SURRENDER, DEFAULT_HUMAN_LIKE,
+    DEFAULT_LIVENESS, DEFAULT_RANK_STOP, RANK_STOP_ACTIONS, HOST,
     BASE_PORT, LOG_BUFFER_SIZE, _USER_DELAY_KEYS, RecommendationConfig)
 # 环境自检（Python 3.12 / 依赖包 / 分辨率缩放）与原样截图区域框预览。
+import card_catalog
 import screen_regions
 import selfcheck
+import surrender_rules
 
 
 # ---------------------------------------------------------------- 管理员检测
@@ -84,6 +86,8 @@ DEFAULT_CONFIG = {
     "schedule_start": None,
     "schedule_end": None,
     "auto_concede": dict(DEFAULT_AUTO_CONCEDE),
+    # 卡组识别投降：和 auto_concede 并存，各自独立开关。
+    "auto_surrender": dict(DEFAULT_AUTO_SURRENDER),
     "liveness": dict(DEFAULT_LIVENESS),
     "rank_stop": dict(DEFAULT_RANK_STOP),
 }
@@ -1087,6 +1091,103 @@ def api_save_concede(body):
     return {"ok": True, "message": "自动投降配置已保存",
             "concede": {"enabled": ac["enabled"],
                         "threshold": threshold, "rounds": rounds}}
+
+
+# ---------------------------------------------------------------- 卡组识别投降
+def api_card_search(query, limit=8):
+    """卡牌自动补全：中文名包含匹配（本地 cards.json，不联网）。
+
+    同名多版本（神秘访客 = REV_246 / CORE_REV_246）合并成一条，
+    返回的 ``ids`` 里是全版本，网页只展示主 id。
+    """
+    text = (query or "").strip()
+    try:
+        limit = max(1, min(20, int(limit)))
+    except (TypeError, ValueError):
+        limit = 8
+    catalog = card_catalog.default_catalog()
+    if catalog is None:
+        return {"ok": False,
+                "error": f"卡牌库不可用：{card_catalog.catalog_error()}"}
+    if not text:
+        return {"ok": True, "query": text, "cards": []}
+    hits = catalog.search(text, limit=limit)
+    return {"ok": True, "query": text,
+            "cards": [hit.to_dict() for hit in hits]}
+
+
+def _current_log_state():
+    fsm = CTRL.fsm
+    return getattr(fsm, "log_state", None) if fsm is not None else None
+
+
+def api_save_surrender_rules(body):
+    """保存卡组识别投降配置（ui_config.json 的 auto_surrender 段）。
+
+    **允许自动化运行中热保存**（改完立即生效），代价是可能当场命中：
+    所以真会触发时返回 ``needs_confirm``，要网页带上 ``confirm: true`` 再来一次。
+    校验不过（卡名找不到 / 结构写错）一律不写盘——保留上一份能用的配置。
+    """
+    raw = body.get("config")
+    if not isinstance(raw, dict):
+        raw = {key: body[key] for key in ("enabled", "aliases", "decks")
+               if key in body}
+    # 只切开关、没带 decks 时，沿用已保存的卡组库。
+    if "decks" not in raw:
+        saved = load_config().get("auto_surrender") or {}
+        merged = dict(saved)
+        merged.update(raw)
+        raw = merged
+
+    normalized = surrender_rules.normalize_config(raw)
+    if not normalized["ok"]:
+        return {"ok": False, "error": "配置有问题，未保存",
+                "errors": normalized["errors"]}
+
+    decks, compile_errors, corrected = surrender_rules.compile_config(
+        normalized["config"])
+    if compile_errors:
+        return {"ok": False, "error": "卡名有误，未保存",
+                "errors": compile_errors}
+
+    preview = surrender_rules.engine.preview(normalized["config"],
+                                             _current_log_state())
+    if preview.get("would_fire_now") and not body.get("confirm"):
+        return {"ok": False, "needs_confirm": True,
+                "error": "按这份配置，当前这一局会立刻投降。确认要保存吗？",
+                "hit": preview.get("hit"),
+                "config": normalized["config"],
+                "warnings": normalized["warnings"],
+                "corrected": corrected}
+
+    cfg = load_config()
+    cfg["auto_surrender"] = normalized["config"]
+    save_config(cfg)
+
+    enabled = bool(normalized["config"].get("enabled"))
+    _log("SYS", f"卡组识别投降已保存：{'开启' if enabled else '关闭'}，"
+                f"{len(decks)} 套卡组。")
+    for item in corrected:
+        _log("WARN", f"卡名已自动纠正：{item['from']} → {item['to']}")
+    for warning in normalized["warnings"]:
+        _log("WARN", f"卡组识别投降：{warning}")
+    return {"ok": True,
+            "message": "卡组识别投降已保存" + ("（已生效）" if enabled else ""),
+            "config": normalized["config"],
+            "warnings": normalized["warnings"],
+            "corrected": corrected,
+            "would_fire_now": bool(preview.get("would_fire_now"))}
+
+
+def _surrender_state():
+    """给 /api/status：当前这一局的实时进度（对方职业 / 每套卡组满足几项）。"""
+    fsm = CTRL.fsm
+    if fsm is None:
+        return {"decks": [], "message": "自动化未启动"}
+    try:
+        return fsm.surrender_rule_state().get("state", {})
+    except Exception as exc:
+        return {"decks": [], "error": str(exc)}
 
 
 # ------------------------------------------------------------------ 段位目标（可选）
@@ -3208,6 +3309,8 @@ def status_snapshot():
         "schedule_end": end_iso,
         "concede": cfg.get("auto_concede") or dict(DEFAULT_AUTO_CONCEDE),
         "concede_detect": _concede_detect_state(),
+        "auto_surrender": cfg.get("auto_surrender") or dict(DEFAULT_AUTO_SURRENDER),
+        "surrenders": _surrender_state(),
         "rank_stop": _rank_stop_state(),
         "human_like": _current_human_like(),
         "liveness": {**_liveness_state(), **_current_liveness()},
@@ -3294,6 +3397,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/check_log":
                 q = parse_qs(parsed.query)
                 self._json(check_log_dir(q.get("path", [""])[0]))
+            elif path == "/api/card_search":
+                q = parse_qs(parsed.query)
+                self._json(api_card_search(q.get("q", [""])[0],
+                                           q.get("limit", ["8"])[0]))
             elif path == "/api/selfcheck":
                 self._json(api_selfcheck(force=False))
             elif path == "/api/regions":
@@ -3360,6 +3467,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_toggle_overlay(body))
             elif path == "/api/concede":
                 self._json(api_save_concede(body))
+            elif path == "/api/surrender_rules":
+                self._json(api_save_surrender_rules(body))
             elif path == "/api/concede_now":
                 self._json(api_concede_now(body))
             elif path == "/api/rank_stop":

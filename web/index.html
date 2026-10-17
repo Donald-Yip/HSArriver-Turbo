@@ -130,6 +130,45 @@ input:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 .check-hint{grid-column:2 / -1;color:var(--amber);font-size:12.2px}
 .check-item.bad .check-hint{color:#f0937f}
 @media (max-width:700px){.check-item{grid-template-columns:20px 1fr}.check-label{grid-column:2}.check-detail,.check-hint{grid-column:2 / -1}}
+/* ---------- 卡组识别投降 ---------- */
+.surrender-decks{display:flex;flex-direction:column;gap:12px;margin-bottom:12px}
+.sdeck{background:var(--panel2);border:1px solid var(--border-soft);border-radius:12px;padding:12px 14px}
+.sdeck.bad{border-color:var(--red)}
+.sdeck-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
+.sdeck-title{font-size:13.5px;font-weight:700;color:var(--gold-bright)}
+.sdeck-row{display:flex;gap:10px;flex-wrap:wrap}
+.sdeck-row .field{margin-bottom:8px}
+.sdeck-row .field.grow{flex:1;min-width:200px}
+.sdeck-empty{color:var(--muted);font-size:12.5px;padding:6px 2px}
+.scond-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 8px}
+.scond{display:grid;grid-template-columns:186px minmax(160px,1fr) 168px 30px;gap:8px;align-items:center;background:rgba(255,255,255,.02);border:1px solid var(--border-soft);border-radius:10px;padding:8px}
+@media (max-width:860px){.scond{grid-template-columns:1fr;gap:6px}}
+.scond select,.scond input{padding:7px 9px;font-size:13px}
+.scond-type{width:100%}
+.scard-wrap{position:relative;display:flex;align-items:center;gap:6px;min-width:0}
+.scard-wrap input{flex:1;min-width:0}
+.scond-id{font-family:Consolas,monospace;font-size:11.5px;color:var(--muted);white-space:nowrap;flex:none}
+.scond-id.hit{color:var(--green)}
+.scond-id.miss{color:var(--amber)}
+.scond-turn{display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);white-space:nowrap}
+.scond-turn input{width:54px;padding:6px 7px}
+.scond-del{background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:8px;width:28px;height:28px;line-height:1;cursor:pointer;font-size:15px}
+.scond-del:hover{color:var(--red);border-color:var(--red)}
+.scard-menu{position:absolute;top:calc(100% + 4px);left:0;right:0;background:#241b10;border:1px solid var(--border);border-radius:10px;max-height:232px;overflow-y:auto;z-index:40;box-shadow:0 14px 34px rgba(0,0,0,.6);display:none}
+.scard-menu.open{display:block}
+.scard-item{padding:7px 10px;font-size:12.8px;cursor:pointer;display:flex;justify-content:space-between;gap:10px;align-items:baseline;border-bottom:1px solid var(--border-soft)}
+.scard-item:last-child{border-bottom:none}
+.scard-item:hover,.scard-item.active{background:rgba(232,185,59,.16)}
+.scard-item .cname{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.scard-item .cid{font-family:Consolas,monospace;color:var(--muted);font-size:11px;flex:none}
+.scard-empty,.scard-loading{padding:8px 10px;font-size:12.5px;color:var(--muted)}
+.surrender-json{margin:10px 0}
+.surrender-json textarea{width:100%;min-height:200px;background:#0f0b07;border:1px solid var(--border);border-radius:10px;color:var(--text);font-family:Consolas,monospace;font-size:12.5px;padding:10px;line-height:1.55;resize:vertical}
+.surrender-status{font-size:12.5px;line-height:1.7;color:var(--text);margin-top:10px}
+.surrender-status .sd{display:block;color:var(--muted)}
+.surrender-status .ok{color:var(--green)}
+.surrender-status .no{color:var(--muted)}
+.surrender-status .fire{color:var(--red);font-weight:700}
 /* ---------- Toast ---------- */
 #toasts{position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:8px;z-index:99}
 .toast{background:#241b10;border:1px solid var(--border);border-left:4px solid var(--blue);padding:10px 14px;border-radius:10px;font-size:13px;max-width:340px;box-shadow:0 8px 24px rgba(0,0,0,.5);animation:slidein .25s;transition:all .4s}
@@ -325,6 +364,33 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       </div>
       <div class="hint-line">检测左上角盒子「AI胜率」，连续 N 回合低于阈值时自动执行：右下角齿轮 → 中间红色「认输」。默认关闭，需手动开启；自动化运行中不可修改。</div>
       <div class="hint-line" id="concedeDetect" style="margin-top:4px;color:var(--text)">检测状态：等待自动化运行…</div>
+    </section>
+
+    <section class="card wide">
+      <h2 class="card-title">
+        <span>🎯 卡组识别投降（只判对方）</span>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;cursor:pointer">
+          <input id="chkSurrender" type="checkbox" style="width:auto;height:20px"> 启用
+        </label>
+      </h2>
+      <div class="hint-line" style="margin-top:0">
+        按「对方有哪些卡」识别对手卡组，命中就立刻投降。卡牌框里<b>输入中文会弹出候选卡</b>，点一下自动带出 ID。<br>
+        所有条件都判<b>对方</b>：我方有同样的卡绝不会触发；对方职业不参与以外的判断也只在卡组上写。
+      </div>
+      <div id="surrenderDecks" class="surrender-decks"></div>
+      <div class="btn-row">
+        <button id="btnAddSurrenderDeck" class="btn btn-ghost btn-small" type="button">+ 添加卡组</button>
+        <button id="btnSaveSurrender" class="btn btn-warn" type="button">💾 保存卡组识别</button>
+        <button id="btnToggleSurrenderJson" class="btn btn-ghost btn-small" type="button">⚙ 高级 JSON</button>
+      </div>
+      <div id="surrenderJsonWrap" class="surrender-json" style="display:none">
+        <textarea id="surrenderJson" spellcheck="false"></textarea>
+        <div class="btn-row">
+          <button id="btnApplySurrenderJson" class="btn btn-ghost btn-small" type="button">把 JSON 载入到表单</button>
+        </div>
+        <div class="hint-line">表单只能表达「全部满足 / 任一满足」一层；要写嵌套的「和/或/非」就在这里改。</div>
+      </div>
+      <div class="surrender-status" id="surrenderStatus">状态：等待自动化运行…</div>
     </section>
 
     <section class="card wide">
@@ -689,6 +755,9 @@ function render(s){
     }
     $("concedeDetect").textContent = det;
   }
+
+  /* 卡组识别投降：状态行 + 首次加载配置（用户正在编辑时不覆盖） */
+  renderSurrenderStatus(s);
 
   /* 段位目标（只在选卡组界面读一次名次） */
   $("chkRankStop").disabled = busy;
@@ -1282,6 +1351,397 @@ $("btnSaveDelays").addEventListener("click", function(){
     }
   });
 });
+
+/* ---------- 卡组识别投降（表单 + 卡牌自动补全） ---------- */
+/* 设计要点：
+   - 条件默认一律「对方」；「我方」选项排在最后，只有明确要判自己才选。
+   - 卡牌框打中文就查本地卡库弹候选，选中后输入框留中文名、右侧显示 cardId。
+   - 表单只表达一层「全部满足 / 任一满足」；要嵌套就展开「高级 JSON」。 */
+var surrenderDecks = [];
+var surrenderAliases = {};
+var surrenderLoaded = false;
+var dirtySurrender = false;
+var _surrenderTimer = null;
+
+var CLASS_ZH = {DRUID:"德鲁伊", HUNTER:"猎人", MAGE:"法师", PALADIN:"圣骑士",
+  PRIEST:"牧师", ROGUE:"潜行者", SHAMAN:"萨满", WARLOCK:"术士",
+  WARRIOR:"战士", DEMONHUNTER:"恶魔猎手", DEATHKNIGHT:"死亡骑士"};
+
+var SURRENDER_TYPES = [
+  {value:"opp_played", label:"对方打出过", type:"played", side:"opponent"},
+  {value:"opp_seen", label:"对方出现过（含开局生效）", type:"revealed", side:"opponent"},
+  {value:"opp_start", label:"对方开局全局卡", type:"start_of_game", side:"opponent"},
+  {value:"opp_in_play", label:"对方当前在场", type:"in_zone", side:"opponent", zone:"PLAY"},
+  {value:"opp_in_grave", label:"对方当前在墓地", type:"in_zone", side:"opponent", zone:"GRAVEYARD"},
+  {value:"self_played", label:"我方打出过（慎用）", type:"played", side:"self"},
+  {value:"self_seen", label:"我方出现过（慎用）", type:"revealed", side:"self"}
+];
+
+function surrenderTypeOf(value){
+  for (var i = 0; i < SURRENDER_TYPES.length; i++){
+    if (SURRENDER_TYPES[i].value === value) return SURRENDER_TYPES[i];
+  }
+  return SURRENDER_TYPES[0];
+}
+
+function surrenderNewDeck(){
+  return {id:"deck" + (surrenderDecks.length + 1), name:"", heroClass:"",
+          mode:"all", conditions:[{kind:"opp_played", card:"", cardId:"", min:"", max:""}]};
+}
+
+function surrenderDeckFromConfig(deck, index){
+  var when = deck.when || {};
+  var mode = "all", leaves = [];
+  if (Array.isArray(when.all)){ mode = "all"; leaves = when.all; }
+  else if (Array.isArray(when.any)){ mode = "any"; leaves = when.any; }
+  else if (when.type){ leaves = [when]; }
+  var conditions = leaves.map(function(leaf){
+    var side = leaf.side || "opponent";
+    var zone = leaf.zone || "";
+    var matched = null;
+    for (var i = 0; i < SURRENDER_TYPES.length; i++){
+      var t = SURRENDER_TYPES[i];
+      if (t.type === leaf.type && t.side === side && (t.zone || "") === zone){
+        matched = t; break;
+      }
+    }
+    if (!matched) matched = SURRENDER_TYPES[0];   // 表单表达不了的先按"对方打出过"
+    var card = leaf.card;
+    if (Array.isArray(card)) card = card.length ? card[0] : "";
+    return {
+      kind: matched.value,
+      card: card || "",
+      cardId: "",
+      min: (leaf.within && leaf.within.min != null) ? String(leaf.within.min) : "",
+      max: (leaf.within && leaf.within.max != null) ? String(leaf.within.max) : ""
+    };
+  });
+  return {id: deck.id || ("deck" + (index + 1)), name: deck.name || "",
+          heroClass: deck.class || "", mode: mode, conditions: conditions};
+}
+
+function surrenderLoadConfig(cfg){
+  cfg = cfg || {};
+  $("chkSurrender").checked = !!cfg.enabled;
+  surrenderAliases = cfg.aliases || {};
+  var decks = cfg.decks || [];
+  surrenderDecks = decks.map(surrenderDeckFromConfig);
+  renderSurrenderDecks();
+}
+
+function renderSurrenderDecks(){
+  var host = $("surrenderDecks");
+  if (!surrenderDecks.length){
+    host.innerHTML = '<div class="sdeck-empty">还没有卡组规则。点下面「+ 添加卡组」开始。</div>';
+    return;
+  }
+  host.innerHTML = surrenderDecks.map(function(deck, di){
+    var classOptions = ['<option value="">不限职业</option>'].concat(
+      Object.keys(CLASS_ZH).map(function(key){
+        var sel = deck.heroClass === key ? " selected" : "";
+        return '<option value="' + key + '"' + sel + '>' + CLASS_ZH[key] + '</option>';
+      })).join("");
+    var conds = deck.conditions.map(function(cond, ci){
+      var typeOptions = SURRENDER_TYPES.map(function(t){
+        return '<option value="' + t.value + '"' +
+          (cond.kind === t.value ? " selected" : "") + '>' + t.label + '</option>';
+      }).join("");
+      var idText = cond.cardId ? "→ " + cond.cardId : "";
+      return '<div class="scond" data-cond="' + ci + '">'
+        + '<select data-f="kind" class="scond-type">' + typeOptions + '</select>'
+        + '<div class="scard-wrap">'
+        +   '<input type="text" data-f="card" autocomplete="off" spellcheck="false"'
+        +          ' placeholder="输入中文卡名，如 裂魂者阿扎莉娜" value="'
+        +          String(cond.card || "").replace(/"/g, "&quot;") + '">'
+        +   '<span class="scond-id">' + idText + '</span>'
+        +   '<div class="scard-menu"></div>'
+        + '</div>'
+        + '<span class="scond-turn">回合 <input type="number" data-f="min" min="0" placeholder="起" value="'
+        +          (cond.min || "") + '"> - <input type="number" data-f="max" min="0" placeholder="止" value="'
+        +          (cond.max || "") + '"></span>'
+        + '<button class="scond-del" type="button" data-act="del-cond" title="删除这条条件">×</button>'
+        + '</div>';
+    }).join("");
+    return '<div class="sdeck" data-deck="' + di + '">'
+      + '<div class="sdeck-head"><span class="sdeck-title">卡组 ' + (di + 1) + '</span>'
+      +   '<button class="btn btn-ghost btn-small" type="button" data-act="del-deck">删除卡组</button></div>'
+      + '<div class="sdeck-row">'
+      +   '<label class="field grow"><span class="field-label">名称</span>'
+      +     '<input type="text" data-f="name" placeholder="例如 牧师 · 阿扎莉娜 + 神秘访客" value="'
+      +     String(deck.name || "").replace(/"/g, "&quot;") + '"></label>'
+      +   '<label class="field" style="min-width:150px"><span class="field-label">对方职业（可选）</span>'
+      +     '<select data-f="class">' + classOptions + '</select></label>'
+      +   '<label class="field" style="min-width:170px"><span class="field-label">条件关系</span>'
+      +     '<select data-f="mode">'
+      +       '<option value="all"' + (deck.mode === "all" ? " selected" : "") + '>全部满足（和）</option>'
+      +       '<option value="any"' + (deck.mode === "any" ? " selected" : "") + '>任一满足（或）</option>'
+      +     '</select></label>'
+      + '</div>'
+      + '<div class="scond-list">' + (conds || '<div class="sdeck-empty">至少加一条条件</div>') + '</div>'
+      + '<button class="btn btn-ghost btn-small" type="button" data-act="add-cond">+ 添加条件</button>'
+      + '</div>';
+  }).join("");
+}
+
+function surrenderStateOf(node){
+  var deckEl = node.closest ? node.closest(".sdeck") : null;
+  if (!deckEl) return null;
+  var di = parseInt(deckEl.getAttribute("data-deck"), 10);
+  var deck = surrenderDecks[di];
+  if (!deck) return null;
+  var condEl = node.closest(".scond");
+  var ci = condEl ? parseInt(condEl.getAttribute("data-cond"), 10) : -1;
+  return {deck: deck, cond: ci >= 0 ? deck.conditions[ci] : null, di: di, ci: ci};
+}
+
+/* 卡牌自动补全：输入中文 → 查 /api/card_search → 弹出候选 */
+function surrenderCardInput(input){
+  var wrap = input.parentNode;
+  var menu = wrap.querySelector(".scard-menu");
+  var idEl = wrap.querySelector(".scond-id");
+  var state = surrenderStateOf(input);
+  if (state && state.cond){ state.cond.cardId = ""; }
+  if (idEl){ idEl.textContent = ""; idEl.className = "scond-id"; }
+  dirtySurrender = true;
+
+  var text = input.value.trim();
+  clearTimeout(_surrenderTimer);
+  if (!text){ menu.innerHTML = ""; menu.classList.remove("open"); return; }
+  menu.innerHTML = '<div class="scard-loading">查卡中…</div>';
+  menu.classList.add("open");
+  _surrenderTimer = setTimeout(function(){
+    get("/api/card_search?q=" + encodeURIComponent(text) + "&limit=8").then(function(r){
+      if (!menu.isConnected) return;
+      if (!r.ok){
+        menu.innerHTML = '<div class="scard-empty">' + (r.error || "查卡失败") + '</div>';
+        return;
+      }
+      if (!r.cards || !r.cards.length){
+        menu.innerHTML = '<div class="scard-empty">没找到这张卡，试试少打几个字</div>';
+        return;
+      }
+      menu.innerHTML = r.cards.map(function(card, i){
+        var extra = (card.class_zh || "") + (card.type_zh || "");
+        var more = card.ids.length > 1 ? "(+" + (card.ids.length - 1) + ")" : "";
+        return '<div class="scard-item' + (i === 0 ? " active" : "") + '" data-id="'
+          + card.id + '" data-name="' + card.name.replace(/"/g, "&quot;") + '">'
+          + '<span class="cname">' + card.name + ' <span class="cid">' + extra + '</span></span>'
+          + '<span class="cid">' + card.id + more + '</span></div>';
+      }).join("");
+      menu.dataset.active = "0";
+    });
+  }, 60);
+}
+
+function surrenderPickCard(item){
+  var menu = item.parentNode;
+  var wrap = menu.parentNode;
+  var input = wrap.querySelector('input[data-f="card"]');
+  var idEl = wrap.querySelector(".scond-id");
+  input.value = item.getAttribute("data-name");
+  if (idEl){
+    idEl.textContent = "→ " + item.getAttribute("data-id");
+    idEl.className = "scond-id hit";
+  }
+  var state = surrenderStateOf(input);
+  if (state && state.cond){
+    state.cond.card = item.getAttribute("data-name");
+    state.cond.cardId = item.getAttribute("data-id");
+  }
+  menu.classList.remove("open");
+  dirtySurrender = true;
+}
+
+function surrenderMenuMove(menu, delta){
+  var items = menu.querySelectorAll(".scard-item");
+  if (!items.length) return;
+  var active = parseInt(menu.dataset.active || "0", 10) + delta;
+  if (active < 0) active = items.length - 1;
+  if (active >= items.length) active = 0;
+  menu.dataset.active = String(active);
+  for (var i = 0; i < items.length; i++){
+    items[i].className = "scard-item" + (i === active ? " active" : "");
+  }
+  items[active].scrollIntoView({block:"nearest"});
+}
+
+$("surrenderDecks").addEventListener("input", function(event){
+  var target = event.target;
+  var state = surrenderStateOf(target);
+  if (!state) return;
+  var field = target.getAttribute("data-f");
+  if (field === "card"){ surrenderCardInput(target); return; }
+  if (!state.cond && field === "name"){ state.deck.name = target.value; dirtySurrender = true; return; }
+  if (state.cond && (field === "min" || field === "max")){
+    state.cond[field] = target.value; dirtySurrender = true;
+  }
+});
+
+$("surrenderDecks").addEventListener("change", function(event){
+  var target = event.target;
+  var state = surrenderStateOf(target);
+  if (!state) return;
+  var field = target.getAttribute("data-f");
+  if (!state.cond){
+    if (field === "class") state.deck.heroClass = target.value;
+    if (field === "mode") state.deck.mode = target.value;
+  } else if (field === "kind"){
+    state.cond.kind = target.value;
+  }
+  dirtySurrender = true;
+});
+
+$("surrenderDecks").addEventListener("click", function(event){
+  var item = event.target.closest(".scard-item");
+  if (item){ surrenderPickCard(item); return; }
+  var act = event.target.getAttribute("data-act");
+  if (!act) return;
+  var state = surrenderStateOf(event.target);
+  if (!state) return;
+  if (act === "del-deck"){
+    surrenderDecks.splice(state.di, 1);
+    renderSurrenderDecks();
+  } else if (act === "add-cond"){
+    state.deck.conditions.push({kind:"opp_played", card:"", cardId:"", min:"", max:""});
+    renderSurrenderDecks();
+  } else if (act === "del-cond"){
+    state.deck.conditions.splice(state.ci, 1);
+    renderSurrenderDecks();
+  }
+  dirtySurrender = true;
+});
+
+$("surrenderDecks").addEventListener("keydown", function(event){
+  var target = event.target;
+  if (target.getAttribute("data-f") !== "card") return;
+  var menu = target.parentNode.querySelector(".scard-menu");
+  if (!menu.classList.contains("open")) return;
+  if (event.key === "ArrowDown"){ event.preventDefault(); surrenderMenuMove(menu, 1); }
+  else if (event.key === "ArrowUp"){ event.preventDefault(); surrenderMenuMove(menu, -1); }
+  else if (event.key === "Enter"){
+    event.preventDefault();
+    var item = menu.querySelector(".scard-item.active") || menu.querySelector(".scard-item");
+    if (item) surrenderPickCard(item);
+  } else if (event.key === "Escape"){
+    menu.classList.remove("open");
+  }
+});
+
+document.addEventListener("click", function(event){
+  if (!event.target.closest(".scard-wrap")){
+    var menus = document.querySelectorAll(".scard-menu.open");
+    for (var i = 0; i < menus.length; i++) menus[i].classList.remove("open");
+  }
+});
+
+function surrenderCollectConfig(){
+  var decks = surrenderDecks.map(function(deck, index){
+    var leaves = deck.conditions.filter(function(cond){
+      return (cond.card || "").trim();
+    }).map(function(cond){
+      var type = surrenderTypeOf(cond.kind);
+      var leaf = {type: type.type, side: type.side, card: cond.card.trim()};
+      if (type.zone) leaf.zone = type.zone;
+      if (cond.min !== "" || cond.max !== ""){
+        leaf.within = {field:"round"};
+        if (cond.min !== "") leaf.within.min = parseInt(cond.min, 10);
+        if (cond.max !== "") leaf.within.max = parseInt(cond.max, 10);
+      }
+      return leaf;
+    });
+    var when;
+    if (!leaves.length){ when = {all: []}; }
+    else { when = (deck.mode === "any") ? {any: leaves} : {all: leaves}; }
+    return {id: deck.id || ("deck" + (index + 1)),
+            name: deck.name || ("卡组" + (index + 1)),
+            enabled: true, class: deck.heroClass || "",
+            action: "concede", when: when};
+  });
+  return {enabled: $("chkSurrender").checked, aliases: surrenderAliases, decks: decks};
+}
+
+function saveSurrender(confirmFire){
+  post("/api/surrender_rules", {config: surrenderCollectConfig(), confirm: !!confirmFire})
+    .then(function(r){
+      if (r.needs_confirm){
+        var hitName = (r.hit && r.hit.name) ? r.hit.name : "某套卡组";
+        if (confirm("当前这一局会立刻投降（命中「" + hitName + "」）。\n\n确认保存并立即生效？")){
+          saveSurrender(true);
+        }
+        return;
+      }
+      if (!r.ok){
+        toast(r.error || "保存失败", "error");
+        if (r.errors && r.errors.length){
+          toast(r.errors[0].path + "：" + r.errors[0].message, "error");
+        }
+        return;
+      }
+      toast(r.message || "已保存", "ok");
+      if (r.corrected && r.corrected.length){
+        toast("卡名已纠正：" + r.corrected[0].from + " → " + r.corrected[0].to, "warn");
+      }
+      if (r.config) surrenderLoadConfig(r.config);
+      dirtySurrender = false;
+      surrenderLoaded = true;
+    });
+}
+
+$("btnAddSurrenderDeck").addEventListener("click", function(){
+  surrenderDecks.push(surrenderNewDeck());
+  renderSurrenderDecks();
+  dirtySurrender = true;
+});
+
+$("chkSurrender").addEventListener("change", function(){ dirtySurrender = true; });
+
+$("btnSaveSurrender").addEventListener("click", function(){ saveSurrender(false); });
+
+$("btnToggleSurrenderJson").addEventListener("click", function(){
+  var wrap = $("surrenderJsonWrap");
+  var show = wrap.style.display === "none";
+  wrap.style.display = show ? "block" : "none";
+  if (show){
+    $("surrenderJson").value = JSON.stringify(surrenderCollectConfig(), null, 2);
+  }
+});
+
+$("btnApplySurrenderJson").addEventListener("click", function(){
+  var text = $("surrenderJson").value;
+  var parsed;
+  try { parsed = JSON.parse(text); }
+  catch (e){ toast("JSON 格式错误：" + e.message, "error"); return; }
+  surrenderLoadConfig(parsed);
+  dirtySurrender = true;
+  toast("已载入到表单，记得点保存", "ok");
+});
+
+function renderSurrenderStatus(status){
+  var el = $("surrenderStatus");
+  var st = (status && status.surrenders) || {};
+  if (status && status.auto_surrender && !surrenderLoaded){
+    surrenderLoadConfig(status.auto_surrender);
+    surrenderLoaded = true;
+  } else if (status && status.auto_surrender && !dirtySurrender){
+    $("chkSurrender").checked = !!status.auto_surrender.enabled;
+  }
+  if (!st.decks || !st.decks.length){
+    el.innerHTML = '<span class="sd">' + (st.message || st.error || "状态：暂无启用的卡组规则。") + '</span>';
+    return;
+  }
+  var cls = st.opponent_class ? (CLASS_ZH[st.opponent_class] || st.opponent_class) : "未知";
+  var head = "对方：" + cls + " · 第 " + (st.round || 0) + " 回合"
+    + (st.triggered ? ' · <span class="fire">已触发投降</span>' : "");
+  var rows = st.decks.map(function(deck){
+    var checks = (deck.checks || []).map(function(check){
+      return '<span class="' + (check.ok ? "ok" : "no") + '">'
+        + (check.ok ? "✓ " : "✗ ") + check.text + '</span>';
+    }).join("　");
+    return '<span class="sd">' + (deck.matched ? "✅ " : "· ") + deck.name
+      + '（' + deck.done + "/" + deck.total + '）' + (checks ? "　" + checks : "") + '</span>';
+  }).join("");
+  el.innerHTML = '<span>' + head + '</span>' + rows;
+}
 
 /* ---------- 启动 ---------- */
 refreshStatus();

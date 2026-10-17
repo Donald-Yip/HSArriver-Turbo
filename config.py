@@ -131,6 +131,16 @@ DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 #               避免开局一两次低胜率就误降。
 DEFAULT_AUTO_CONCEDE = {"enabled": False, "threshold": 10.0, "rounds": 3}
 
+# ---------------------------------------------------------------- 卡组识别投降默认值
+# 与上面的「AI 胜率低自动投降」**并存**：两个开关各自独立，任一命中都会投降。
+# 真实值保存在 ui_config.json 的 auto_surrender 段：
+#   enabled : 总开关。默认 False。
+#   aliases : 卡名别名表（「阿莉扎娜」→「裂魂者阿扎莉娜」），卡名写错时的兜底。
+#   decks   : 卡组库，每项 {id, name, enabled, class, action, when}。
+#             when 是「和 / 或 / 非」表达式，所有条件默认判**对方**。
+# 结构细节见 surrender_rules.py 顶部说明。
+DEFAULT_AUTO_SURRENDER = {"enabled": False, "aliases": {}, "decks": []}
+
 # ------------------------------------------------------ 段位目标：上分停止 / 控分（可选）
 # 在**选择套牌界面**读一次右上角的段位名次（客户区相对坐标，可在校准窗口里拖
 # post_game_rank_roi；未上传说时该处是空白 → 读到数字才表示已上传说，数字就是名次），

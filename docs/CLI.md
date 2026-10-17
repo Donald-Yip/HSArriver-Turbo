@@ -107,7 +107,7 @@ JSON 模式下：
 
 | 命令 | 说明 |
 | --- | --- |
-| `status` | 状态总览：阶段、账号是否匹配、战绩、存活检测、自动投降、段位目标、活人感、延时、自检、最后错误 |
+| `status` | 状态总览：阶段、账号是否匹配、战绩、存活检测、自动投降、卡组投降、段位目标、活人感、延时、自检、最后错误 |
 | `status --watch 2` | 每 2 秒刷一行（Ctrl+C 退出） |
 | `log [-n 50] [-f] [--interval 1]` | `-n` 先打最近 N 行；`-f` 持续跟随（走 `/api/logs?seq=` 增量接口，不重复） |
 | `selfcheck [--refresh]` | 环境自检（Python/依赖/分辨率/管理员） |
@@ -251,6 +251,8 @@ python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
 | `watchdog on\|off\|status\|set` | **中断重启**：自动化运行中 `Power.log` 停滞超阈值就重启炉石并重新进入对战。`set` 参数：`--stale`（秒，默认 300=5 分钟）、`--max-restarts`（默认 3）、`--window`（秒，默认 600）。默认**关**；打开后接管 `liveness` 的日志停滞判定（不再自动停止，改为重启） |
 | `concede [set …]` | 自动投降：`--enabled/--no-enabled`、`--threshold`（%）、`--rounds` |
 | `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
+| `surrender [show\|on\|off\|check\|set\|clear]` | **卡组识别投降**（只判对方）：认出对手是某套有特征牌的卡组就立刻投。`show`=看配置（条件译成中文）、`on/off`=总开关（保留卡组）、`check`=看这一局的实时判定（对方职业 / 每个条件是否满足）、`set --file rules.json`（`-` 读 stdin，`--rules '{…}'` 直接给 JSON，`--yes` 跳过「当场会命中」的二次确认）、`clear`=清空 |
+| `card <卡名或ID> [--show] [--limit N]` | **本地查卡**（`cards.json`，不联网、不需要控制台）：默认给中文候选（打错字也给最像的），`--show` 看单卡详情（自动纠错 + 同名多版本 id） |
 | `rank-stop [set …]` | 段位目标：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N`、`--action stop\|keep`（`stop`=达到后停止；`keep`=控分，名次数值比目标更靠前就开局投降） |
 | `config [set …]` | 账号与日志目录：`--name`（含 `#编号`）、`--log-root`。带 `hot` 时会立刻注入运行中的日志读取器（`log_state.MY_NAME`），后续昵称判定即用新值 |
 
@@ -315,6 +317,72 @@ python hsctl.py repl
 ```
 
 REPL 里不带 `hsctl` 前缀，`help` 看帮助，`exit` / Ctrl+D 退出。
+
+---
+
+### 4.7 卡组识别投降：规则怎么写
+
+一句话：**认出对面是某套卡组就立刻投**。判定只看**对方**——对方打出、出现过（含开局就
+曝光的手牌）、开局生效的卡才算数，自己的牌永远不参与判定。
+
+规则是一棵「与/或/非」树，最外层一定挂在 `decks[]` 里（一个卡组一条规则，命中任意
+一条就投降）：
+
+```json
+{
+  "enabled": true,
+  "decks": [{
+    "id": "priest_alizana",
+    "name": "牧师 · 阿扎莉娜 + 神秘访客",
+    "class": "牧师",
+    "when": {"all": [
+      {"type": "start_of_game", "card": "裂魂者阿扎莉娜"},
+      {"type": "played", "card": "神秘访客", "within": {"max": 4}}
+    ]}
+  }]
+}
+```
+
+- `name` 只是给人看的；`class` **可写可不写**（写了就先按对方职业过滤，省得每局都算）
+- 卡名写中文即可，打错字会被自动纠正（`裂魂者阿莉扎娜` → `裂魂者阿扎莉娜`）；
+  同名多版本（`REV_246` / `CORE_REV_246`）自动合并，写哪个 id 都能命中
+- 节点类型：`all`（与）、`any`（或）、`not`（非），以及单个条件对象
+
+单个条件（`type`）可选值：
+
+| `type` | 含义 |
+| --- | --- |
+| `played` | 对方**打出**过这张卡（必须从手牌进战场，抽到/召唤不算） |
+| `revealed` / `seen` | 对方这张卡**露过面**（含开局曝光、衍生卡、坟场/牌库被看到） |
+| `start_of_game` | 对方**开局生效**卡（如裂魂者阿扎莉娜，这类卡永远「打不出」） |
+| `played_or_revealed` | 上面两者的并集，最宽松 |
+| `in_zone` | 某个区域里有这张卡（`zone`: `PLAY/HAND/GRAVEYARD/DECK/SETASIDE/ANY`） |
+| `turn` | 纯回合判断（`field`: `round/my_turn/oppo_turn/game_turn`） |
+
+其它字段：`card`（中文名或 id，也可写数组 = 任一）、`card_type`（`MINION/SPELL/WEAPON`
+等）、`side`（默认 `opponent`，写成 `self` 是判自己，慎用）、`at_least/at_most`（数量）、
+`within`（`{"min":1,"max":4}` 限制在几回合内）。
+
+```powershell
+# 存一套规则（会自动校验：卡名错、结构错一律不写盘，保留上一份能用的）
+python hsctl.py surrender set --file rules.json
+
+# 运行中热保存，且这套规则在当前这一局已经能命中 → 会先要求确认
+python hsctl.py surrender set --file rules.json --yes
+
+# 看这一局判到哪儿了（对方职业、每个条件是 ✓ 还是 ×）
+python hsctl.py surrender check
+
+# 查卡名（本地 cards.json，不联网、不用开控制台）
+python hsctl.py card 神秘
+python hsctl.py card 裂魂者阿莉扎娜 --show
+```
+
+网页上等价入口是「🎯 卡组识别投降（只判对方）」那张卡片：表单式填条件，卡名输入中文
+就从候选里挑，选完自动带出 id。
+
+> ⚠️ 判定和「自动投降（胜率）」是**两套独立开关**，互相不看对方的开关；
+> 但同一个「认输」动作有共同的防重入，不会重复点。
 
 ---
 

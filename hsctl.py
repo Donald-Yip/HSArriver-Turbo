@@ -22,6 +22,8 @@ JSON」的翻译与结果渲染，不含任何自动化逻辑。所以可以用�
     hsctl start | stop | resume | prepare
     hsctl delays set pre_action_delay_seconds=5
     hsctl human-like set --enabled
+    hsctl surrender set --file rules.json    # 卡组识别投降（只判对方）
+    hsctl card 神秘访客                      # 查卡名（本地，不联网）
     hsctl schedule at 22:30 --end 23:30
     hsctl serve start            # 后台拉起控制台（网页仍可用）
     hsctl --json status          # 机器可读输出，给 agent 用
@@ -712,6 +714,21 @@ def render_status(s: dict, url: str = "") -> str:
     lines.append(f"自动投降 {_flag(cd.get('enabled'))} · 胜率<"
                  f"{_num(cd.get('threshold'))}% 连续 "
                  f"{_num(cd.get('rounds'))} 回合{extra}")
+
+    sr = s.get("auto_surrender") or {}
+    sr_decks = sr.get("decks") or []
+    if not sr.get("enabled"):
+        sr_text = "关"
+    elif not sr_decks:
+        sr_text = "开 · 还没配卡组"
+    else:
+        names = [deck.get("name") or deck.get("id") or "?" for deck in sr_decks[:3]]
+        more = f" 等 {len(sr_decks)} 套" if len(sr_decks) > 3 else ""
+        sr_text = f"开 · {len(sr_decks)} 套：{'、'.join(names)}{more}"
+    hit = (s.get("surrenders") or {}).get("hit") or {}
+    if hit.get("name"):
+        sr_text += f"（本局命中「{hit['name']}」）"
+    lines.append(f"卡组投降 {sr_text}")
 
     rk = s.get("rank_stop") or {}
     keep = rk.get("action") == "keep"
@@ -1757,6 +1774,254 @@ def cmd_concede_now(args, ctx: Ctx) -> int:
     return _ok_message(ctx, ctx.post("/api/concede_now", {}))
 
 
+# -------------------------------------------------------- 卡组识别投降（只判对方）
+def _surrender_config(ctx: Ctx) -> dict:
+    cfg = (ctx.get("/api/status") or {}).get("auto_surrender")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _surrender_decks_lines(cfg: dict):
+    """把每套卡组翻译成一句中文；返回 (行, 错误行)。"""
+    decks = cfg.get("decks") or []
+    if not decks:
+        return [], []
+    try:
+        import card_catalog
+        import surrender_rules
+        compiled, errors, _corrected = surrender_rules.compile_config(cfg)
+    except Exception as exc:              # 卡牌库缺失 / 段落格式坏了
+        return [], [f"条件解析失败（{exc}），可用 --json 看原文"]
+    lines = []
+    for deck in compiled:
+        hero = (card_catalog.class_label(deck.hero_class)
+                if deck.hero_class else "任意职业")
+        lines.append(f"  · {deck.name or deck.id}（{hero}）："
+                     f"{surrender_rules.describe_expr(deck.expr)}")
+    bad = [f"  ⚠️ {err.get('path') or 'config'}：{err.get('message')}"
+           for err in (errors or [])]
+    return lines, bad
+
+
+def cmd_surrender(args, ctx: Ctx) -> int:
+    """卡组识别投降：识别到「对方是某套有特征牌的卡组」就立刻认输。
+
+    用法：
+      hsctl surrender                 # 看配置（默认）
+      hsctl surrender on | off        # 总开关（改完立即生效）
+      hsctl surrender check           # 看这一局的实时判定（对方职业 / 每条件是否满足）
+      hsctl surrender set --file rules.json    # 整段替换（confirm 由 --yes 给）
+      hsctl surrender clear           # 清空所有卡组
+
+    判定**只看对方**：对方打出/出现过/开局生效的卡才算数，自己手里的不算。
+    """
+    sub = getattr(args, "action", None) or "show"
+
+    if sub in ("on", "off"):
+        enabled = sub == "on"
+        payload = ctx.post("/api/surrender_rules", {"enabled": enabled})
+        if not enabled:
+            return _ok_message(ctx, payload)
+        cfg = payload.get("config") or {}
+        if ctx.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return EXIT_OK
+        print(f"✓ {payload.get('message') or '已开启卡组识别投降'}")
+        if not (cfg.get("decks") or []):
+            print("  ℹ️ 还没有配置卡组：用 `hsctl surrender set --file <json>` "
+                  "或在网页「卡组识别投降」里加")
+        return EXIT_OK
+
+    if sub == "clear":
+        payload = ctx.post("/api/surrender_rules",
+                           {"config": {"enabled": False, "decks": []}})
+        return _ok_message(ctx, payload)
+
+    if sub == "set":
+        raw = _load_surrender_payload(args)
+        body = {"config": raw}
+        if getattr(args, "yes", False):
+            body["confirm"] = True
+        payload = ctx.post("/api/surrender_rules", body)
+        if not payload.get("ok") and payload.get("needs_confirm"):
+            msg = (payload.get("error") or payload.get("message")
+                   or "这套规则在当前对局里已经能命中了")
+            if ctx.json:
+                print(json.dumps(payload, ensure_ascii=False))
+            else:
+                print(f"⚠️ {msg}")
+                hit = (payload.get("hit") or {})
+                if hit.get("name"):
+                    print(f"  会立刻投降：「{hit['name']}」")
+                print("  确认要这么存就加 --yes 重跑一次。")
+            return EXIT_API
+        if not payload.get("ok"):
+            # 校验失败：把「哪一条、错在哪」和候选卡名都打出来
+            if ctx.json:
+                print(json.dumps(payload, ensure_ascii=False))
+                return EXIT_API
+            print(f"✗ {payload.get('error') or payload.get('message') or '规则不合法，未保存'}")
+            for err in (payload.get("errors") or []):
+                print(f"  · {err.get('path') or 'config'}：{err.get('message')}")
+                for name in (err.get("suggestions") or []):
+                    print(f"      你可能想找：{name}")
+            return EXIT_API
+        if ctx.json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return EXIT_OK
+        print(f"✓ {payload.get('message') or '已保存'}")
+        for item in (payload.get("corrected") or []):
+            print(f"  ℹ️ 卡名「{item.get('from')}」已自动纠正为「{item.get('to')}」")
+        for warn in (payload.get("warnings") or []):
+            print(f"  ⚠️ {warn}")
+        return EXIT_OK
+
+    if sub == "check":
+        return _print_surrender_check(ctx, _surrender_config(ctx))
+
+    # show（默认）
+    cfg = _surrender_config(ctx)
+    if ctx.json:
+        print(json.dumps(cfg, ensure_ascii=False))
+        return EXIT_OK
+    decks = cfg.get("decks") or []
+    print(f"卡组识别投降：{'开' if cfg.get('enabled') else '关'}"
+          f" · 共 {len(decks)} 套卡组")
+    lines, bad = _surrender_decks_lines(cfg)
+    for line in lines + bad:
+        print(line)
+    if not decks:
+        print("  （还没有卡组：在网页「卡组识别投降」里加，或 "
+              "hsctl surrender set --file rules.json）")
+    return EXIT_OK
+
+
+def _load_surrender_payload(args) -> dict:
+    """从 --file / --json 读整段配置（也支持 stdin 的 `-`）。"""
+    path = getattr(args, "file", None)
+    text = getattr(args, "rules", None)
+    if path:
+        try:
+            text = (Path(path).read_text(encoding="utf8") if path != "-"
+                    else sys.stdin.read())
+        except OSError as exc:
+            raise ApiFailure(f"读不到配置文件 {path}：{exc}")
+    if not text:
+        raise ApiFailure("要给规则：--file rules.json（或 --rules '{...}'）")
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise ApiFailure(f"不是合法 JSON：{exc}")
+    if not isinstance(data, dict):
+        raise ApiFailure("规则文件最外层要是一个对象（{enabled, decks, ...}）")
+    # 允许直接给一个卡组数组或单套卡组，省得每次手写外壳
+    if isinstance(data.get("decks"), list):
+        return data
+    if "when" in data:
+        return {"enabled": True, "decks": [data]}
+    raise ApiFailure("规则文件里没有 decks 段（也不像单套卡组：缺 when）")
+
+
+def _print_surrender_check(ctx: Ctx, cfg: dict) -> int:
+    """实时判定：对方读到什么、每套卡组满足到第几项。"""
+    state = (ctx.get("/api/status") or {}).get("surrenders") or {}
+    if ctx.json:
+        print(json.dumps({"ok": True, "enabled": bool(cfg.get("enabled")),
+                          "state": state}, ensure_ascii=False))
+        return EXIT_OK
+    if not cfg.get("enabled"):
+        print("卡组识别投降：关（用 hsctl surrender on 打开）")
+    if state.get("error"):
+        print(f"⚠️ 读取失败：{state['error']}")
+        return EXIT_API
+    if not state.get("decks"):
+        print("（还没有可判定的卡组，或自动化未启动/尚未进入对局）")
+        if state.get("compile_errors"):
+            for err in state["compile_errors"]:
+                print(f"  ⚠️ {err.get('path') or 'config'}：{err.get('message')}")
+        return EXIT_OK
+    import card_catalog
+    cls = state.get("opponent_class") or ""
+    print(f"对方职业：{card_catalog.class_label(cls) if cls else '未读到'}"
+          f"    回合：{state.get('round') or '-'}"
+          f"    {'我方回合' if state.get('my_turn') else '对方回合'}")
+    facts = state.get("facts") or {}
+    if facts.get("played") or facts.get("start_of_game"):
+        print(f"已记录：对方打出 {len(state.get('opponent_played') or [])} 张"
+              f" · 出现过 {len(state.get('opponent_revealed') or [])} 张"
+              f" · 开局生效 {len(state.get('start_of_game') or [])} 张")
+    for deck in state["decks"]:
+        hero = card_catalog.class_label(deck.get("class")) if deck.get("class") \
+            else "任意职业"
+        head = "✓ 命中，会投降" if deck.get("matched") else "× 未满足"
+        print(f"  {head} 「{deck.get('name') or deck.get('id')}」"
+              f"（{hero}）{deck.get('done')}/{deck.get('total')}")
+        for item in deck.get("checks") or []:
+            print(f"      {'✓' if item.get('ok') else '·'} {item.get('text')}")
+    if state.get("triggered"):
+        print("本局已触发过投降（不会重复）")
+    return EXIT_OK
+
+
+def cmd_card(args, ctx: Ctx) -> int:
+    """查卡：中文名补全（默认）/ 单卡详情（--show）。纯本地 cards.json，不联网。
+
+    用法::
+
+        hsctl card 神秘            # 补全候选（打错字也会给几个最像的）
+        hsctl card 神秘访客 --show  # 单卡详情（含自动纠错与多版本 id）
+    """
+    import card_catalog
+
+    catalog = card_catalog.default_catalog()
+    if catalog is None:
+        print(f"卡牌库不可用：{card_catalog.catalog_error()}")
+        return EXIT_API
+    sub = "show" if getattr(args, "show", False) else "search"
+    text = " ".join(args.words or []).strip()
+    if not text:
+        raise ApiFailure("要查什么卡？（例：hsctl card search 神秘访客）")
+
+    if sub == "show":
+        result = catalog.lookup(text, aliases=None)
+        if ctx.json:
+            print(json.dumps({
+                "ok": result.ok, "query": result.query,
+                "cards": [hit.to_dict() for hit in result.hits],
+                "error": result.error,
+                "suggestions": list(result.suggestions),
+                "corrected_from": result.corrected_from,
+            }, ensure_ascii=False))
+            return EXIT_OK if result.ok else EXIT_API
+        if not result.ok:
+            print(f"✗ {result.error}")
+            for name in result.suggestions:
+                print(f"  你可能想找：{name}")
+            return EXIT_API
+        hit = result.hits[0]
+        if result.corrected_from:
+            print(f"（「{result.corrected_from}」按「{hit.name}」处理）")
+        print(hit.describe())
+        if len(hit.ids) > 1:
+            print(f"  同名版本：{'、'.join(hit.ids)}")
+        return EXIT_OK
+
+    hits = catalog.search(text, limit=getattr(args, "limit", 8) or 8)
+    if ctx.json:
+        print(json.dumps({"ok": True, "query": text,
+                          "cards": [hit.to_dict() for hit in hits]},
+                         ensure_ascii=False))
+        return EXIT_OK
+    if not hits:
+        suggestion = catalog.fuzzy_suggest(text, limit=3)
+        print(f"没有匹配「{text}」的卡")
+        for hit in suggestion:
+            print(f"  你可能想找：{hit.describe()}")
+        return EXIT_API
+    for hit in hits:
+        print(hit.describe())
+    return EXIT_OK
+
+
 def cmd_rank_stop_show(args, ctx: Ctx) -> int:
     return _print_section(ctx, "rank_stop", "段位目标", (
         ("enabled", "总开关"),
@@ -2743,6 +3008,40 @@ def build_parser() -> argparse.ArgumentParser:
     q = csub2.add_parser("now", parents=[common],
                          help="手动投降：立刻点「齿轮 → 认输」（无需先停自动化）")
     q.set_defaults(handler=cmd_concede_now)
+
+    # ---- surrender（卡组识别投降：只判对方）
+    p = sub.add_parser("surrender", parents=[common],
+                       help="卡组识别投降：认出对方是哪套卡组就认输（只判对方）")
+    p.set_defaults(handler=cmd_surrender)
+    ssub = p.add_subparsers(dest="action", metavar="<动作>")
+    q = ssub.add_parser("show", parents=[common], help="看配置（默认）")
+    q.set_defaults(handler=cmd_surrender)
+    q = ssub.add_parser("on", parents=[common], help="打开总开关")
+    q.set_defaults(handler=cmd_surrender)
+    q = ssub.add_parser("off", parents=[common], help="关掉总开关（保留卡组）")
+    q.set_defaults(handler=cmd_surrender)
+    q = ssub.add_parser("check", parents=[common],
+                        help="看这一局的实时判定（对方职业 / 每个条件是否满足）")
+    q.set_defaults(handler=cmd_surrender)
+    q = ssub.add_parser("set", parents=[common],
+                        help="整段替换规则（--file rules.json，- 表示读 stdin）")
+    q.add_argument("--file", default=None, help="规则 JSON 文件路径（- = stdin）")
+    q.add_argument("--rules", default=None,
+                   help="直接给 JSON 文本（最外层是 {enabled, decks} 或单套卡组）")
+    q.add_argument("--yes", action="store_true",
+                   help="已经在当前对局里能命中时，仍然保存（否则需二次确认）")
+    q.set_defaults(handler=cmd_surrender)
+    q = ssub.add_parser("clear", parents=[common], help="清空所有卡组并关掉开关")
+    q.set_defaults(handler=cmd_surrender)
+
+    # ---- card（本地查卡，不联网也不需要控制台）
+    p = sub.add_parser("card", parents=[common],
+                       help="查卡：中文名补全（本地 cards.json）")
+    p.add_argument("words", nargs="+", metavar="<卡名或ID>", help="要查的名字/ID")
+    p.add_argument("--limit", type=int, default=8, help="最多返回几条候选（默认 8）")
+    p.add_argument("--show", action="store_true",
+                   help="单卡详情（含自动纠错与同名多版本 id）")
+    p.set_defaults(handler=cmd_card)
 
     # ---- rank-stop
     p = sub.add_parser("rank-stop", parents=[common], help="段位目标")

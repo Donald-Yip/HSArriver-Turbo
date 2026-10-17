@@ -224,6 +224,12 @@ python hsctl.py liveness set --enabled --warn 120 --stop 300
 python hsctl.py watchdog on                      # 中断重启：日志停滞 5 分钟就重启炉石并重开
 python hsctl.py watchdog set --stale 300 --max-restarts 3 --window 600
 python hsctl.py concede set --enabled --threshold 12 --rounds 4
+# 卡组识别投降（只判对方）：认出对面是哪套卡组就投；规则是「特征牌 + 与/或/非」树
+python hsctl.py surrender                        # 看配置（条件译成中文）
+python hsctl.py surrender on|off                 # 总开关（保留卡组）
+python hsctl.py surrender check                  # 这一局对方职业 + 每个条件是否满足
+python hsctl.py surrender set --file rules.json  # 存规则；当场会命中时要加 --yes
+python hsctl.py card 神秘访客                     # 查卡名（本地，不联网）
 python hsctl.py rank-stop set --enabled --mode legend_number --legend-number 500 --action stop
 # 控分：名次数值 < 500（名次比目标更靠前）就开局投降，压到 >= 500 再正常打
 python hsctl.py rank-stop set --enabled --mode legend_number --legend-number 500 --action keep
@@ -274,6 +280,28 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
   （`fsm.init()` 重建 `RecommendationConfig`），不用重启脚本进程。
 - 典型场景：上传说后换模式继续——
   `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 2" "start"`。
+
+### 4.2 卡组识别投降规则（`surrender`）
+
+**只判对方**：对方打出 / 出现过 / 开局生效的卡才算数，自己的牌永远不算。
+命中任意一套 → 立刻认输（不需要等自己回合）。
+
+```json
+{"enabled": true, "decks": [{
+  "id": "priest_alizana", "name": "牧师 · 阿扎莉娜 + 神秘访客", "class": "牧师",
+  "when": {"all": [
+    {"type": "start_of_game", "card": "裂魂者阿扎莉娜"},
+    {"type": "played", "card": "神秘访客", "within": {"max": 4}}
+  ]}}]}
+```
+
+- 节点：`all`（与）/ `any`（或）/ `not`（非）；条件类型：`played` / `revealed`（别名
+  `seen`）/ `start_of_game` / `played_or_revealed` / `in_zone` / `turn`
+- 其它字段：`card`（中文名或 id，数组=任一）、`card_type`、`side`（默认 `opponent`）、
+  `at_least/at_most`、`within`（`{"min":1,"max":4}`）；`class` 可写可不写
+- 卡名写中文即可，错字会自动纠正；校验失败**一律不写盘**（保留上一份能用的）
+- 运行中热保存：若这份规则**当场就能命中**会返回 `needs_confirm`，CLI 加 `--yes` 才存
+- 调规则时先 `python hsctl.py surrender check`：它列出对方职业 + 每个条件 ✓/×
 
 ## 5. 改参数前必须知道的生效时机
 

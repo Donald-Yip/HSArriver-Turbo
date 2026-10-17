@@ -9,9 +9,10 @@ import keyboard
 
 import click
 import get_screen
+import surrender_rules
 from config import (
-    DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
-    rank_stop_settings,
+    DEFAULT_AUTO_CONCEDE, DEFAULT_AUTO_SURRENDER, SNAPSHOT_WRITE_INTERVAL,
+    human_like_settings, rank_stop_settings,
 )
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
@@ -353,6 +354,8 @@ def reset_game_session():
     _name_match_result = None
     # 新一局重新建立“对手随从基线”，第一份快照只记录不悬停。
     _oppo_minion_ids = None
+    # 卡组识别投降：清掉上一局的事实（职业/打出/揭示/开局生效卡）。
+    surrender_rules.engine.reset()
     click.center_mouse()
 
 
@@ -407,6 +410,27 @@ def init():
     click.center_mouse()
 
 
+def _zone_before_update(state, container):
+    """这一行会不会改 ZONE？会的话返回改之前的旧区域。
+
+    为什么需要：`update_state()` 直接把新值写进实体，写完之后就再也拿不到
+    "原来在哪个区域"，而"打出"的判据正是 HAND → PLAY。所以必须在更新前
+    偷看一眼旧值。
+    """
+    try:
+        if getattr(container, "line_type", None) != LOG_LINE_TAG_CHANGE:
+            return None
+        info = getattr(container, "info_dict", {}) or {}
+        if str(info.get("tag") or "") != "ZONE":
+            return None
+        entity = state.entity_dict.get(str(info.get("entity") or ""))
+        if entity is None:
+            return None
+        return str(entity.query_tag("ZONE", "") or "")
+    except Exception:
+        return None
+
+
 def update_log_state():
     global active_game_generation
     global _last_snapshot_write
@@ -416,7 +440,12 @@ def update_log_state():
 
     previous_revision = log_state.revision
     for log_line_container in log_container.message_list:
+        # 卡组识别投降：先记住旧 ZONE（判断"打出"要用），再更新状态，
+        # 最后把这行喂给规则引擎（内部 try/except，绝不影响主循环）。
+        prev_zone = _zone_before_update(log_state, log_line_container)
         ok = update_state(log_state, log_line_container)
+        surrender_rules.engine.observe(log_state, log_line_container,
+                                       prev_zone=prev_zone)
         # if not ok:
         #     return False
 
@@ -1647,6 +1676,73 @@ def _load_concede_config():
         return dict(DEFAULT_AUTO_CONCEDE)
 
 
+# ---------------------------------------------------------------- 卡组识别投降
+# 敌我判反时"暂停判定"的提示，每局只打一次。
+_NAME_MISMATCH_SURRENDER_WARNED = None
+
+
+def _load_surrender_config():
+    """读取卡组识别投降配置（ui_config.json 的 auto_surrender 段）。
+
+    每次都读文件：网页保存后立即生效，不用重启自动化。
+    """
+    try:
+        import json
+        from pathlib import Path
+        path = Path(__file__).resolve().parent / "ui_config.json"
+        raw = json.loads(path.read_text(encoding="utf-8")).get("auto_surrender")
+        if not isinstance(raw, dict):
+            return dict(DEFAULT_AUTO_SURRENDER)
+        return raw
+    except Exception:
+        return dict(DEFAULT_AUTO_SURRENDER)
+
+
+def _maybe_surrender_by_rules():
+    """卡组识别投降：命中返回命中信息（调用方再去点认输），否则 None。
+
+    必须**在 `is_my_turn` 之前**调用。用户的需求是"对方在前四回合打出某卡
+    就投降"，而对手打牌发生在他自己的回合；只在己方回合判定就永远错过。
+    """
+    global _NAME_MISMATCH_SURRENDER_WARNED
+    if quitting_flag or _concede_triggered:
+        return None
+    cfg = _load_surrender_config()
+    if not cfg.get("enabled"):
+        return None
+
+    # 敌我可能判反（配置的用户 ID 与日志昵称对不上）：一律不判定。
+    # 这时"对方的卡"有可能其实是我方的卡，宁可错过也不误投降。
+    info = _name_match_result
+    if isinstance(info, dict) and info.get("matched") is False:
+        key = (log_state.game_generation, "name_mismatch")
+        if _NAME_MISMATCH_SURRENDER_WARNED != key:
+            _NAME_MISMATCH_SURRENDER_WARNED = key
+            manual_controller.output(
+                "[SYS] 卡组识别投降：用户 ID 与日志玩家名不匹配，"
+                "无法可靠区分敌我，本局暂停判定（胜率投降不受影响）。")
+        return None
+
+    hit = surrender_rules.engine.check(cfg, log_state)
+    if hit is None:
+        return None
+    details = "；".join(hit.get("evidence") or [])
+    manual_controller.output(
+        f"[SYS] 识别为对方卡组「{hit['name']}」→ 投降"
+        + (f"（{details}）" if details else ""))
+    return hit
+
+
+def surrender_rule_state():
+    """给网页/浮层：当前卡组识别配置 + 实时进度（哪套卡组满足到第几项）。"""
+    cfg = _load_surrender_config()
+    try:
+        state = surrender_rules.engine.status(log_state)
+    except Exception as exc:
+        state = {"error": str(exc), "decks": []}
+    return {"config": cfg, "state": state}
+
+
 def read_ai_win_rate():
     """OCR 左上角盒子“AI胜率 X%”，返回百分数值；读不到返回 None。
 
@@ -1731,11 +1827,15 @@ def _maybe_concede(snapshot):
     return False
 
 
-def _do_concede():
-    """点击右下角齿轮 → 等菜单弹出 → 点中间红色“认输”。"""
+def _do_concede(reason=None):
+    """点击右下角齿轮 → 等菜单弹出 → 点中间红色“认输”。
+
+    `reason` 只影响提示文案（默认沿用原来的「持续低胜率」），
+    卡组识别投降会传「识别为对方卡组「X」」。
+    """
     global concede_count
     concede_count += 1
-    manual_controller.output("[SYS] 持续低胜率，开始自动认输……")
+    manual_controller.output(f"[SYS] {reason or '持续低胜率'}，开始自动认输……")
     try:
         with click.hearthstone_action_session():
             click.click_setting()      # 齿轮 (1895, 1060)
@@ -1852,6 +1952,7 @@ def _keep_score_once() -> bool:
 def run_automatic_battle_step():
     """Observe opponent turns; execute one newly validated player action."""
     global player_turn_delay_key, last_automation_diagnostic, _ocr_fail_streak
+    global _concede_triggered
 
     snapshot = refresh_snapshot()
     if snapshot is None:
@@ -1863,6 +1964,13 @@ def run_automatic_battle_step():
     if _concede_triggered:
         # 已触发自动认输：等待日志确认对局真正结束（COMPLETE）后再走结算计数，
         # 避免点完认输立刻计数导致“完成对局”时机不准。
+        return None
+    # 卡组识别投降：**在 is_my_turn 之前**判定 —— 特征卡往往是对手在他自己
+    # 回合打出的，等到我方回合再看就已经晚了。命中就立刻点认输。
+    surrender_hit = _maybe_surrender_by_rules()
+    if surrender_hit is not None:
+        _concede_triggered = True
+        _do_concede(reason=f"识别为对方卡组「{surrender_hit['name']}」")
         return None
     if not snapshot.is_my_turn:
         # 活人感：对手回合里出现新随从就移上去悬停（只移动不点击）；
