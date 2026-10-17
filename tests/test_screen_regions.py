@@ -461,8 +461,11 @@ class RegionBoxDrawingTests(unittest.TestCase):
 
     def test_skip_keys_omits_the_region_entirely(self):
         """被跳过的区域在这一层里一个像素都不画（改由校准窗口单独高亮）。"""
+        # mapping=None：按客户区相对坐标画，不受这台机器的窗口位置/缩放影响
+        # （不传就会走真实显示换算，炉石窗口一挪这条就假失败）。
         layer = region_overlay.paint_layer(
-            1920, 1080, None, self.config, skip_keys=("post_game_start",))
+            1920, 1080, None, self.config, skip_keys=("post_game_start",),
+            mapping=None)
 
         left, top, right, bottom = (1325, 865, 1475, 935)
         for x in range(left, right + 1):

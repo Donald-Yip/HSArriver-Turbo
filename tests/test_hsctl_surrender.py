@@ -223,6 +223,29 @@ class CheckTests(unittest.TestCase):
         self.assertIn("✓ 命中", out)
         self.assertIn("对方打出过 神秘访客", out)
 
+    def test_check_renders_tree_when_present(self):
+        state = {
+            "opponent_class": "MAGE", "round": 4, "my_turn": True,
+            "decks": [{"id": "nested", "name": "嵌套卡组", "class": "",
+                       "matched": False, "done": 2, "total": 3,
+                       "checks": [{"text": "对方打出过 神秘访客", "ok": True},
+                                  {"text": "对方打出过 火球术", "ok": True},
+                                  {"text": "对方打出过 寒冰箭", "ok": False}],
+                       "tree": {"op": "all", "ok": False, "children": [
+                           {"op": "leaf", "ok": True, "text": "对方打出过 神秘访客"},
+                           {"op": "any", "ok": True, "children": [
+                               {"op": "leaf", "ok": True, "text": "对方打出过 火球术"},
+                               {"op": "leaf", "ok": False, "text": "对方打出过 寒冰箭"},
+                           ]},
+                       ]}}],
+        }
+        ctx = FakeCtx(status={"auto_surrender": CFG, "surrenders": state})
+        code, out = _run(hsctl.cmd_surrender, _ns(action="check"), ctx)
+        self.assertEqual(code, hsctl.EXIT_OK)
+        self.assertIn("且", out)
+        self.assertIn("或", out)
+        self.assertIn("对方打出过 寒冰箭", out)
+
     def test_check_when_automation_idle(self):
         ctx = FakeCtx(status={"auto_surrender": CFG,
                               "surrenders": {"decks": [],

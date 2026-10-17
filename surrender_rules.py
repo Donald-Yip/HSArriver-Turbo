@@ -334,6 +334,13 @@ def _normalize_node(raw, path, errors, depth, counter):
             _error(errors, path, "turn 条件至少要写 min 或 max")
         if low is not None and high is not None and low > high:
             _error(errors, path, f"回合范围写反了：min={low} > max={high}")
+        # turn 判的是"当前回合数"，卡牌/区域/计数这些字段对它没有意义。
+        # 以前这里直接 return，让下面那段 at_least / 未知字段校验变成了死代码，
+        # 写错了也悄悄生效；现在显式拒绝（side 仍允许，兼容历史配置）。
+        wasted = sorted(set(lowered) - {"type", "field", "min", "max", "side"})
+        if wasted:
+            _error(errors, path,
+                   f"turn 条件不支持这些字段：{'、'.join(wasted)}")
         node.update({"field": field_name, "min": low, "max": high})
         return node, 1
 
@@ -623,6 +630,25 @@ def iter_leaves(expr):
         yield from iter_leaves(child)
 
 
+def iter_leaves_with_polarity(expr, negated: bool = False):
+    """同 ``iter_leaves``，但同时给出"这叶子是否被「非」包着"。
+
+    原来列证据时对每个叶子直接 ``eval_leaf``，一旦条件里有 ``not``，
+    证据的 ✓/✗ 就跟真实判定相反了。
+    """
+    if expr is None:
+        return
+    kind = expr[0]
+    if kind == "leaf":
+        yield expr[1], negated
+        return
+    if kind == "not":
+        yield from iter_leaves_with_polarity(expr[1], not negated)
+        return
+    for child in expr[1]:
+        yield from iter_leaves_with_polarity(child, negated)
+
+
 def describe_expr(expr) -> str:
     """把编译后的条件树写回一句中文（CLI/日志展示用）。
 
@@ -776,11 +802,13 @@ def eval_leaf(leaf: Leaf, ctx: EvalContext) -> bool:
     else:
         return False
 
-    if leaf.at_least:
-        return count >= leaf.at_least
-    if leaf.at_most:
-        return 0 < count <= leaf.at_most
-    return count >= 1
+    # at_least 与 at_most 可以同时写（"2~3 张"）：以前 at_least 先 return，
+    # 导致 at_most 永远走不到，范围上限被忽略。
+    if count < (leaf.at_least or 1):
+        return False
+    if leaf.at_most and count > leaf.at_most:
+        return False
+    return True
 
 
 def eval_node(expr, ctx: EvalContext) -> bool:
@@ -796,6 +824,33 @@ def eval_node(expr, ctx: EvalContext) -> bool:
     if kind == "any":
         return any(eval_node(child, ctx) for child in expr[1])
     return False
+
+
+def eval_tree(expr, ctx: EvalContext) -> dict:
+    """像 ``eval_node`` 一样求值，但**保留结构**（网页状态栏显示每组的真假）。
+
+    返回 ``{"op": "leaf|not|all|any", "ok": bool, ...}``：叶子带 ``text``，
+    组带 ``children``。语义与 ``eval_node`` 完全一致，只是不做短路拍平。
+    """
+    if expr is None:
+        return {"op": "leaf", "ok": False, "text": "（无条件）"}
+    kind = expr[0]
+    if kind == "leaf":
+        leaf = expr[1]
+        try:
+            ok = bool(eval_leaf(leaf, ctx))
+        except Exception:
+            ok = False
+        return {"op": "leaf", "ok": ok, "text": leaf.label()}
+    if kind == "not":
+        child = eval_tree(expr[1], ctx)
+        return {"op": "not", "ok": not child["ok"], "children": [child]}
+    children = [eval_tree(child, ctx) for child in expr[1]]
+    if kind == "all":
+        ok = bool(children) and all(item["ok"] for item in children)
+    else:
+        ok = any(item["ok"] for item in children)
+    return {"op": kind, "ok": ok, "children": children}
 
 
 def evaluate_decks(decks, ctx: EvalContext):
@@ -1047,9 +1102,16 @@ class SurrenderRuleEngine:
             lines.append(
                 f"对方职业={deck.hero_class}"
                 f"（实际 {ctx.opponent_class or '未知'}）{'✓' if ok else '✗'}")
-        for leaf in iter_leaves(deck.expr):
+        for leaf, negated in iter_leaves_with_polarity(deck.expr):
             ok = eval_leaf(leaf, ctx)
-            lines.append(f"{leaf.label()} {'✓' if ok else '✗'}")
+            prefix = "非 " if negated else ""
+            lines.append(f"{prefix}{leaf.label()} {'✓' if ok else '✗'}")
+        try:
+            overall = bool(eval_node(deck.expr, ctx))
+        except Exception:
+            overall = False
+        lines.append(f"整体条件：{describe_expr(deck.expr)} "
+                     f"{'✓' if overall else '✗'}")
         return lines
 
     def status(self, log_state=None) -> dict:
@@ -1101,7 +1163,18 @@ class SurrenderRuleEngine:
                     checks.append({"text": leaf.label(), "ok": bool(ok)})
                 class_ok = (not deck.hero_class
                             or ctx.opponent_class == deck.hero_class)
-                matched = class_ok and all(item["ok"] for item in checks)
+                # 命中必须用**真实表达式**求值：以前把树拍平后 all(叶子)，
+                # 带「或」的卡组只要有一支没满足就显示未命中（引擎判定是对的、
+                # 状态栏是错的）。checks/done/total 保持扁平契约不变。
+                try:
+                    expr_ok = bool(eval_node(deck.expr, ctx))
+                except Exception:
+                    expr_ok = False
+                try:
+                    tree = eval_tree(deck.expr, ctx)
+                except Exception:
+                    tree = {"op": "leaf", "ok": False, "text": "（求值失败）"}
+                matched = class_ok and expr_ok
                 decks.append({
                     "id": deck.id,
                     "name": deck.name,
@@ -1109,6 +1182,7 @@ class SurrenderRuleEngine:
                     "class_ok": class_ok,
                     "matched": bool(matched),
                     "checks": checks,
+                    "tree": tree,
                     "done": sum(1 for item in checks if item["ok"]),
                     "total": len(checks),
                 })

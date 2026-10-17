@@ -143,5 +143,73 @@ class EmptyConfigTests(_Base):
         self.assertIn("未启动", state["message"])
 
 
+NESTED_DECK = {
+    "id": "nested",
+    "name": "嵌套 · 法师",
+    "class": "法师",
+    "when": {"all": [
+        {"type": "played", "card": "神秘访客"},
+        {"any": [{"type": "played", "card": "火球术"},
+                 {"type": "played", "card": "寒冰箭"}]},
+    ]},
+}
+
+
+class NestedSaveTests(_Base):
+    def test_nested_any_is_not_flattened(self):
+        result = web_ui.api_save_surrender_rules(
+            {"config": {"enabled": True, "decks": [dict(NESTED_DECK)]}})
+        self.assertTrue(result["ok"], result)
+        when = self.cfg["auto_surrender"]["decks"][0]["when"]
+        self.assertEqual(len(when["all"]), 2)
+        self.assertEqual(len(when["all"][1]["any"]), 2)
+
+    def test_saving_normalized_config_again_is_idempotent(self):
+        first = web_ui.api_save_surrender_rules(
+            {"config": {"enabled": True, "decks": [dict(NESTED_DECK)]}})
+        self.assertTrue(first["ok"], first)
+        saved = self.cfg["auto_surrender"]
+        second = web_ui.api_save_surrender_rules({"config": saved})
+        self.assertTrue(second["ok"], second)
+        self.assertEqual(second["config"]["decks"][0]["when"],
+                         saved["decks"][0]["when"])
+
+    def test_not_wrapping_a_group_round_trips(self):
+        deck = {"id": "negate", "name": "非", "class": "",
+                "when": {"not": {"any": [
+                    {"type": "played", "card": "火球术"},
+                    {"type": "played", "card": "寒冰箭"}]}}}
+        result = web_ui.api_save_surrender_rules(
+            {"config": {"enabled": True, "decks": [deck]}})
+        self.assertTrue(result["ok"], result)
+        when = self.cfg["auto_surrender"]["decks"][0]["when"]
+        self.assertIn("not", when)
+        self.assertEqual(len(when["not"]["any"]), 2)
+
+
+class WebPageTests(unittest.TestCase):
+    """前端源码的静态断言：嵌套编辑器与可收起卡组的钩子必须存在。"""
+
+    @classmethod
+    def setUpClass(cls):
+        from pathlib import Path
+        path = Path(__file__).resolve().parent.parent / "web" / "index.html"
+        cls.html = path.read_text(encoding="utf8")
+
+    def test_page_has_nested_editor_hooks(self):
+        for token in ('data-act="add-group"', "data-path", 'data-f="op"',
+                      "surrenderCollectNode", "SURRENDER_OPS",
+                      "surrenderLeafSupported"):
+            self.assertIn(token, self.html, token)
+
+    def test_page_has_collapsible_deck(self):
+        for token in ('data-act="toggle-deck"', "hsSurrenderCollapsed",
+                      ".sdeck.collapsed", "sdeck-body", "sdeck-summary"):
+            self.assertIn(token, self.html, token)
+
+    def test_old_single_level_wording_is_gone(self):
+        self.assertNotIn("表单只能表达", self.html)
+
+
 if __name__ == "__main__":
     unittest.main()

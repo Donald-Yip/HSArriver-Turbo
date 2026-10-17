@@ -23,6 +23,8 @@ CATALOG = card_catalog.CardCatalog([
     _card("REV_246", "神秘访客", "PRIEST", "MINION"),
     _card("CORE_REV_246", "神秘访客", "PRIEST", "MINION"),
     _card("CS2_029", "火球术", "MAGE", "SPELL"),
+    _card("CS2_024", "寒冰箭", "MAGE", "SPELL"),
+    _card("EX1_277", "奥术飞弹", "MAGE", "SPELL"),
 ])
 
 
@@ -514,6 +516,191 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["would_fire_now"])
         self.assertFalse(self.engine.status(self.log_state)["triggered"])
+
+
+# ---------------------------------------------------------------- 嵌套逻辑
+class NestedNormalizeTests(unittest.TestCase):
+    def _norm(self, when):
+        return sr.normalize_config(_config(when))
+
+    def test_a_and_b_or_c_structure_is_preserved(self):
+        result = self._norm({"all": [
+            {"type": "played", "card": "神秘访客"},
+            {"any": [{"type": "played", "card": "火球术"},
+                     {"type": "played", "card": "寒冰箭"}]},
+        ]})
+        self.assertTrue(result["ok"], result["errors"])
+        node = result["config"]["decks"][0]["when"]
+        self.assertEqual(list(node), ["all"])
+        self.assertEqual(len(node["all"]), 2)
+        self.assertEqual(len(node["all"][1]["any"]), 2)
+
+    def test_nested_and_or_aliases_are_normalized(self):
+        result = self._norm({"and": [
+            {"type": "played", "card": "神秘访客"},
+            {"or": [{"type": "played", "card": "火球术"},
+                    {"type": "played", "card": "寒冰箭"}]},
+        ]})
+        self.assertTrue(result["ok"], result["errors"])
+        node = result["config"]["decks"][0]["when"]
+        self.assertIn("all", node)
+        self.assertIn("any", node["all"][1])
+
+    def test_not_can_wrap_a_group(self):
+        result = self._norm({"not": {"any": [
+            {"type": "played", "card": "火球术"},
+            {"type": "played", "card": "寒冰箭"},
+        ]}})
+        self.assertTrue(result["ok"], result["errors"])
+        node = result["config"]["decks"][0]["when"]
+        self.assertIn("not", node)
+        self.assertEqual(len(node["not"]["any"]), 2)
+
+    def test_depth_limit(self):
+        node = {"type": "played", "card": "神秘访客"}
+        for _ in range(8):
+            node = {"not": node}
+        self.assertTrue(self._norm(node)["ok"])
+        node = {"not": node}
+        result = self._norm(node)
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("嵌套太深" in err["message"]
+                            for err in result["errors"]), result["errors"])
+
+    def test_leaf_limit(self):
+        leaves = [{"type": "played", "card": "神秘访客"}] * 64
+        self.assertTrue(self._norm({"all": leaves})["ok"])
+        result = self._norm({"all": leaves + [{"type": "played",
+                                               "card": "神秘访客"}]})
+        self.assertFalse(result["ok"])
+        self.assertTrue(any("条件太多" in err["message"]
+                            for err in result["errors"]), result["errors"])
+
+    def test_turn_rejects_card_fields(self):
+        for extra in ({"card": "神秘访客"}, {"within": {"max": 4}},
+                      {"at_least": 2}, {"zone": "PLAY"}, {"nonsense": 1}):
+            node = {"type": "turn", "field": "round", "max": 4}
+            node.update(extra)
+            result = self._norm(node)
+            self.assertFalse(result["ok"], extra)
+            self.assertTrue(any("turn 条件不支持" in err["message"]
+                                for err in result["errors"]), extra)
+
+    def test_turn_allows_side_for_backward_compat(self):
+        result = self._norm({"type": "turn", "field": "round", "max": 4,
+                             "side": "opponent"})
+        self.assertTrue(result["ok"], result["errors"])
+        node = result["config"]["decks"][0]["when"]
+        self.assertEqual(node["type"], "turn")
+        self.assertNotIn("side", node)
+
+
+class NestedEvalTests(unittest.TestCase):
+    A = {"type": "played", "card": "神秘访客"}
+    B = {"type": "played", "card": "火球术"}
+    C = {"type": "played", "card": "寒冰箭"}
+    D = {"type": "played", "card": "奥术飞弹"}
+
+    def _decks(self, when):
+        normalized = sr.normalize_config(_config(when, hero_class=""))
+        self.assertTrue(normalized["ok"], normalized["errors"])
+        decks, errors, _ = sr.compile_config(normalized["config"], CATALOG)
+        self.assertEqual(errors, [])
+        return decks
+
+    def _hit(self, decks, *card_ids):
+        facts = _facts(played=[_event(cid, "opponent", 2) for cid in card_ids])
+        return sr.evaluate_decks(decks, _ctx(facts, "", 2))
+
+    def test_a_and_b_or_c(self):
+        decks = self._decks({"all": [self.A, {"any": [self.B, self.C]}]})
+        self.assertIsNotNone(self._hit(decks, "REV_246", "CS2_029"))   # A+B
+        self.assertIsNotNone(self._hit(decks, "REV_246", "CS2_024"))   # A+C
+        self.assertIsNone(self._hit(decks, "REV_246"))                 # 只有 A
+        self.assertIsNone(self._hit(decks, "CS2_029", "CS2_024"))      # 只有 B/C
+
+    def test_a_and_not_b_or_c(self):
+        decks = self._decks({"all": [self.A,
+                                     {"not": {"any": [self.B, self.C]}}]})
+        self.assertIsNone(self._hit(decks, "REV_246", "CS2_029"))
+        self.assertIsNone(self._hit(decks, "REV_246", "CS2_024"))
+        self.assertIsNotNone(self._hit(decks, "REV_246"))
+
+    def test_at_least_plus_at_most_range(self):
+        decks = self._decks({"type": "played",
+                             "card": ["神秘访客", "火球术", "寒冰箭", "奥术飞弹"],
+                             "at_least": 2, "at_most": 3})
+        self.assertIsNone(self._hit(decks, "REV_246"))
+        self.assertIsNotNone(self._hit(decks, "REV_246", "CS2_029"))
+        self.assertIsNotNone(self._hit(decks,
+                                       "REV_246", "CS2_029", "CS2_024"))
+        # 超过 at_most 就不算（旧实现这里恒为 True）
+        self.assertIsNone(self._hit(decks, "REV_246", "CS2_029",
+                                    "CS2_024", "EX1_277"))
+
+    def test_at_most_alone_still_requires_one(self):
+        decks = self._decks({"type": "played",
+                             "card": ["神秘访客", "火球术"], "at_most": 1})
+        self.assertIsNone(self._hit(decks))
+        self.assertIsNotNone(self._hit(decks, "REV_246"))
+
+
+class NestedStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = sr.SurrenderRuleEngine()
+        self.log_state = FakeLogState(my_turn=3, oppo_turn=2)
+
+    def _play(self, entity_id, card_id):
+        self.log_state.add(entity_id, card_id, "2", zone="PLAY")
+        self.engine.observe(self.log_state,
+                            LineInfoContainer(LOG_LINE_TAG_CHANGE,
+                                              entity=str(entity_id),
+                                              tag="ZONE", value="PLAY"),
+                            prev_zone="HAND")
+
+    def test_any_branch_hit_is_reported_as_matched(self):
+        cfg = _config({"all": [
+            {"type": "played", "card": "神秘访客"},
+            {"any": [{"type": "played", "card": "火球术"},
+                     {"type": "played", "card": "寒冰箭"}]},
+        ]}, hero_class="")
+        self.engine.configure(cfg)
+        self._play(401, "REV_246")
+        self._play(402, "CS2_024")
+        deck = self.engine.status(self.log_state)["decks"][0]
+        self.assertTrue(deck["matched"])      # 旧实现按"所有叶子"算 → False
+        self.assertEqual(deck["total"], 3)    # checks 仍是扁平契约
+        self.assertEqual(deck["done"], 2)
+
+    def test_tree_keeps_structure_and_not(self):
+        cfg = _config({"all": [
+            {"type": "played", "card": "神秘访客"},
+            {"not": {"any": [{"type": "played", "card": "火球术"},
+                            {"type": "played", "card": "寒冰箭"}]}},
+        ]}, hero_class="")
+        self.engine.configure(cfg)
+        self._play(403, "REV_246")
+        tree = self.engine.status(self.log_state)["decks"][0]["tree"]
+        self.assertEqual(tree["op"], "all")
+        self.assertTrue(tree["ok"])
+        negate = tree["children"][1]
+        self.assertEqual(negate["op"], "not")
+        self.assertTrue(negate["ok"])
+        self.assertFalse(negate["children"][0]["ok"])
+        self.assertEqual(negate["children"][0]["op"], "any")
+
+    def test_evidence_keeps_not_polarity(self):
+        cfg = _config({"all": [
+            {"type": "played", "card": "神秘访客"},
+            {"not": {"type": "played", "card": "火球术"}},
+        ]}, hero_class="")
+        self.engine.configure(cfg)
+        self._play(404, "REV_246")
+        hit = self.engine.check(cfg, self.log_state)
+        self.assertIsNotNone(hit)
+        text = "\n".join(hit["evidence"])
+        self.assertIn("非 ", text)
+        self.assertIn("整体条件", text)
 
 
 if __name__ == "__main__":

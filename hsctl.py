@@ -1802,6 +1802,23 @@ def _surrender_decks_lines(cfg: dict):
     return lines, bad
 
 
+def _surrender_tree_lines(node, indent: int = 0) -> list:
+    """把 /api/status 的 tree 渲染成缩进行（保留「且 / 或 / 非」结构）。"""
+    if not node:
+        return []
+    pad = "      " + "    " * indent
+    ok = bool(node.get("ok"))
+    children = node.get("children") or []
+    if not children:
+        return [f"{pad}{'✓' if ok else '·'} {node.get('text') or ''}"]
+    label = {"all": "且", "any": "或", "not": "非"}.get(node.get("op"),
+                                                       node.get("op") or "")
+    lines = [f"{pad}{'✓' if ok else '·'} {label}"]
+    for child in children:
+        lines.extend(_surrender_tree_lines(child, indent + 1))
+    return lines
+
+
 def cmd_surrender(args, ctx: Ctx) -> int:
     """卡组识别投降：识别到「对方是某套有特征牌的卡组」就立刻认输。
 
@@ -1955,6 +1972,10 @@ def _print_surrender_check(ctx: Ctx, cfg: dict) -> int:
         head = "✓ 命中，会投降" if deck.get("matched") else "× 未满足"
         print(f"  {head} 「{deck.get('name') or deck.get('id')}」"
               f"（{hero}）{deck.get('done')}/{deck.get('total')}")
+        if deck.get("tree"):
+            for line in _surrender_tree_lines(deck["tree"]):
+                print(line)
+            continue
         for item in deck.get("checks") or []:
             print(f"      {'✓' if item.get('ok') else '·'} {item.get('text')}")
     if state.get("triggered"):

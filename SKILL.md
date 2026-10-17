@@ -295,13 +295,16 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
   ]}}]}
 ```
 
-- 节点：`all`（与）/ `any`（或）/ `not`（非）；条件类型：`played` / `revealed`（别名
-  `seen`）/ `start_of_game` / `played_or_revealed` / `in_zone` / `turn`
+- 节点：`all`（与）/ `any`（或）/ `not`（非），**可任意层嵌套**（`A 且（B 或 C）` =
+  `{"all":[A, {"any":[B, C]}]}`；深度 ≤8、每套 ≤64 条）；条件类型：`played` /
+  `revealed`（别名 `seen`）/ `start_of_game` / `played_or_revealed` / `in_zone` / `turn`
 - 其它字段：`card`（中文名或 id，数组=任一）、`card_type`、`side`（默认 `opponent`）、
-  `at_least/at_most`、`within`（`{"min":1,"max":4}`）；`class` 可写可不写
+  `at_least/at_most`（可同时写，表示 N~M 张）、`within`（`{"min":1,"max":4}`）；
+  `class` 可写可不写
 - 卡名写中文即可，错字会自动纠正；校验失败**一律不写盘**（保留上一份能用的）
 - 运行中热保存：若这份规则**当场就能命中**会返回 `needs_confirm`，CLI 加 `--yes` 才存
-- 调规则时先 `python hsctl.py surrender check`：它列出对方职业 + 每个条件 ✓/×
+- 调规则时先 `python hsctl.py surrender check`：它列出对方职业 + 条件树（`且/或/非`
+  缩进，✓/× 按真实表达式算）；网页状态栏同源，另每套卡组可单独收起
 
 ## 5. 改参数前必须知道的生效时机
 

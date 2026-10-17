@@ -134,15 +134,37 @@ input:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 .surrender-decks{display:flex;flex-direction:column;gap:12px;margin-bottom:12px}
 .sdeck{background:var(--panel2);border:1px solid var(--border-soft);border-radius:12px;padding:12px 14px}
 .sdeck.bad{border-color:var(--red)}
-.sdeck-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px}
-.sdeck-title{font-size:13.5px;font-weight:700;color:var(--gold-bright)}
+.sdeck.collapsed{padding:10px 14px}
+.sdeck-head{display:flex;align-items:center;gap:8px;margin-bottom:10px;min-width:0}
+.sdeck.collapsed .sdeck-head{margin-bottom:0}
+.sdeck-toggle{width:24px;height:24px;flex:none;padding:0;background:transparent;border:1px solid var(--border);color:var(--muted);border-radius:7px;cursor:pointer;font-size:12px;line-height:1}
+.sdeck-toggle:hover{color:var(--gold-bright);border-color:var(--gold-bright)}
+.sdeck-title{font-size:13.5px;font-weight:700;color:var(--gold-bright);flex:none;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sdeck-summary{display:none;flex:1;min-width:0;font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sdeck.collapsed .sdeck-summary{display:block}
+.sdeck-hit{flex:none;font-size:12px;font-weight:700;color:var(--red)}
+.sdeck-body{min-width:0}
+.sdeck.collapsed .sdeck-body{display:none}
 .sdeck-row{display:flex;gap:10px;flex-wrap:wrap}
 .sdeck-row .field{margin-bottom:8px}
 .sdeck-row .field.grow{flex:1;min-width:200px}
 .sdeck-empty{color:var(--muted);font-size:12.5px;padding:6px 2px}
-.scond-list{display:flex;flex-direction:column;gap:8px;margin:6px 0 8px}
+/* 逻辑组：且 / 或 / 非（可任意层嵌套） */
+.sgroup{border:1px solid var(--border-soft);border-radius:10px;padding:8px;background:rgba(255,255,255,.015)}
+.sgroup[data-depth="0"]{border:none;background:transparent;padding:0}
+.sgroup-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.sgroup-op{padding:6px 8px;font-size:12.5px}
+.sgroup-tip{font-size:11.5px;color:var(--amber)}
+.sgroup-spacer{flex:1}
+/* 注意：不能给 .sgroup-body 加 overflow:hidden，否则卡名候选浮层会被裁掉 */
+.sgroup-body{display:flex;flex-direction:column;gap:8px;padding-left:12px;margin-left:4px;border-left:2px solid rgba(232,185,59,.22)}
 .scond{display:grid;grid-template-columns:186px minmax(160px,1fr) 168px 30px;gap:8px;align-items:center;background:rgba(255,255,255,.02);border:1px solid var(--border-soft);border-radius:10px;padding:8px}
 @media (max-width:860px){.scond{grid-template-columns:1fr;gap:6px}}
+.scond.unsupported{grid-template-columns:52px minmax(0,1fr) auto 30px}
+.scond-badge{font-size:11px;font-weight:700;color:var(--amber);border:1px solid rgba(232,185,59,.35);border-radius:6px;padding:2px 6px;text-align:center}
+.scond-raw{font-family:Consolas,monospace;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scond-note{font-size:11.5px;color:var(--muted);white-space:nowrap}
+.scond-multi{font-size:11px;color:var(--amber);white-space:nowrap;flex:none}
 .scond select,.scond input{padding:7px 9px;font-size:13px}
 .scond-type{width:100%}
 .scard-wrap{position:relative;display:flex;align-items:center;gap:6px;min-width:0}
@@ -375,6 +397,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       </h2>
       <div class="hint-line" style="margin-top:0">
         按「对方有哪些卡」识别对手卡组，命中就立刻投降。卡牌框里<b>输入中文会弹出候选卡</b>，点一下自动带出 ID。<br>
+        每组可以选<b>且 / 或 / 非</b>并任意层嵌套，例如「A 且（B 或 C）」；点标题左侧箭头可把整套规则收起。<br>
         所有条件都判<b>对方</b>：我方有同样的卡绝不会触发；对方职业不参与以外的判断也只在卡组上写。
       </div>
       <div id="surrenderDecks" class="surrender-decks"></div>
@@ -388,7 +411,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <div class="btn-row">
           <button id="btnApplySurrenderJson" class="btn btn-ghost btn-small" type="button">把 JSON 载入到表单</button>
         </div>
-        <div class="hint-line">表单只能表达「全部满足 / 任一满足」一层；要写嵌套的「和/或/非」就在这里改。</div>
+        <div class="hint-line">表单支持多层「且 / 或 / 非」；表单表达不了的字段（如 <code>turn</code>、<code>card_type</code>、<code>at_least</code>）会标成「高级」并原样保留。</div>
       </div>
       <div class="surrender-status" id="surrenderStatus">状态：等待自动化运行…</div>
     </section>
@@ -1352,16 +1375,53 @@ $("btnSaveDelays").addEventListener("click", function(){
   });
 });
 
-/* ---------- 卡组识别投降（表单 + 卡牌自动补全） ---------- */
+/* ---------- 卡组识别投降（树形条件 + 卡牌自动补全） ---------- */
 /* 设计要点：
    - 条件默认一律「对方」；「我方」选项排在最后，只有明确要判自己才选。
    - 卡牌框打中文就查本地卡库弹候选，选中后输入框留中文名、右侧显示 cardId。
-   - 表单只表达一层「全部满足 / 任一满足」；要嵌套就展开「高级 JSON」。 */
+   - 每组都能选 且 / 或 / 非，可任意层嵌套（A 且（B 或 C））。
+   - 表单表达不了的字段（turn / card_type / at_least…）标「高级」并原样回写，保存不丢。
+   - 每套卡组可单独收起，折叠状态记在浏览器本地（localStorage）。 */
 var surrenderDecks = [];
 var surrenderAliases = {};
 var surrenderLoaded = false;
 var dirtySurrender = false;
 var _surrenderTimer = null;
+var _surrenderSeq = 0;
+var _surrenderStatusDecks = [];
+
+var SURRENDER_COLLAPSED_KEY = "hsSurrenderCollapsed";
+var SURRENDER_MAX_DEPTH = 7;        /* 后端上限 8 层，前端留一层余量 */
+var SURRENDER_MAX_LEAVES = 64;
+var SURRENDER_EVENT_TYPES = ["played", "revealed", "seen",
+                             "played_or_revealed", "start_of_game"];
+
+var SURRENDER_OPS = [
+  {value:"all", label:"且（全部满足）"},
+  {value:"any", label:"或（任一满足）"},
+  {value:"not", label:"非（取反）"}
+];
+
+function surrenderCollapsedMap(){
+  var map = {};
+  try {
+    var raw = localStorage.getItem(SURRENDER_COLLAPSED_KEY);
+    if (raw) map = JSON.parse(raw) || {};
+  } catch (e){ map = {}; }
+  return map;
+}
+
+function surrenderSetCollapsed(deckId, collapsed){
+  var map = surrenderCollapsedMap();
+  if (collapsed) map[deckId] = 1; else delete map[deckId];
+  try { localStorage.setItem(SURRENDER_COLLAPSED_KEY, JSON.stringify(map)); } catch (e){}
+}
+
+function surrenderToggleDeck(deck){
+  deck.collapsed = !deck.collapsed;
+  surrenderSetCollapsed(deck.id, deck.collapsed);
+  renderSurrenderDecks();
+}
 
 var CLASS_ZH = {DRUID:"德鲁伊", HUNTER:"猎人", MAGE:"法师", PALADIN:"圣骑士",
   PRIEST:"牧师", ROGUE:"潜行者", SHAMAN:"萨满", WARLOCK:"术士",
@@ -1384,40 +1444,103 @@ function surrenderTypeOf(value){
   return SURRENDER_TYPES[0];
 }
 
+function surrenderGroup(op, children, extra){
+  return {node:"group", op: op || "all", children: children || [], extra: extra || {}};
+}
+
+function surrenderLeaf(kind){
+  return {node:"leaf", kind: kind || "opp_played", cards:[], cardId:"",
+          min:"", max:"", extra:{}};
+}
+
 function surrenderNewDeck(){
-  return {id:"deck" + (surrenderDecks.length + 1), name:"", heroClass:"",
-          mode:"all", conditions:[{kind:"opp_played", card:"", cardId:"", min:"", max:""}]};
+  return {id: "deck" + Date.now().toString(36) + Math.floor(Math.random() * 1000),
+          name:"", heroClass:"", collapsed:false,
+          when: surrenderGroup("all", [surrenderLeaf()]),
+          extra:{enabled:true, action:"concede"}};
+}
+
+function surrenderEsc(text){
+  return String(text == null ? "" : text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/* 后端 type+side+zone 三元组 → 表单里的下拉项；认不出返回 null */
+function surrenderMatchType(raw){
+  var side = raw.side || "opponent";
+  var zone = String(raw.zone || "").toUpperCase();
+  for (var i = 0; i < SURRENDER_TYPES.length; i++){
+    var t = SURRENDER_TYPES[i];
+    if (t.type === raw.type && t.side === side
+        && String(t.zone || "").toUpperCase() === zone){
+      return t;
+    }
+  }
+  return null;
+}
+
+/* 这个叶子能不能用表单编辑？不能就整段原样保留（turn / card_type / at_least…） */
+function surrenderLeafSupported(raw){
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (raw.card_type || raw.at_least || raw.at_most) return null;
+  if (raw.field || raw.min != null || raw.max != null) return null;
+  var type = surrenderMatchType(raw);
+  if (!type) return null;
+  var card = raw.card;
+  var ok = (typeof card === "string" && card.trim())
+    || (Array.isArray(card) && card.length && card.every(function(item){
+          return typeof item === "string" && item.trim();
+        }));
+  return ok ? type : null;
+}
+
+function surrenderParseNode(raw){
+  if (raw && typeof raw === "object" && !Array.isArray(raw)){
+    var op = null, children = null;
+    if (Array.isArray(raw.all)){ op = "all"; children = raw.all; }
+    else if (Array.isArray(raw.and)){ op = "all"; children = raw.and; }
+    else if (Array.isArray(raw.any)){ op = "any"; children = raw.any; }
+    else if (Array.isArray(raw.or)){ op = "any"; children = raw.or; }
+    else if (raw.not != null){ op = "not"; children = [raw.not]; }
+    if (op){
+      var kids = children.map(surrenderParseNode);
+      if (op === "not"){
+        if (!kids.length) kids = [surrenderLeaf()];
+        /* 后端「非」只认一个子节点：多出来的包成一组，绝不静默丢条件 */
+        if (kids.length > 1) kids = [surrenderGroup("all", kids)];
+      }
+      return surrenderGroup(op, kids);
+    }
+    var type = surrenderLeafSupported(raw);
+    if (type){
+      var cards = Array.isArray(raw.card) ? raw.card.slice() : [raw.card];
+      var extra = {};
+      if (raw.within && raw.within.field && raw.within.field !== "round"){
+        extra.within_field = raw.within.field;
+      }
+      return {node:"leaf", kind:type.value, cards:cards, cardId:"",
+              min:(raw.within && raw.within.min != null) ? String(raw.within.min) : "",
+              max:(raw.within && raw.within.max != null) ? String(raw.within.max) : "",
+              extra: extra};
+    }
+  }
+  return {node:"leaf", unsupported:true,
+          raw: raw == null ? null : JSON.parse(JSON.stringify(raw))};
 }
 
 function surrenderDeckFromConfig(deck, index){
-  var when = deck.when || {};
-  var mode = "all", leaves = [];
-  if (Array.isArray(when.all)){ mode = "all"; leaves = when.all; }
-  else if (Array.isArray(when.any)){ mode = "any"; leaves = when.any; }
-  else if (when.type){ leaves = [when]; }
-  var conditions = leaves.map(function(leaf){
-    var side = leaf.side || "opponent";
-    var zone = leaf.zone || "";
-    var matched = null;
-    for (var i = 0; i < SURRENDER_TYPES.length; i++){
-      var t = SURRENDER_TYPES[i];
-      if (t.type === leaf.type && t.side === side && (t.zone || "") === zone){
-        matched = t; break;
-      }
-    }
-    if (!matched) matched = SURRENDER_TYPES[0];   // 表单表达不了的先按"对方打出过"
-    var card = leaf.card;
-    if (Array.isArray(card)) card = card.length ? card[0] : "";
-    return {
-      kind: matched.value,
-      card: card || "",
-      cardId: "",
-      min: (leaf.within && leaf.within.min != null) ? String(leaf.within.min) : "",
-      max: (leaf.within && leaf.within.max != null) ? String(leaf.within.max) : ""
-    };
-  });
-  return {id: deck.id || ("deck" + (index + 1)), name: deck.name || "",
-          heroClass: deck.class || "", mode: mode, conditions: conditions};
+  deck = deck || {};
+  var id = deck.id || ("deck" + (index + 1));
+  var root = surrenderParseNode(deck.when);
+  if (!root || root.node !== "group"){
+    root = surrenderGroup("all", root ? [root] : [surrenderLeaf()]);
+  }
+  var collapsedMap = surrenderCollapsedMap();
+  return {id: id, name: deck.name || "", heroClass: deck.class || "",
+          collapsed: !!collapsedMap[id], when: root,
+          extra: {enabled: deck.enabled !== false,
+                  action: deck.action || "concede"}};
 }
 
 function surrenderLoadConfig(cfg){
@@ -1427,6 +1550,127 @@ function surrenderLoadConfig(cfg){
   var decks = cfg.decks || [];
   surrenderDecks = decks.map(surrenderDeckFromConfig);
   renderSurrenderDecks();
+}
+
+/* ---------- 渲染：卡组卡片（可收起）+ 条件树 ---------- */
+function surrenderLeafCount(node){
+  if (!node) return 0;
+  if (node.node === "leaf") return 1;
+  return (node.children || []).reduce(function(sum, child){
+    return sum + surrenderLeafCount(child);
+  }, 0);
+}
+
+function surrenderLeafName(node){
+  if (!node) return "（空）";
+  if (node.unsupported){
+    var raw = node.raw || {};
+    return "（高级）" + (raw.type || "unknown");
+  }
+  var cards = node.cards || [];
+  if (!cards.length) return "（未选卡）";
+  if (cards.length === 1) return cards[0];
+  return cards[0] + " 等 " + cards.length + " 张";
+}
+
+function surrenderNodeSummary(node){
+  if (!node) return "";
+  if (node.node === "leaf") return surrenderLeafName(node);
+  var kids = (node.children || []).map(surrenderNodeSummary);
+  if (!kids.length) return "（空组）";
+  if (node.op === "not") return "非 (" + kids.join("、") + ")";
+  var joiner = node.op === "any" ? " 或 " : " 且 ";
+  var text = kids.slice(0, 3).join(joiner);
+  if (kids.length > 3) text += " …";
+  return "(" + text + ")";
+}
+
+function surrenderDeckSummary(deck){
+  var cls = deck.heroClass ? (CLASS_ZH[deck.heroClass] || deck.heroClass) : "不限职业";
+  var op = deck.when && deck.when.op ? deck.when.op : "all";
+  var opText = op === "any" ? "或" : op === "not" ? "非" : "且";
+  var leaves = surrenderLeafCount(deck.when);
+  var groups = (deck.when && deck.when.children) ? deck.when.children.length : 0;
+  var countText = (op !== "all" && groups > 1)
+    ? (groups + " 组 / " + leaves + " 条") : (leaves + " 条");
+  return cls + " · " + opText + " " + countText
+    + (leaves ? "：" + surrenderNodeSummary(deck.when) : "（还没加条件）");
+}
+
+function renderSurrenderLeaf(node, path, depth){
+  if (node.unsupported){
+    return '<div class="scond unsupported" data-path="' + path + '">'
+      + '<span class="scond-badge">高级</span>'
+      + '<span class="scond-raw" title="表单改不了，保存时原样保留">'
+      +   surrenderEsc(JSON.stringify(node.raw)) + '</span>'
+      + '<span class="scond-note">原样保留</span>'
+      + '<button class="scond-del" type="button" data-act="del-cond" title="删除这条条件">×</button>'
+      + '</div>';
+  }
+  var typeOptions = SURRENDER_TYPES.map(function(t){
+    return '<option value="' + t.value + '"'
+      + (node.kind === t.value ? " selected" : "") + '>' + t.label + '</option>';
+  }).join("");
+  var cards = node.cards || [];
+  var first = cards.length ? cards[0] : "";
+  var more = cards.length > 1
+    ? '<span class="scond-multi">+' + (cards.length - 1) + ' 张</span>' : "";
+  var idText = node.cardId ? "→ " + node.cardId : "";
+  var type = surrenderTypeOf(node.kind);
+  var turnCell;
+  if (SURRENDER_EVENT_TYPES.indexOf(type.type) >= 0){
+    turnCell = '<span class="scond-turn">回合 <input type="number" data-f="min" min="0"'
+      + ' placeholder="起" value="' + surrenderEsc(node.min || "") + '"> - '
+      + '<input type="number" data-f="max" min="0" placeholder="止" value="'
+      + surrenderEsc(node.max || "") + '"></span>';
+  } else {
+    turnCell = '<span class="scond-turn">—</span>';
+  }
+  return '<div class="scond" data-path="' + path + '">'
+    + '<select data-f="kind" class="scond-type">' + typeOptions + '</select>'
+    + '<div class="scard-wrap">'
+    +   '<input type="text" data-f="card" autocomplete="off" spellcheck="false"'
+    +          ' placeholder="输入中文卡名，如 裂魂者阿扎莉娜" value="'
+    +          surrenderEsc(first) + '">'
+    +   more
+    +   '<span class="scond-id">' + surrenderEsc(idText) + '</span>'
+    +   '<div class="scard-menu"></div>'
+    + '</div>'
+    + turnCell
+    + '<button class="scond-del" type="button" data-act="del-cond" title="删除这条条件">×</button>'
+    + '</div>';
+}
+
+function renderSurrenderNode(node, path, depth){
+  if (!node) return "";
+  if (node.node === "leaf") return renderSurrenderLeaf(node, path, depth);
+  var kids = (node.children || []).map(function(child, index){
+    var childPath = (path === "") ? String(index) : (path + "." + index);
+    return renderSurrenderNode(child, childPath, depth + 1);
+  }).join("");
+  var opOptions = SURRENDER_OPS.map(function(op){
+    return '<option value="' + op.value + '"'
+      + (node.op === op.value ? " selected" : "") + '>' + op.label + '</option>';
+  }).join("");
+  var full = (node.op === "not") && (node.children || []).length >= 1;
+  var addCond = '<button class="btn btn-ghost btn-small" type="button"'
+    + ' data-act="add-cond"' + (full ? " disabled" : "") + '>+ 条件</button>';
+  var addGroup = depth >= SURRENDER_MAX_DEPTH ? ""
+    : '<button class="btn btn-ghost btn-small" type="button" data-act="add-group"'
+      + (full ? " disabled" : "") + '>+ 组</button>';
+  var del = depth === 0 ? ""
+    : '<button class="scond-del" type="button" data-act="del-group" title="删除这一组">×</button>';
+  return '<div class="sgroup" data-path="' + path + '" data-depth="' + depth + '">'
+    + '<div class="sgroup-head">'
+    +   '<select data-f="op" class="sgroup-op">' + opOptions + '</select>'
+    +   addCond + addGroup
+    +   (full ? '<span class="sgroup-tip">「非」只能包一个子项</span>' : '')
+    +   '<span class="sgroup-spacer"></span>' + del
+    + '</div>'
+    + '<div class="sgroup-body">'
+    +   (kids || '<div class="sdeck-empty">这一组还没有条件</div>')
+    + '</div>'
+    + '</div>';
 }
 
 function renderSurrenderDecks(){
@@ -1441,57 +1685,84 @@ function renderSurrenderDecks(){
         var sel = deck.heroClass === key ? " selected" : "";
         return '<option value="' + key + '"' + sel + '>' + CLASS_ZH[key] + '</option>';
       })).join("");
-    var conds = deck.conditions.map(function(cond, ci){
-      var typeOptions = SURRENDER_TYPES.map(function(t){
-        return '<option value="' + t.value + '"' +
-          (cond.kind === t.value ? " selected" : "") + '>' + t.label + '</option>';
-      }).join("");
-      var idText = cond.cardId ? "→ " + cond.cardId : "";
-      return '<div class="scond" data-cond="' + ci + '">'
-        + '<select data-f="kind" class="scond-type">' + typeOptions + '</select>'
-        + '<div class="scard-wrap">'
-        +   '<input type="text" data-f="card" autocomplete="off" spellcheck="false"'
-        +          ' placeholder="输入中文卡名，如 裂魂者阿扎莉娜" value="'
-        +          String(cond.card || "").replace(/"/g, "&quot;") + '">'
-        +   '<span class="scond-id">' + idText + '</span>'
-        +   '<div class="scard-menu"></div>'
-        + '</div>'
-        + '<span class="scond-turn">回合 <input type="number" data-f="min" min="0" placeholder="起" value="'
-        +          (cond.min || "") + '"> - <input type="number" data-f="max" min="0" placeholder="止" value="'
-        +          (cond.max || "") + '"></span>'
-        + '<button class="scond-del" type="button" data-act="del-cond" title="删除这条条件">×</button>'
-        + '</div>';
-    }).join("");
-    return '<div class="sdeck" data-deck="' + di + '">'
-      + '<div class="sdeck-head"><span class="sdeck-title">卡组 ' + (di + 1) + '</span>'
-      +   '<button class="btn btn-ghost btn-small" type="button" data-act="del-deck">删除卡组</button></div>'
-      + '<div class="sdeck-row">'
-      +   '<label class="field grow"><span class="field-label">名称</span>'
-      +     '<input type="text" data-f="name" placeholder="例如 牧师 · 阿扎莉娜 + 神秘访客" value="'
-      +     String(deck.name || "").replace(/"/g, "&quot;") + '"></label>'
-      +   '<label class="field" style="min-width:150px"><span class="field-label">对方职业（可选）</span>'
-      +     '<select data-f="class">' + classOptions + '</select></label>'
-      +   '<label class="field" style="min-width:170px"><span class="field-label">条件关系</span>'
-      +     '<select data-f="mode">'
-      +       '<option value="all"' + (deck.mode === "all" ? " selected" : "") + '>全部满足（和）</option>'
-      +       '<option value="any"' + (deck.mode === "any" ? " selected" : "") + '>任一满足（或）</option>'
-      +     '</select></label>'
+    var collapsed = !!deck.collapsed;
+    return '<div class="sdeck' + (collapsed ? " collapsed" : "") + '" data-deck="' + di + '">'
+      + '<div class="sdeck-head">'
+      +   '<button class="sdeck-toggle" type="button" data-act="toggle-deck"'
+      +          ' aria-expanded="' + (!collapsed) + '" title="收起 / 展开这套卡组">'
+      +          (collapsed ? "▸" : "▾") + '</button>'
+      +   '<span class="sdeck-title">' + (di + 1) + '. '
+      +          surrenderEsc(deck.name || "未命名卡组") + '</span>'
+      +   '<span class="sdeck-summary">' + surrenderEsc(surrenderDeckSummary(deck)) + '</span>'
+      +   '<span class="sdeck-hit" style="display:none">已命中</span>'
+      +   '<button class="btn btn-ghost btn-small" type="button" data-act="del-deck">删除卡组</button>'
       + '</div>'
-      + '<div class="scond-list">' + (conds || '<div class="sdeck-empty">至少加一条条件</div>') + '</div>'
-      + '<button class="btn btn-ghost btn-small" type="button" data-act="add-cond">+ 添加条件</button>'
+      + '<div class="sdeck-body">'
+      +   '<div class="sdeck-row">'
+      +     '<label class="field grow"><span class="field-label">名称</span>'
+      +       '<input type="text" data-f="name" placeholder="例如 牧师 · 阿扎莉娜 + 神秘访客" value="'
+      +       surrenderEsc(deck.name || "") + '"></label>'
+      +     '<label class="field" style="min-width:150px"><span class="field-label">对方职业（可选）</span>'
+      +       '<select data-f="class">' + classOptions + '</select></label>'
+      +   '</div>'
+      +   renderSurrenderNode(deck.when, "", 0)
+      + '</div>'
       + '</div>';
   }).join("");
+  renderSurrenderHits();
 }
 
-function surrenderStateOf(node){
-  var deckEl = node.closest ? node.closest(".sdeck") : null;
+/* 收起状态下也能看出哪套卡组当前已命中（数据来自 /api/status） */
+function renderSurrenderHits(){
+  var boxes = document.querySelectorAll("#surrenderDecks .sdeck");
+  for (var i = 0; i < boxes.length; i++){
+    var badge = boxes[i].querySelector(".sdeck-hit");
+    if (!badge) continue;
+    var info = _surrenderStatusDecks[i];
+    badge.style.display = (info && info.matched) ? "" : "none";
+  }
+}
+
+/* ---------- 路径寻址：data-path="0.1.2"，根组是空串 ---------- */
+function surrenderPathParts(path){
+  return String(path == null ? "" : path).split(".").filter(function(part){
+    return part !== "";
+  });
+}
+
+function surrenderNodeAt(deck, path){
+  if (!deck) return null;
+  var parts = surrenderPathParts(path);
+  var node = deck.when;
+  for (var i = 0; i < parts.length; i++){
+    if (!node || !node.children) return null;
+    node = node.children[parseInt(parts[i], 10)];
+  }
+  return node || null;
+}
+
+function surrenderRemoveAt(deck, path){
+  var parts = surrenderPathParts(path);
+  if (!parts.length) return false;
+  var parent = surrenderNodeAt(deck, parts.slice(0, -1).join("."));
+  var index = parseInt(parts[parts.length - 1], 10);
+  if (!parent || !parent.children || !parent.children[index]) return false;
+  parent.children.splice(index, 1);
+  return true;
+}
+
+function surrenderStateOf(el){
+  var deckEl = el.closest ? el.closest(".sdeck") : null;
   if (!deckEl) return null;
   var di = parseInt(deckEl.getAttribute("data-deck"), 10);
   var deck = surrenderDecks[di];
   if (!deck) return null;
-  var condEl = node.closest(".scond");
-  var ci = condEl ? parseInt(condEl.getAttribute("data-cond"), 10) : -1;
-  return {deck: deck, cond: ci >= 0 ? deck.conditions[ci] : null, di: di, ci: ci};
+  var nodeEl = el.closest ? el.closest("[data-path]") : null;
+  var path = (nodeEl && nodeEl.hasAttribute("data-path"))
+    ? nodeEl.getAttribute("data-path") : "";
+  var node = surrenderNodeAt(deck, path);
+  return {deck: deck, di: di, node: node, path: path,
+          isLeaf: !!(node && node.node === "leaf")};
 }
 
 /* 卡牌自动补全：输入中文 → 查 /api/card_search → 弹出候选 */
@@ -1500,17 +1771,25 @@ function surrenderCardInput(input){
   var menu = wrap.querySelector(".scard-menu");
   var idEl = wrap.querySelector(".scond-id");
   var state = surrenderStateOf(input);
-  if (state && state.cond){ state.cond.cardId = ""; }
+  var text = input.value.trim();
+  if (state && state.isLeaf){
+    /* 手打的名字也要进 state，否则不选候选就保存会丢这条条件 */
+    state.node.cards = text ? [text] : [];
+    state.node.cardId = "";
+  }
   if (idEl){ idEl.textContent = ""; idEl.className = "scond-id"; }
   dirtySurrender = true;
 
-  var text = input.value.trim();
   clearTimeout(_surrenderTimer);
   if (!text){ menu.innerHTML = ""; menu.classList.remove("open"); return; }
   menu.innerHTML = '<div class="scard-loading">查卡中…</div>';
   menu.classList.add("open");
+  /* 嵌套后可能同时编辑两个叶子：用序号丢弃过期响应，别把候选贴错框 */
+  var seq = ++_surrenderSeq;
   _surrenderTimer = setTimeout(function(){
+    if (seq !== _surrenderSeq) return;
     get("/api/card_search?q=" + encodeURIComponent(text) + "&limit=8").then(function(r){
+      if (seq !== _surrenderSeq) return;
       if (!menu.isConnected) return;
       if (!r.ok){
         menu.innerHTML = '<div class="scard-empty">' + (r.error || "查卡失败") + '</div>';
@@ -1544,9 +1823,9 @@ function surrenderPickCard(item){
     idEl.className = "scond-id hit";
   }
   var state = surrenderStateOf(input);
-  if (state && state.cond){
-    state.cond.card = item.getAttribute("data-name");
-    state.cond.cardId = item.getAttribute("data-id");
+  if (state && state.isLeaf){
+    state.node.cards = [item.getAttribute("data-name")];
+    state.node.cardId = item.getAttribute("data-id");
   }
   menu.classList.remove("open");
   dirtySurrender = true;
@@ -1567,48 +1846,96 @@ function surrenderMenuMove(menu, delta){
 
 $("surrenderDecks").addEventListener("input", function(event){
   var target = event.target;
-  var state = surrenderStateOf(target);
-  if (!state) return;
   var field = target.getAttribute("data-f");
   if (field === "card"){ surrenderCardInput(target); return; }
-  if (!state.cond && field === "name"){ state.deck.name = target.value; dirtySurrender = true; return; }
-  if (state.cond && (field === "min" || field === "max")){
-    state.cond[field] = target.value; dirtySurrender = true;
+  var state = surrenderStateOf(target);
+  if (!state) return;
+  if (field === "name"){
+    state.deck.name = target.value;
+    var title = target.closest(".sdeck").querySelector(".sdeck-title");
+    if (title){
+      title.textContent = (state.di + 1) + ". " + (target.value || "未命名卡组");
+    }
+    var summary = target.closest(".sdeck").querySelector(".sdeck-summary");
+    if (summary) summary.textContent = surrenderDeckSummary(state.deck);
+    dirtySurrender = true;
+    return;
+  }
+  if (!state.isLeaf) return;
+  if (field === "min" || field === "max"){
+    state.node[field] = target.value;
+    dirtySurrender = true;
   }
 });
 
 $("surrenderDecks").addEventListener("change", function(event){
   var target = event.target;
+  var field = target.getAttribute("data-f");
   var state = surrenderStateOf(target);
   if (!state) return;
-  var field = target.getAttribute("data-f");
-  if (!state.cond){
-    if (field === "class") state.deck.heroClass = target.value;
-    if (field === "mode") state.deck.mode = target.value;
-  } else if (field === "kind"){
-    state.cond.kind = target.value;
+  if (field === "class"){
+    state.deck.heroClass = target.value;
+    dirtySurrender = true;
+    var summaryEl = target.closest(".sdeck").querySelector(".sdeck-summary");
+    if (summaryEl) summaryEl.textContent = surrenderDeckSummary(state.deck);
+    return;
   }
-  dirtySurrender = true;
+  if (!state.node) return;
+  if (field === "op"){
+    var kids = state.node.children || [];
+    if (target.value === "not" && kids.length > 1){
+      /* 后端「非」只认一个子节点：先包成一组，语义不变、条件不丢 */
+      state.node.children = [surrenderGroup("all", kids)];
+      toast("「非」只能包一个子项，已把原来的 " + kids.length + " 条自动包成一组", "warn");
+    }
+    state.node.op = target.value;
+    dirtySurrender = true;
+    renderSurrenderDecks();
+    return;
+  }
+  if (field === "kind" && state.isLeaf){
+    state.node.kind = target.value;
+    dirtySurrender = true;
+    renderSurrenderDecks();   /* 换类型后"回合区间"这一列要跟着变 */
+  }
 });
 
 $("surrenderDecks").addEventListener("click", function(event){
   var item = event.target.closest(".scard-item");
   if (item){ surrenderPickCard(item); return; }
-  var act = event.target.getAttribute("data-act");
-  if (!act) return;
-  var state = surrenderStateOf(event.target);
-  if (!state) return;
-  if (act === "del-deck"){
-    surrenderDecks.splice(state.di, 1);
-    renderSurrenderDecks();
-  } else if (act === "add-cond"){
-    state.deck.conditions.push({kind:"opp_played", card:"", cardId:"", min:"", max:""});
-    renderSurrenderDecks();
-  } else if (act === "del-cond"){
-    state.deck.conditions.splice(state.ci, 1);
-    renderSurrenderDecks();
+  var actEl = event.target.closest("[data-act]");
+  if (actEl){
+    var act = actEl.getAttribute("data-act");
+    var state = surrenderStateOf(actEl);
+    if (!state) return;
+    if (act === "toggle-deck"){
+      surrenderToggleDeck(state.deck);
+      return;
+    }
+    if (act === "del-deck"){
+      surrenderDecks.splice(state.di, 1);
+      renderSurrenderDecks();
+    } else if (act === "add-cond"){
+      if (!state.node || state.node.node !== "group") return;
+      state.node.children.push(surrenderLeaf());
+      renderSurrenderDecks();
+    } else if (act === "add-group"){
+      if (!state.node || state.node.node !== "group") return;
+      state.node.children.push(surrenderGroup("all", [surrenderLeaf()]));
+      renderSurrenderDecks();
+    } else if (act === "del-cond" || act === "del-group"){
+      surrenderRemoveAt(state.deck, state.path);
+      renderSurrenderDecks();
+    }
+    dirtySurrender = true;
+    return;
   }
-  dirtySurrender = true;
+  /* 点头部的空白处（不是按钮/输入框）也能收起 */
+  var head = event.target.closest ? event.target.closest(".sdeck-head") : null;
+  if (head && !event.target.closest("input,select,button,textarea")){
+    var found = surrenderStateOf(head);
+    if (found && found.deck) surrenderToggleDeck(found.deck);
+  }
 });
 
 $("surrenderDecks").addEventListener("keydown", function(event){
@@ -1634,28 +1961,52 @@ document.addEventListener("click", function(event){
   }
 });
 
+function surrenderCollectLeaf(node){
+  if (node.unsupported) return node.raw || null;
+  var type = surrenderTypeOf(node.kind);
+  var cards = (node.cards || []).map(function(name){
+    return String(name).trim();
+  }).filter(function(name){ return !!name; });
+  if (!cards.length) return null;
+  var leaf = {type: type.type, side: type.side,
+              card: cards.length === 1 ? cards[0] : cards};
+  if (type.zone) leaf.zone = type.zone;
+  /* within 只对事件类条件成立；给「当前在场」填回合会被后端直接拒绝 */
+  if (SURRENDER_EVENT_TYPES.indexOf(type.type) >= 0
+      && (node.min !== "" || node.max !== "")){
+    leaf.within = {field: (node.extra && node.extra.within_field) || "round"};
+    if (node.min !== "") leaf.within.min = parseInt(node.min, 10);
+    if (node.max !== "") leaf.within.max = parseInt(node.max, 10);
+  }
+  return leaf;
+}
+
+function surrenderCollectNode(node){
+  if (!node) return null;
+  if (node.node === "leaf") return surrenderCollectLeaf(node);
+  var kids = (node.children || []).map(surrenderCollectNode)
+    .filter(function(child){ return child !== null; });
+  if (!kids.length) return null;
+  if (node.op === "not"){
+    return {not: kids.length === 1 ? kids[0] : {all: kids}};
+  }
+  var out = {};
+  out[node.op === "any" ? "any" : "all"] = kids;
+  return out;
+}
+
 function surrenderCollectConfig(){
   var decks = surrenderDecks.map(function(deck, index){
-    var leaves = deck.conditions.filter(function(cond){
-      return (cond.card || "").trim();
-    }).map(function(cond){
-      var type = surrenderTypeOf(cond.kind);
-      var leaf = {type: type.type, side: type.side, card: cond.card.trim()};
-      if (type.zone) leaf.zone = type.zone;
-      if (cond.min !== "" || cond.max !== ""){
-        leaf.within = {field:"round"};
-        if (cond.min !== "") leaf.within.min = parseInt(cond.min, 10);
-        if (cond.max !== "") leaf.within.max = parseInt(cond.max, 10);
-      }
-      return leaf;
-    });
-    var when;
-    if (!leaves.length){ when = {all: []}; }
-    else { when = (deck.mode === "any") ? {any: leaves} : {all: leaves}; }
+    var when = surrenderCollectNode(deck.when);
+    if (!when) when = {all: []};
+    else if (!when.all && !when.any && !when.not) when = {all: [when]};
+    var extra = deck.extra || {};
     return {id: deck.id || ("deck" + (index + 1)),
             name: deck.name || ("卡组" + (index + 1)),
-            enabled: true, class: deck.heroClass || "",
-            action: "concede", when: when};
+            enabled: extra.enabled !== false,
+            class: deck.heroClass || "",
+            action: extra.action || "concede",
+            when: when};
   });
   return {enabled: $("chkSurrender").checked, aliases: surrenderAliases, decks: decks};
 }
@@ -1716,6 +2067,22 @@ $("btnApplySurrenderJson").addEventListener("click", function(){
   toast("已载入到表单，记得点保存", "ok");
 });
 
+/* 条件树 → 带 ✓/✗ 的彩色文本（保留「且/或/非」结构） */
+function surrenderTreeHtml(node){
+  if (!node) return "";
+  var cls = node.ok ? "ok" : "no";
+  if (!node.children || !node.children.length){
+    return '<span class="' + cls + '">' + (node.ok ? "✓ " : "✗ ")
+      + surrenderEsc(node.text || "") + '</span>';
+  }
+  var inner = node.children.map(surrenderTreeHtml);
+  if (node.op === "not"){
+    return '<span class="' + cls + '">非 (' + inner.join("") + ')</span>';
+  }
+  var joiner = node.op === "any" ? " 或 " : " 且 ";
+  return '<span class="' + cls + '">(' + inner.join(joiner) + ')</span>';
+}
+
 function renderSurrenderStatus(status){
   var el = $("surrenderStatus");
   var st = (status && status.surrenders) || {};
@@ -1725,20 +2092,28 @@ function renderSurrenderStatus(status){
   } else if (status && status.auto_surrender && !dirtySurrender){
     $("chkSurrender").checked = !!status.auto_surrender.enabled;
   }
-  if (!st.decks || !st.decks.length){
+  _surrenderStatusDecks = st.decks || [];
+  if (surrenderDecks.length) renderSurrenderHits();
+  if (!_surrenderStatusDecks.length){
     el.innerHTML = '<span class="sd">' + (st.message || st.error || "状态：暂无启用的卡组规则。") + '</span>';
     return;
   }
   var cls = st.opponent_class ? (CLASS_ZH[st.opponent_class] || st.opponent_class) : "未知";
   var head = "对方：" + cls + " · 第 " + (st.round || 0) + " 回合"
     + (st.triggered ? ' · <span class="fire">已触发投降</span>' : "");
-  var rows = st.decks.map(function(deck){
-    var checks = (deck.checks || []).map(function(check){
-      return '<span class="' + (check.ok ? "ok" : "no") + '">'
-        + (check.ok ? "✓ " : "✗ ") + check.text + '</span>';
-    }).join("　");
-    return '<span class="sd">' + (deck.matched ? "✅ " : "· ") + deck.name
-      + '（' + deck.done + "/" + deck.total + '）' + (checks ? "　" + checks : "") + '</span>';
+  var rows = _surrenderStatusDecks.map(function(deck){
+    var body;
+    if (deck.tree){
+      body = surrenderTreeHtml(deck.tree);
+    } else {
+      body = (deck.checks || []).map(function(check){
+        return '<span class="' + (check.ok ? "ok" : "no") + '">'
+          + (check.ok ? "✓ " : "✗ ") + surrenderEsc(check.text) + '</span>';
+      }).join("　");
+    }
+    var prefix = (deck.matched ? "✅ " : "· ") + surrenderEsc(deck.name)
+      + (deck.matched ? "" : "（" + deck.done + "/" + deck.total + "）");
+    return '<span class="sd">' + prefix + (body ? "　" + body : "") + '</span>';
   }).join("");
   el.innerHTML = '<span>' + head + '</span>' + rows;
 }
