@@ -2764,7 +2764,7 @@ def _overlay_window_width():
 def _overlay_resize_window(width):
     """浮窗「窗口宽度」滑条：按 16:9 设炉石客户区宽度；返回改后的 [w, h] 或 None。
 
-    `hs_window.set_client_width` 会把宽度收进 720~3840 并对齐 16 的步进
+    `hs_window.set_client_width` 会把宽度收进 960~3840 并对齐 16 的步进
     （高度正好是 9 的倍数 → 严格 16:9）；游戏把尺寸钳住时返回**实际**尺寸。
     """
     try:

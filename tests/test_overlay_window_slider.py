@@ -44,6 +44,10 @@ class SliderWiringTests(unittest.TestCase):
         self.assertLess(log_overlay.SIZE_SLIDER_MIN, log_overlay.SIZE_SLIDER_MAX)
         self.assertGreater(log_overlay.SIZE_SLIDER_STEP, 1)
 
+    def test_min_is_half_of_the_reference(self):
+        # 滑条下限 = 960（960×540 = 基准的一半）。
+        self.assertEqual(960, log_overlay.SIZE_SLIDER_MIN)
+
     def test_height_grew_to_fit_the_slider_row(self):
         # 723 是加滑条行之前的设计值；加了必须变高。
         self.assertGreater(log_overlay.WINDOW_HEIGHT, 723)

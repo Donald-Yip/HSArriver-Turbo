@@ -3,7 +3,7 @@
 
 滑条范围/步进的"真值"就在这里；这些用例锁住：
   * 基准 1920×1080 是严格 16:9；
-  * 宽度收敛进 720~3840 并对齐 16 的步进（→ 高度正好是 9 的倍数）；
+  * 宽度收敛进 960~3840 并对齐 16 的步进（→ 高度正好是 9 的倍数）；
   * 收敛后的高度**不低于**炉石的最小客户区高度（400），否则游戏会弹回。
 """
 
@@ -22,6 +22,11 @@ class HeightForWidthTests(unittest.TestCase):
     def test_reference_is_exactly_16_9(self):
         w, h = hs_window.REFERENCE
         self.assertEqual(w * 9, h * 16)
+
+    def test_min_is_half_of_the_reference(self):
+        # 滑条下限 = 基准的一半 = 960×540（再小固定像素的盒子面板挤不下）。
+        self.assertEqual(960, hs_window.MIN_16_9_WIDTH)
+        self.assertEqual(540, hs_window.height_for_width(960))
 
 
 class ClampWidthTests(unittest.TestCase):

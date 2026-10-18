@@ -137,7 +137,7 @@ WINDOW_WIDTH = 263
 WINDOW_HEIGHT = 772
 # 炉石窗口宽度滑条（保持 16:9）。范围/步进的「真值」在 hs_window；这里的默认值
 # 只是它不可用时的兜底（见 `_run` 里的滑条构建）。
-SIZE_SLIDER_MIN = 720
+SIZE_SLIDER_MIN = 960
 SIZE_SLIDER_MAX = 3840
 SIZE_SLIDER_STEP = 16
 SIZE_ROW_TITLE = "炉石窗口"
