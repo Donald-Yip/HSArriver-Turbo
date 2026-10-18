@@ -32,6 +32,9 @@ def _panel_pixels(height: int, width: int) -> np.ndarray:
 class ScaledRoiFrameTests(unittest.TestCase):
     def setUp(self):
         self.config = RecommendationConfig()
+        # 别读用户 ui_config.json 里校准过的 ROI（可能是负的"盒子外置"框）：
+        # 固定成基准默认值，测试才是自洽的。
+        object.__setattr__(self.config, "recommendation_roi", (7, 200, 202, 500))
 
     def _scaled_roi(self, client):
         mapping = DisplayMapping(
