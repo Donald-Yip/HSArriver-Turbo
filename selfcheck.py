@@ -72,6 +72,10 @@ DEPENDENCIES: tuple[dict, ...] = (
      "why": "OCR 依赖链（paddle/httpx）用到的第三方 click"},
     {"imports": (), "dist": ("setuptools",), "metadata_only": True,
      "required": False, "why": "paddle 运行时用到的 pkg_resources"},
+    # mcp 只按发行包版本检查：仓库根的 click.py 会遮蔽真 click，`import mcp` 在仓库根
+    # 直接炸（mcp → uvicorn → click）。mcp_server.py 导入前会把仓库根移出 sys.path。
+    {"imports": (), "dist": ("mcp",), "metadata_only": True,
+     "required": False, "why": "MCP server（mcp_server.py）；缺了只是 MCP 不可用"},
 )
 
 _PIN_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;]+)")

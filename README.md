@@ -233,6 +233,23 @@ python hsctl.py serve task-status     # 确认任务在、且勾了最高权限
 原理：任务计划程序服务以 SYSTEM 身份按"最高权限"创建进程，不经过 `ShellExecute`  
 提权路径，所以没有 UAC 弹窗。细节与注意事项见 [`docs/CLI.md`](docs/CLI.md) 第 5 节。
 
+### 给 MCP 客户端（Claude Desktop / Cursor 等）
+
+`mcp_server.py` 把 hsctl 的常用命令包成 **MCP tools（stdio）**：客户端直接调工具，不用拼命令行；语义、退出码、`--json` 输出与命令行完全一致（它只是 hsctl 的薄封装）。
+
+```json
+{
+  "mcpServers": {
+    "hsctl": {
+      "command": "D:\\miniconda3\\envs\\HTL\\python.exe",
+      "args": ["<仓库路径>\\mcp_server.py"]
+    }
+  }
+}
+```
+
+工具：`doctor` `selfcheck` `status` `log` `ui` `screenshot`（直接把 PNG 作为图片返回）`start`/`stop`/`resume`/`prepare`/`cancel`/`enter_battle`/`mode`/`deck`/`calibrate`/`restart_hearthstone`（需 `confirm=true`）/`config_*`/`delays_*`，外加万能兜底 `hsctl(argv=[...])`。依赖 `mcp`（见 `requirements.txt`）。
+
 > 完整命令参考：[`docs/CLI.md`](docs/CLI.md)。给 AI agent 的技能说明：[`SKILL.md`](SKILL.md)。  
 > 想让手机远程指挥脚本？把 `hsctl` 交给 WorkBuddy / DSH 这类**本机** agent 即可 ——  
 > 脚本本身**不需要**监听公网，控制台只绑 `127.0.0.1`（[`config.py`](config.py#L98)），请勿做端口转发。  

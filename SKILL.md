@@ -525,7 +525,36 @@ python hsctl.py --json doctor        # 复验：env_ok + console.is_admin=true
 且本机确实没有别的合格环境 —— 那就按 `doctor` 的 `env_no_valid_interpreter` 分支
 建环境（conda / venv）再 `env --pin`。
 
-## 9. 参考
+## 9. MCP（把 hsctl 当 MCP 工具用）
+
+如果客户端支持 MCP，可以不起命令行、直接调工具 —— `mcp_server.py` 把 hsctl 的
+常用子命令包成了 MCP tools（stdio）。**它只是 hsctl 的薄封装**，语义、退出码、
+`--json` 输出与命令行完全一致；`doctor` / `status` / `screenshot` 等工具返回的
+就是 hsctl 的 JSON。
+
+客户端配置（以 `D:\miniconda3\envs\HTL\python.exe` 为例）：
+
+```json
+{
+  "mcpServers": {
+    "hsctl": {
+      "command": "D:\\miniconda3\\envs\\HTL\\python.exe",
+      "args": ["<仓库路径>\\mcp_server.py"]
+    }
+  }
+}
+```
+
+- `command` 的解释器必须装了 `mcp`（见 `requirements.txt`）；跑命令时 hsctl 会
+  自己再切到本机固定的 HTL 环境。
+- 工具：`doctor` `selfcheck` `status` `log` `ui` `screenshot` `start` `stop`
+  `resume` `prepare` `cancel` `enter_battle` `mode` `deck` `calibrate`
+  `restart_hearthstone`（需 `confirm=true`）`config_show/set` `delays_show/set`，
+  外加万能兜底 `hsctl(argv=[...])`（任意子命令，自动加 `--json`）。
+- `screenshot` 直接把 PNG 作为图片内容返回，不用再读文件。
+- 没装 MCP 的客户端照常用命令行；两者行为一致，不用二选一。
+
+## 10. 参考
 
 - **通用 agent 行为约定（跨项目）**：[`AGENTS.md`](AGENTS.md)
 - 完整命令参考：`docs/CLI.md`
