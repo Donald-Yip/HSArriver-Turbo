@@ -136,8 +136,19 @@ class DesktopCapture:
         return (bottom - top, right - left)
 
     def _is_roi_frame(self, width: int, height: int) -> bool:
+        """这一帧是不是已经裁好的推荐面板 ROI（而非整帧）。
+
+        ROI 抓图会按客户区缩放（`_screen_roi_box` → `box_to_screen`），所以客户区
+        不是基准 1920×1080 时，ROI 帧的像素尺寸也≠基准尺寸。基准口径与**当前
+        客户区缩放后**的口径都认：前者兼容离线帧/单测，后者是缩小窗口下的真实
+        尺寸。只认基准会把缩放后的 ROI 误判成整帧，进而触发 client_size_mismatch
+        （用户实测 1785×902 时换牌一直重试）。
+        """
         roi_height, roi_width = self._roi_size
-        return (width, height) == (roi_width, roi_height)
+        if (width, height) == (roi_width, roi_height):
+            return True
+        left, top, right, bottom = self._screen_roi_box()
+        return (width, height) == (right - left, bottom - top)
 
     def from_file(self, path: Path | str) -> FrameEvidence:
         data = np.fromfile(str(path), dtype=np.uint8)

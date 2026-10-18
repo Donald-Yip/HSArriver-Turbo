@@ -284,7 +284,11 @@ def to_reference(frame, mapping=None):
     height, width = frame.shape[:2]
     if (int(width), int(height)) == REFERENCE_CLIENT:
         return frame
-    return cv2.resize(frame, REFERENCE_CLIENT, interpolation=cv2.INTER_AREA)
+    # 放大时不能用 INTER_AREA（OpenCV 放大时它≈最近邻，会出块状，模板匹配
+    # 分数明显掉）；INTER_AREA 只适合降采样。
+    upscaling = REFERENCE_CLIENT[0] * REFERENCE_CLIENT[1] > width * height
+    interpolation = cv2.INTER_CUBIC if upscaling else cv2.INTER_AREA
+    return cv2.resize(frame, REFERENCE_CLIENT, interpolation=interpolation)
 
 
 def load_template(kind: str = "traditional"):

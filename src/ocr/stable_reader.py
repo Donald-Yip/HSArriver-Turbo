@@ -10,8 +10,15 @@ class OcrRejectedError(RuntimeError):
 
 
 class StableRecommendationReader:
-    def __init__(self, config, backend, sleep=time.sleep,
-                 text_normalizer=None, required_headers=(), cache=None):
+    def __init__(
+        self,
+        config,
+        backend,
+        sleep=time.sleep,
+        text_normalizer=None,
+        required_headers=(),
+        cache=None,
+    ):
         self.config = config
         self.backend = backend
         self.sleep = sleep
@@ -31,9 +38,14 @@ class StableRecommendationReader:
         if evidence is None:
             return None
         return type(evidence)(
-            frame.frame_id, time.time(), evidence.lines,
-            evidence.normalized_text, evidence.confidence,
-            evidence.backend, evidence.preprocessing)
+            frame.frame_id,
+            time.time(),
+            evidence.lines,
+            evidence.normalized_text,
+            evidence.confidence,
+            evidence.backend,
+            evidence.preprocessing,
+        )
 
     def read(self, frame_supplier, roi_supplier):
         previous_text = None
@@ -44,7 +56,9 @@ class StableRecommendationReader:
             roi = roi_supplier(frame)
             evidence = self._cached(frame)
             if evidence is None:
-                evidence = self._recognize_roi(roi, frame.frame_id)
+                evidence = self._recognize_roi(
+                    roi, frame.frame_id, self._client_upscale(frame)
+                )
                 frame_hash = getattr(frame, "exact_hash", None)
                 if evidence is not None and frame_hash:
                     self._cache[frame_hash] = evidence
@@ -71,7 +85,9 @@ class StableRecommendationReader:
     def read_frame(self, frame, roi_supplier):
         evidence = self._cached(frame)
         if evidence is None:
-            evidence = self._recognize_roi(roi_supplier(frame), frame.frame_id)
+            evidence = self._recognize_roi(
+                roi_supplier(frame), frame.frame_id, self._client_upscale(frame)
+            )
             frame_hash = getattr(frame, "exact_hash", None)
             if evidence is not None and frame_hash:
                 self._cache[frame_hash] = evidence
@@ -79,27 +95,63 @@ class StableRecommendationReader:
             raise OcrRejectedError("recommendation_not_confident")
         return evidence
 
-    def _recognize_roi(self, roi, frame_id):
-        for candidate_name, candidate in iter_preprocess_recommendation(roi):
-            evidence = self.backend.recognize(
-                candidate, frame_id, candidate_name)
+    def _client_upscale(self, frame):
+        """客户区比基准 1920×1080 小时，按比例把 OCR 放大倍数补水回去。
+
+        ROI 抓图时按客户区缩放（见 desktop_capture._screen_roi_box），客户区越小
+        面板像素越少；这里用 max(ref_w/w, ref_h/h) 把损失的字号补回来，上限由
+        config.ocr_small_window_max_upscale 限制（防止小窗口下 OCR 变慢拖崩超时）。
+        客户区信息缺失或本来就 ≥ 基准时返回 1.0（行为不变）。
+        """
+        client = getattr(frame, "client_size", None)
+        if not client:
+            return 1.0
+        try:
+            width, height = int(client[0]), int(client[1])
+        except (TypeError, ValueError, IndexError):
+            return 1.0
+        if width <= 0 or height <= 0:
+            return 1.0
+        from display_mapping import REFERENCE_CLIENT
+
+        factor = max(REFERENCE_CLIENT[0] / width, REFERENCE_CLIENT[1] / height)
+        if factor <= 1.0:
+            return 1.0
+        cap = float(getattr(self.config, "ocr_small_window_max_upscale", 2.0))
+        return min(factor, cap)
+
+    def _recognize_roi(self, roi, frame_id, scale: float = 1.0):
+        for candidate_name, candidate in iter_preprocess_recommendation(roi, scale):
+            evidence = self.backend.recognize(candidate, frame_id, candidate_name)
             evidence = self._action_evidence(evidence)
-            if (evidence.confidence >= self.config.min_ocr_confidence
-                    and evidence.normalized_text):
+            if (
+                evidence.confidence >= self.config.min_ocr_confidence
+                and evidence.normalized_text
+            ):
                 return evidence
         return None
 
     def _action_evidence(self, evidence):
         if self.required_headers:
             header_lines = [
-                line for line in evidence.lines
-                if line.text.strip() in self.required_headers]
-            if (not header_lines or max(
-                    line.confidence for line in header_lines)
-                    < self.config.min_ocr_confidence):
+                line
+                for line in evidence.lines
+                if line.text.strip() in self.required_headers
+            ]
+            if (
+                not header_lines
+                or max(line.confidence for line in header_lines)
+                < self.config.min_ocr_confidence
+            ):
                 return type(evidence)(
-                    evidence.frame_id, evidence.created_at, (), "", 0.0,
-                    evidence.backend, evidence.preprocessing)
+                    evidence.frame_id,
+                    evidence.created_at,
+                    (),
+                    "",
+                    0.0,
+                    evidence.backend,
+                    evidence.preprocessing,
+                )
         normalized_text = self.text_normalizer(evidence.normalized_text)
         expected_lines = normalized_text.splitlines()
         relevant_lines = []
@@ -109,25 +161,35 @@ class StableRecommendationReader:
             parts = normalized_line.splitlines()
             # A card name is retained only after the contextual '选择卡牌'
             # marker; normalizing that OCR line alone deliberately drops it.
-            if (not parts and expected_index > 0
-                    and expected_lines[expected_index - 1] == "选择卡牌"):
+            if (
+                not parts
+                and expected_index > 0
+                and expected_lines[expected_index - 1] == "选择卡牌"
+            ):
                 parts = self._normalize(line.text).splitlines()
             if not parts:
                 continue
-            if (expected_lines[expected_index:
-                               expected_index + len(parts)] == parts):
+            if expected_lines[expected_index : expected_index + len(parts)] == parts:
                 relevant_lines.append(line)
                 expected_index += len(parts)
         relevant_lines = tuple(relevant_lines)
-        confidence = (min(line.confidence for line in relevant_lines)
-                      if relevant_lines else evidence.confidence)
+        confidence = (
+            min(line.confidence for line in relevant_lines)
+            if relevant_lines
+            else evidence.confidence
+        )
         return type(evidence)(
-            evidence.frame_id, evidence.created_at, relevant_lines,
-            normalized_text, confidence, evidence.backend,
-            evidence.preprocessing)
+            evidence.frame_id,
+            evidence.created_at,
+            relevant_lines,
+            normalized_text,
+            confidence,
+            evidence.backend,
+            evidence.preprocessing,
+        )
 
     @staticmethod
     def _normalize(text):
         return "\n".join(
-            line.strip() for line in (text or "").splitlines()
-            if line.strip())
+            line.strip() for line in (text or "").splitlines() if line.strip()
+        )

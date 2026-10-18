@@ -10,6 +10,7 @@
 ③ 框偏 ±40px 仍能认（这才叫可校准）；④ 9 个卡组点的几何；
 ⑤ 单格保护（不像卡组就一格都不点）；⑥ 流程安全（超时只点中心、不盲点）。
 """
+
 from __future__ import annotations
 
 import unittest
@@ -24,8 +25,9 @@ import battle_entry as be
 # ---------------------------------------------------------------- 合成帧工具
 def blank_frame(value: int = 120) -> np.ndarray:
     """一张空白 BGR 画面（基准尺寸）。"""
-    return np.full((be.REFERENCE_CLIENT[1], be.REFERENCE_CLIENT[0], 3),
-                   int(value), dtype=np.uint8)
+    return np.full(
+        (be.REFERENCE_CLIENT[1], be.REFERENCE_CLIENT[0], 3), int(value), dtype=np.uint8
+    )
 
 
 def template_gray(kind: str) -> np.ndarray:
@@ -37,7 +39,7 @@ def template_gray(kind: str) -> np.ndarray:
 def paste(frame: np.ndarray, gray: np.ndarray, x: int, y: int) -> np.ndarray:
     """把灰度模板贴到画面上（三通道同值，等价于灰度图）。"""
     height, width = gray.shape
-    frame[y:y + height, x:x + width, :] = gray[:, :, None]
+    frame[y : y + height, x : x + width, :] = gray[:, :, None]
     return frame
 
 
@@ -51,10 +53,10 @@ def paint_deck_plates(frame: np.ndarray, config=None) -> np.ndarray:
         center_y = (top + bottom) // 2
         y0 = max(0, center_y - be.DECK_PLATE_BAND)
         y1 = min(frame.shape[0], center_y + be.DECK_PLATE_BAND)
-        frame[y0:y1, left:right, :] = 60                 # 暗色名牌
+        frame[y0:y1, left:right, :] = 60  # 暗色名牌
         middle = (y0 + y1) // 2
-        frame[middle - 8:middle + 8, left + 40:left + 100, :] = 245   # 白字
-        frame[middle - 8:middle + 8, left + 120:left + 160, :] = 245
+        frame[middle - 8 : middle + 8, left + 40 : left + 100, :] = 245  # 白字
+        frame[middle - 8 : middle + 8, left + 120 : left + 160, :] = 245
     return frame
 
 
@@ -92,10 +94,12 @@ def bright_textured_frame() -> np.ndarray:
 
 
 def make_config(**overrides):
-    base = dict(main_menu_battle_roi=be.MAIN_MENU_BATTLE_DEFAULT,
-                deck_select_title_roi=be.DECK_SELECT_TITLE_DEFAULT,
-                deck_grid_roi=be.DECK_GRID_DEFAULT,
-                post_game_start_roi=be.START_BOX_DEFAULT)
+    base = dict(
+        main_menu_battle_roi=be.MAIN_MENU_BATTLE_DEFAULT,
+        deck_select_title_roi=be.DECK_SELECT_TITLE_DEFAULT,
+        deck_grid_roi=be.DECK_GRID_DEFAULT,
+        post_game_start_roi=be.START_BOX_DEFAULT,
+    )
     base.update(overrides)
     return SimpleNamespace(**base)
 
@@ -180,7 +184,7 @@ class TextOnlyRecognitionTests(unittest.TestCase):
         ui = be.identify(frame, config)
         self.assertEqual("deck_select", ui["state"])
         self.assertGreaterEqual(ui["deck_title"]["score"], 0.99)
-        self.assertLess(ui["start"]["score"], be.NCC_MIN)   # 确实没有「开始」
+        self.assertLess(ui["start"]["score"], be.NCC_MIN)  # 确实没有「开始」
 
     def test_learn_refuses_a_frame_that_is_not_drawn_and_keeps_the_template(self):
         """画面还没画出来（白屏）时不能重裁模板，更不能覆盖掉能用的那个。
@@ -191,13 +195,15 @@ class TextOnlyRecognitionTests(unittest.TestCase):
         path = be.TEMPLATE_DIR / be.TEMPLATE_FILE["traditional"]
         before = path.read_bytes()
 
-        result = be.learn_template("all", frame=bright_textured_frame(),
-                                   config=make_config())
+        result = be.learn_template(
+            "all", frame=bright_textured_frame(), config=make_config()
+        )
 
         self.assertFalse(result["ok"])
         self.assertEqual({}, result["learned"])
-        self.assertEqual({"traditional", "deck_select_title", "start"},
-                         set(result["refused"]))
+        self.assertEqual(
+            {"traditional", "deck_select_title", "start"}, set(result["refused"])
+        )
         self.assertIn("深色", result["message"])
         self.assertEqual(before, path.read_bytes(), "绝不该覆盖掉能用的模板")
 
@@ -226,17 +232,26 @@ class CalibrationToleranceTests(unittest.TestCase):
         frame = main_menu_frame(make_config())
         base = be.MAIN_MENU_BATTLE_DEFAULT
         for shift in ((0, 0), (20, 0), (0, 20), (40, 0), (0, 40)):
-            config = make_config(main_menu_battle_roi=(
-                base[0] + shift[0], base[1] + shift[1],
-                base[2] + shift[0], base[3] + shift[1]))
+            config = make_config(
+                main_menu_battle_roi=(
+                    base[0] + shift[0],
+                    base[1] + shift[1],
+                    base[2] + shift[0],
+                    base[3] + shift[1],
+                )
+            )
             ui = be.identify(frame, config)
             self.assertEqual("main_menu", ui["state"], f"偏移 {shift} 应该仍能认到")
-            self.assertEqual([961, 330], ui["traditional"]["point"],
-                             "认到的位置应始终是文字真正所在处")
+            self.assertEqual(
+                [961, 330],
+                ui["traditional"]["point"],
+                "认到的位置应始终是文字真正所在处",
+            )
 
         # 拖出窗口之外（400px）就该什么都找不到，而不是硬认
-        far = make_config(main_menu_battle_roi=(
-            base[0] + 400, base[1], base[2] + 400, base[3]))
+        far = make_config(
+            main_menu_battle_roi=(base[0] + 400, base[1], base[2] + 400, base[3])
+        )
         self.assertEqual("unknown", be.identify(frame, far)["state"])
 
 
@@ -246,13 +261,32 @@ class DeckGeometryTests(unittest.TestCase):
         config = make_config()
         points = be.deck_slot_points(config)
         self.assertEqual(9, len(points))
-        self.assertEqual([(486, 318), (727, 318), (968, 318),
-                          (486, 534), (727, 534), (968, 534),
-                          (486, 750), (727, 750), (968, 750)], points)
+        self.assertEqual(
+            [
+                (486, 318),
+                (727, 318),
+                (968, 318),
+                (486, 534),
+                (727, 534),
+                (968, 534),
+                (486, 750),
+                (727, 750),
+                (968, 750),
+            ],
+            points,
+        )
         # 与实测（列 486/729/968、行 318/534/750）逐点对比，偏差 ≤3px
-        measured = [(486, 318), (729, 318), (968, 318),
-                    (486, 534), (729, 534), (968, 534),
-                    (486, 750), (729, 750), (968, 750)]
+        measured = [
+            (486, 318),
+            (729, 318),
+            (968, 318),
+            (486, 534),
+            (729, 534),
+            (968, 534),
+            (486, 750),
+            (729, 750),
+            (968, 750),
+        ]
         for (x, y), (mx, my) in zip(points, measured):
             self.assertLessEqual(abs(x - mx), 3)
             self.assertLessEqual(abs(y - my), 3)
@@ -275,9 +309,12 @@ class DeckSlotGuardTests(unittest.TestCase):
         # 空白画面（例如结算界面）：9 格都没有名牌文字 → 一格都不点
         clicker = Recorder()
         for blank in (blank_frame(), blank_frame(255)):
-            result = be.select_deck(8,
-                                    capture=lambda config=None, f=blank: (f, None),
-                                    click_at_fn=clicker, config=config)
+            result = be.select_deck(
+                8,
+                capture=lambda config=None, f=blank: (f, None),
+                click_at_fn=clicker,
+                config=config,
+            )
             self.assertFalse(result["ok"])
             self.assertTrue(result["skipped"])
         # **白屏也算**：真机上实测到过"炉石还没画出来"的白屏让 9 格全都"有名牌白字"
@@ -288,8 +325,12 @@ class DeckSlotGuardTests(unittest.TestCase):
         # 真的有卡组时，点的是那一格的中心
         clicker = Recorder()
         frame = deck_select_frame(config)
-        hit = be.select_deck(8, capture=lambda config=None: (frame, None),
-                             click_at_fn=clicker, config=config)
+        hit = be.select_deck(
+            8,
+            capture=lambda config=None: (frame, None),
+            click_at_fn=clicker,
+            config=config,
+        )
         self.assertTrue(hit["ok"])
         self.assertEqual([(727, 750)], clicker.clicks)
 
@@ -299,9 +340,11 @@ class DeckSlotGuardTests(unittest.TestCase):
         clicker, clock = Recorder(), FakeClock()
         result = be.select_deck_if_configured(
             settings={"deck_index": 8},
-            capture=sequence_capture([blank_frame(),
-                                      deck_select_frame(config)]),
-            click_at_fn=clicker, sleep=clock.sleep, config=config)
+            capture=sequence_capture([blank_frame(), deck_select_frame(config)]),
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            config=config,
+        )
 
         self.assertTrue(result["ok"])
         self.assertEqual(0.3, clock.slept)
@@ -313,7 +356,10 @@ class DeckSlotGuardTests(unittest.TestCase):
         result = be.select_deck_if_configured(
             settings={"deck_index": 8},
             capture=lambda config=None: (blank_frame(), None),
-            click_at_fn=clicker, sleep=clock.sleep, config=make_config())
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            config=make_config(),
+        )
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["skipped"])
@@ -330,14 +376,20 @@ class FlowSafetyTests(unittest.TestCase):
         result = be.enter_battle(
             window_present=lambda: True,
             capture=lambda config=None: (blank_frame(), None),
-            click_at_fn=clicker, sleep=clock.sleep, clock=clock,
-            interval=3.0, main_menu_timeout=6.0, config=make_config())
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            clock=clock,
+            interval=3.0,
+            main_menu_timeout=6.0,
+            config=make_config(),
+        )
 
         self.assertFalse(result["ok"])
         self.assertEqual("timeout_main_menu", result["stage"])
         for point in clicker.clicks:
-            self.assertEqual(be.CENTER_DISMISS_POINT, point,
-                             "超时路径里只允许点安全中心点")
+            self.assertEqual(
+                be.CENTER_DISMISS_POINT, point, "超时路径里只允许点安全中心点"
+            )
         # 两次"点中心 + 等 3 秒"，第三次判定时到超时
         self.assertEqual(2, len(clicker.clicks))
         self.assertEqual(6.0, clock.slept)
@@ -350,29 +402,52 @@ class FlowSafetyTests(unittest.TestCase):
         # 第一次判定就是主界面 → 一次中心点都不该点；认到文字→点它，再点第 8 格
         clicker, clock = Recorder(), FakeClock()
         result = be.enter_battle(
-            deck_index=8, click_start=False, window_present=lambda: True,
+            deck_index=8,
+            click_start=False,
+            window_present=lambda: True,
             # 多一帧：enter_battle 会先抓一帧判断"是不是已经站在选套牌界面"
             # （是就直接从选卡组接手，不再等主界面也不会点画面中心）。
-            capture=sequence_capture([main_menu_frame(config),
-                                      main_menu_frame(config),
-                                      deck_select_frame(config)]),
-            click_at_fn=clicker, sleep=clock.sleep, clock=clock, interval=3.0,
-            main_menu_timeout=30.0, deck_select_timeout=30.0, config=config)
+            capture=sequence_capture(
+                [
+                    main_menu_frame(config),
+                    main_menu_frame(config),
+                    deck_select_frame(config),
+                ]
+            ),
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            clock=clock,
+            interval=3.0,
+            main_menu_timeout=30.0,
+            deck_select_timeout=30.0,
+            config=config,
+        )
         self.assertTrue(result["ok"])
         self.assertEqual("done", result["stage"])
         self.assertEqual([(961, 330), (727, 750)], clicker.clicks)
         self.assertEqual(0.0, clock.slept)
-        self.assertEqual(["launch", "wait_main_menu", "click_traditional",
-                          "wait_deck_select", "select_deck"],
-                         [step["stage"] for step in result["steps"]])
+        self.assertEqual(
+            [
+                "launch",
+                "wait_main_menu",
+                "click_traditional",
+                "wait_deck_select",
+                "select_deck",
+            ],
+            [step["stage"] for step in result["steps"]],
+        )
 
         # 收到停止请求：一次都不能点
         clicker = Recorder()
         aborted = be.enter_battle(
             window_present=lambda: True,
             capture=lambda config=None: (main_menu_frame(), None),
-            click_at_fn=clicker, sleep=FakeClock().sleep, clock=FakeClock(),
-            should_abort=lambda: True, config=config)
+            click_at_fn=clicker,
+            sleep=FakeClock().sleep,
+            clock=FakeClock(),
+            should_abort=lambda: True,
+            config=config,
+        )
         self.assertFalse(aborted["ok"])
         self.assertEqual("aborted", aborted["stage"])
         self.assertEqual([], clicker.clicks, "收到停止请求后一次都不该点")
@@ -382,10 +457,16 @@ class FlowSafetyTests(unittest.TestCase):
         config = make_config()
         clicker, clock = Recorder(), FakeClock()
         result = be.wait_for_main_menu(
-            timeout=10.0, interval=0.5,
-            capture=sequence_capture([blank_frame(), blank_frame(),
-                                      main_menu_frame(config)]),
-            click_at_fn=clicker, sleep=clock.sleep, clock=clock, config=config)
+            timeout=10.0,
+            interval=0.5,
+            capture=sequence_capture(
+                [blank_frame(), blank_frame(), main_menu_frame(config)]
+            ),
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            clock=clock,
+            config=config,
+        )
 
         self.assertTrue(result["ok"])
         self.assertEqual(1.0, clock.slept, "不能再等满一个 3 秒轮询")
@@ -396,15 +477,44 @@ class FlowSafetyTests(unittest.TestCase):
         """0.5s 轮询下超时路径也不连点：2 秒里只点 1 下中心。"""
         clicker, clock = Recorder(), FakeClock()
         result = be.wait_for_main_menu(
-            timeout=2.0, interval=0.5,
+            timeout=2.0,
+            interval=0.5,
             capture=lambda config=None: (blank_frame(), None),
-            click_at_fn=clicker, sleep=clock.sleep, clock=clock,
-            config=make_config())
+            click_at_fn=clicker,
+            sleep=clock.sleep,
+            clock=clock,
+            config=make_config(),
+        )
 
         self.assertFalse(result["ok"])
         self.assertEqual("timeout_main_menu", result["reason"])
         self.assertEqual([be.CENTER_DISMISS_POINT], clicker.clicks)
         self.assertEqual(2.0, clock.slept)
+
+
+class ToReferenceInterpolationTests(unittest.TestCase):
+    def test_upscale_uses_a_smooth_filter_not_nearest(self):
+        """客户区小于基准时 to_reference 是**放大**：INTER_AREA 放大≈最近邻（块状），
+        必须换成 INTER_CUBIC，否则小窗口下模板匹配分数明显掉。"""
+        checker = np.zeros((2, 2, 3), dtype=np.uint8)
+        checker[0, 1] = (255, 255, 255)
+        checker[1, 0] = (255, 255, 255)
+
+        out = be.to_reference(checker)
+
+        self.assertEqual((1080, 1920, 3), out.shape)
+        nearest = cv2.resize(
+            checker, be.REFERENCE_CLIENT, interpolation=cv2.INTER_NEAREST
+        )
+        self.assertFalse(np.array_equal(out, nearest))
+        # 最近邻只会有 0/255 两种值；平滑插值在黑白格交界处会给出中间灰。
+        center = int(out[540, 960, 0])
+        self.assertGreater(center, 0)
+        self.assertLess(center, 255)
+
+    def test_reference_sized_frame_is_returned_unchanged(self):
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        self.assertIs(frame, be.to_reference(frame))
 
 
 if __name__ == "__main__":

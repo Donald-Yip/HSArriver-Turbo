@@ -832,6 +832,11 @@ class RecommendationConfig:
     # （1.0x 快约 28% 但识别率下降不可接受；3.0x 无效且慢）。
     # 上游取 1.4；仍可用环境变量 OCR_PREPROCESS_SCALE 临时覆盖。
     ocr_preprocess_scale: float = 1.4
+    # 客户区小于基准 1920×1080 时的 OCR 放大补偿上限（见 stable_reader._client_upscale）。
+    # ROI 抓图按客户区缩放，客户区越小面板像素越少；按 1/客户区缩放 把字号补回来，
+    # 但补太多会让 OCR 变慢、可能拖崩 recognition_timeout_seconds，故设上限。
+    # 2.0 是保守值（客户区约 960×540 时刚好补满）；调大更清晰但更慢。
+    ocr_small_window_max_upscale: float = 2.0
     # 自动线程数下限：OpenMP/MKL 线程默认取机器物理核数，
     # 低于此下限固定为此值（核数少的机器保守）。
     ocr_thread_min: int = 4
