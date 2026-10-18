@@ -19,10 +19,12 @@
 设计沿用 hs_restart.py 的路子：**本模块只做纯函数，编排交给 web_ui**，
 外部副作用（open / subprocess）都可注入，方便单测。
 """
+
 from __future__ import annotations
 
 import datetime
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -35,6 +37,13 @@ RUNTIME_LOG = ROOT / "ui_log_last.txt"
 # 「保存日志」的文件名前缀 / 后缀：清理时只认这一种，别误删用户自己放的东西。
 BATTLE_LOG_PREFIX = "对战日志_"
 BATTLE_LOG_SUFFIX = ".txt"
+# 结构化对战日志（每行一个回合块，唯一数据源；TXT 由它渲染）。
+BATTLE_RECORD_SUFFIX = ".jsonl"
+# 出错反馈包（feedback.export_bundle 生成的 zip）与其截图工作目录。
+FEEDBACK_PREFIX = "反馈_"
+FEEDBACK_ZIP_SUFFIX = ".zip"
+# 反馈包名后缀：``<紧凑日期>-<盒子推荐>-错误反馈.zip``（feedback.py 生成）。
+FEEDBACK_NAME_SUFFIX = "错误反馈.zip"
 
 
 def new_battle_log_path(now: Optional[datetime.datetime] = None) -> Path:
@@ -42,14 +51,46 @@ def new_battle_log_path(now: Optional[datetime.datetime] = None) -> Path:
 
     命名集中在这里，避免 log_overlay 与本模块各写一份。
     """
-    stamp = (now or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
-    return LOG_DIR / f"{BATTLE_LOG_PREFIX}{stamp}{BATTLE_LOG_SUFFIX}"
+    return LOG_DIR / battle_log_name(now)
+
+
+def new_battle_record_path(now: Optional[datetime.datetime] = None) -> Path:
+    """生成一份新的结构化对战日志路径：``logs/对战日志_<时间戳>.jsonl``。"""
+    return LOG_DIR / battle_record_name(now)
+
+
+def _stamp(now: Optional[datetime.datetime] = None) -> str:
+    return (now or datetime.datetime.now()).strftime("%Y%m%d_%H%M%S")
+
+
+def battle_log_name(now: Optional[datetime.datetime] = None) -> str:
+    return f"{BATTLE_LOG_PREFIX}{_stamp(now)}{BATTLE_LOG_SUFFIX}"
+
+
+def battle_record_name(now: Optional[datetime.datetime] = None) -> str:
+    return f"{BATTLE_LOG_PREFIX}{_stamp(now)}{BATTLE_RECORD_SUFFIX}"
 
 
 def is_battle_log(name: str) -> bool:
-    """名字是不是「保存日志」写的对战日志（清理范围就靠它）。"""
+    """名字是不是脚本写的对战日志（``.txt`` 或 ``.jsonl``；清理范围就靠它）。"""
     text = str(name or "")
-    return text.startswith(BATTLE_LOG_PREFIX) and text.endswith(BATTLE_LOG_SUFFIX)
+    return text.startswith(BATTLE_LOG_PREFIX) and text.endswith(
+        (BATTLE_LOG_SUFFIX, BATTLE_RECORD_SUFFIX)
+    )
+
+
+def is_feedback(name: str) -> bool:
+    """名字是不是出错反馈产物。
+
+    认三类：``出错记录_*``（按天合并的自动存档目录）、``反馈_*``（旧工作目录）、
+    ``*-错误反馈.zip``（``<日期>-<盒子推荐>-错误反馈.zip`` 导出包）。清理只认这三类。
+    """
+    text = str(name or "")
+    return (
+        text.startswith(FEEDBACK_PREFIX)
+        or text.startswith("出错记录_")
+        or text.endswith(FEEDBACK_NAME_SUFFIX)
+    )
 
 
 def format_size(num_bytes) -> str:
@@ -62,11 +103,15 @@ def format_size(num_bytes) -> str:
         value = 0.0
     if value < 1024:
         return f"{int(value)} B"
-    for unit, step in (("KB", 1024.0), ("MB", 1024.0 ** 2), ("GB", 1024.0 ** 3),
-                       ("TB", 1024.0 ** 4)):
+    for unit, step in (
+        ("KB", 1024.0),
+        ("MB", 1024.0**2),
+        ("GB", 1024.0**3),
+        ("TB", 1024.0**4),
+    ):
         if value < step * 1024 or unit == "TB":
             return f"{value / step:.1f} {unit}"
-    return f"{value:.1f} TB"       # pragma: no cover - 到不了
+    return f"{value:.1f} TB"  # pragma: no cover - 到不了
 
 
 def _safe_stat_size(path: Path) -> int:
@@ -87,17 +132,40 @@ def _safe_dir(log_dir: Path) -> Path:
         return Path(log_dir)
 
 
-def scan(log_dir: Optional[Path] = None,
-         runtime_log: Optional[Path] = None) -> dict:
-    """统计脚本日志：对战日志个数/体积 + 运行日志体积。
+def _dir_size(path: Path) -> int:
+    """递归算一个目录的体积；读不到按 0 算。"""
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += int(os.stat(os.path.join(root, name)).st_size)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
 
-    返回 ``{files, bytes, battle_files, battle_bytes, runtime_bytes, newest}``。
-    目录不存在、单个条目 stat 失败都按"没有"处理，绝不抛异常。
+
+def scan(log_dir: Optional[Path] = None, runtime_log: Optional[Path] = None) -> dict:
+    """统计脚本日志：对战日志（txt/jsonl）+ 反馈包 + 运行日志。
+
+    返回 ``{files, bytes, battle_files, battle_bytes, feedback_files,
+    feedback_bytes, runtime_bytes, newest}``。目录不存在、单个条目 stat 失败都按
+    "没有"处理，绝不抛异常。
     """
     battle_dir = _safe_dir(log_dir or LOG_DIR)
     runtime = Path(runtime_log or RUNTIME_LOG)
-    result = {"files": 0, "bytes": 0, "battle_files": 0, "battle_bytes": 0,
-              "runtime_bytes": 0, "newest": None}
+    result = {
+        "files": 0,
+        "bytes": 0,
+        "battle_files": 0,
+        "battle_bytes": 0,
+        "feedback_files": 0,
+        "feedback_bytes": 0,
+        "runtime_bytes": 0,
+        "newest": None,
+    }
     newest: Optional[Path] = None
     newest_key = None
     try:
@@ -106,9 +174,23 @@ def scan(log_dir: Optional[Path] = None,
         entries = []
     for entry in entries:
         try:
-            if not entry.is_file():
-                continue
+            is_file = entry.is_file()
         except OSError:
+            continue
+        try:
+            is_dir = entry.is_dir()
+        except (OSError, AttributeError):
+            is_dir = False
+        # 反馈包与反馈截图工作目录：计入反馈体积（可被一键清理）。
+        if is_feedback(entry.name):
+            result["feedback_files"] += 1
+            result["feedback_bytes"] += (
+                _safe_stat_size(Path(entry.path))
+                if is_file
+                else _dir_size(Path(entry.path))
+            )
+            continue
+        if not is_file:
             continue
         if not is_battle_log(entry.name):
             continue
@@ -128,19 +210,26 @@ def scan(log_dir: Optional[Path] = None,
             newest = Path(entry.path)
     runtime_bytes = _safe_stat_size(runtime)
     result["runtime_bytes"] = runtime_bytes
-    result["files"] = result["battle_files"] + (1 if runtime_bytes else 0)
-    result["bytes"] = result["battle_bytes"] + runtime_bytes
+    result["files"] = (
+        result["battle_files"] + result["feedback_files"] + (1 if runtime_bytes else 0)
+    )
+    result["bytes"] = result["battle_bytes"] + result["feedback_bytes"] + runtime_bytes
     result["newest"] = newest
     return result
 
 
-def clear(log_dir: Optional[Path] = None, runtime_log: Optional[Path] = None,
-          logger: Optional[Callable[[str], None]] = None) -> dict:
-    """删掉脚本自己写的日志：``logs\\对战日志_*.txt`` + 运行日志。
+def clear(
+    log_dir: Optional[Path] = None,
+    runtime_log: Optional[Path] = None,
+    logger: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """删掉脚本自己写的日志：``logs\\对战日志_*.txt``/``.jsonl`` + 运行日志 + 反馈产物。
 
-    只 ``unlink`` 单文件，**从不 rmtree、从不删其它文件**；单个文件失败只记录
-    不中断（典型场景：用户正用记事本打开某份对战日志）。运行日志删不掉时兜底
-    截断成 0 字节。返回 ``{ok, removed, freed_bytes, failed, errors, skipped}``。
+    对战日志与运行日志只 ``unlink`` 单文件；**只有** ``反馈_`` 前缀的截图工作目录会
+    被 ``shutil.rmtree``（那是本脚本自己建、自己清的临时目录），其它目录一律不碰。
+    单个条目失败只记录不中断（典型场景：用户正用记事本打开某份对战日志）。运行日志
+    删不掉时兜底截断成 0 字节。返回 ``{ok, removed, freed_bytes, failed, errors,
+    skipped}``。
     """
     battle_dir = _safe_dir(log_dir or LOG_DIR)
     runtime = Path(runtime_log or RUNTIME_LOG)
@@ -163,14 +252,37 @@ def clear(log_dir: Optional[Path] = None, runtime_log: Optional[Path] = None,
         entries = []
     for entry in entries:
         try:
-            if not entry.is_file():
-                if is_battle_log(entry.name):
-                    skipped.append(entry.name)
-                continue
+            is_file = entry.is_file()
         except OSError:
             continue
+        try:
+            is_dir = entry.is_dir()
+        except (OSError, AttributeError):
+            is_dir = False
+        # 反馈产物：zip 直接删；截图工作目录（仅 反馈_ 前缀）递归删。
+        if is_feedback(entry.name):
+            path = Path(entry.path)
+            size = _safe_stat_size(path) if is_file else _dir_size(path)
+            try:
+                if is_file:
+                    path.unlink()
+                elif is_dir:
+                    shutil.rmtree(path)
+                else:
+                    continue
+            except OSError as exc:
+                failed.append(entry.name)
+                errors.append(f"{entry.name}: {type(exc).__name__}: {exc}")
+                continue
+            removed += 1
+            freed += size
+            continue
+        if not is_file:
+            if is_battle_log(entry.name):
+                skipped.append(entry.name)
+            continue
         if not is_battle_log(entry.name):
-            skipped.append(entry.name)      # 不匹配的不动，也不报错
+            skipped.append(entry.name)  # 不匹配的不动，也不报错
             continue
         size = 0
         try:
@@ -204,26 +316,35 @@ def clear(log_dir: Optional[Path] = None, runtime_log: Optional[Path] = None,
                 note(f"已清空 {runtime.name}（删不掉，可能正被打开）")
             except OSError as exc2:
                 failed.append(runtime.name)
-                errors.append(f"{runtime.name}: {type(exc).__name__}: {exc}"
-                              f" / 截断也失败: {type(exc2).__name__}: {exc2}")
+                errors.append(
+                    f"{runtime.name}: {type(exc).__name__}: {exc}"
+                    f" / 截断也失败: {type(exc2).__name__}: {exc2}"
+                )
 
-    return {"ok": not failed, "removed": removed, "freed_bytes": freed,
-            "failed": failed, "errors": errors, "skipped": skipped}
+    return {
+        "ok": not failed,
+        "removed": removed,
+        "freed_bytes": freed,
+        "failed": failed,
+        "errors": errors,
+        "skipped": skipped,
+    }
 
 
 def _default_opener(path) -> None:
-    os.startfile(str(path))       # noqa: S606 - Windows 专用，故意用系统默认方式
+    os.startfile(str(path))  # noqa: S606 - Windows 专用，故意用系统默认方式
 
 
 def _default_runner(argv) -> None:
     # explorer 正常也会返回 1，这里不看返回码，也不等它结束。
-    subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL)
+    subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def open_location(log_dir: Optional[Path] = None,
-                  opener: Optional[Callable] = None,
-                  runner: Optional[Callable] = None) -> dict:
+def open_location(
+    log_dir: Optional[Path] = None,
+    opener: Optional[Callable] = None,
+    runner: Optional[Callable] = None,
+) -> dict:
     """打开日志所在位置：有对战日志就选中最新那份，否则直接打开目录。
 
     选文件用 ``explorer /select,<path>``；目录不存在就先建出来（不然
@@ -236,12 +357,14 @@ def open_location(log_dir: Optional[Path] = None,
     try:
         if newest is not None:
             run(["explorer", f"/select,{newest}"])
-            return {"ok": True, "opened": "file", "target": str(newest),
-                    "error": ""}
+            return {"ok": True, "opened": "file", "target": str(newest), "error": ""}
         battle_dir.mkdir(parents=True, exist_ok=True)
         open_path(battle_dir)
-        return {"ok": True, "opened": "folder", "target": str(battle_dir),
-                "error": ""}
+        return {"ok": True, "opened": "folder", "target": str(battle_dir), "error": ""}
     except Exception as exc:
-        return {"ok": False, "opened": None, "target": str(battle_dir),
-                "error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "ok": False,
+            "opened": None,
+            "target": str(battle_dir),
+            "error": f"{type(exc).__name__}: {exc}",
+        }

@@ -17,6 +17,7 @@ Buttons:
   * 校准                  — open/close the on-screen calibration window
   * 保存日志              — dump the battle log to a file
   * 打开日志 / 清理日志    — open the log files in Explorer / delete them
+  * 导出本次出错截屏与日志  — zip this run's retries/errors + screenshots for the author
   * 重启炉石              — confirm, then kill Hearthstone + wipe logs + relaunch
   * 退出浮窗              — close only this window (script keeps running)
   * 退出脚本              — stop automation and exit the whole process
@@ -25,6 +26,7 @@ Button labels are **plain text on purpose**: the old ▶/⏹/⏸/💾/♻/🚪/�
 have no glyphs in Microsoft YaHei / Segoe UI and rendered as tofu boxes.
 Every button hands the foreground back to Hearthstone afterwards.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -38,6 +40,9 @@ from collections import deque
 # 脚本日志（对战日志 / 运行日志）的体积、命名与清理都在 script_logs.py 里；
 # 浮窗只用它的 format_size 与 new_battle_log_path，避免两份实现打架。
 import script_logs
+
+# 版本号：浮窗品牌行右侧显示 v2026.10.17（网页顶栏显示的是同一个串）。
+import version
 
 _LOCK = threading.Lock()
 _LINES: deque = deque(maxlen=2000)
@@ -112,12 +117,13 @@ BTN_LAYOUT = {
     "save": (2, 1),
     "open_logs": (3, 0),
     "clear_logs": (3, 1),
-    "restart": (4, 0),
-    "exit_overlay": (4, 1),
-    "exit": (5, 0),
+    "export_feedback": (4, 0),
+    "restart": (5, 0),
+    "exit_overlay": (5, 1),
+    "exit": (6, 0),
 }
 # 需要横跨整行的按钮（单独一行）。
-BTN_SPAN = {"stop_after": 2, "exit": 2}
+BTN_SPAN = {"stop_after": 2, "exit": 2, "export_feedback": 2}
 
 # 浮窗尺寸：宽度按最长的一行文字/按钮定，高度 = 品牌行 + 状态面板（4 行）
 # + 五行按钮（开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
@@ -126,8 +132,23 @@ BTN_SPAN = {"stop_after": 2, "exit": 2}
 # **换行**，而不是把窗口加宽（加宽过一次，用户反馈"整个浮窗又变宽了"）。
 WINDOW_WIDTH = 263
 # 654 - 17（删掉副标题）→ 637；再 +56 给新增的「日志」状态行与「打开日志 /
-# 清理日志」按钮行，日志正文仍保持 9 行左右。
-WINDOW_HEIGHT = 693
+# 清理日志」按钮行；+30 给新增的「导出本次出错截屏与日志」按钮行，日志正文保持 9 行左右。
+# 再 +49 给新增的「炉石窗口宽度」滑条行（标题/数值 + 横向 Scale）。
+WINDOW_HEIGHT = 772
+# 炉石窗口宽度滑条（保持 16:9）。范围/步进的「真值」在 hs_window；这里的默认值
+# 只是它不可用时的兜底（见 `_run` 里的滑条构建）。
+SIZE_SLIDER_MIN = 720
+SIZE_SLIDER_MAX = 3840
+SIZE_SLIDER_STEP = 16
+SIZE_ROW_TITLE = "炉石窗口"
+# 滑条外观（自绘 Canvas）：设计高度、滑钮半径、轨道粗细与 flat dark 配色。
+# 不用 tk.Scale 是因为它的滑钮是方块（丑），而且按下会连浮窗一起拖（见 _run）。
+SLIDER_HEIGHT = 20
+SLIDER_THUMB_RADIUS = 7
+SLIDER_TRACK_HEIGHT = 6
+SLIDER_TRACK_COLOR = "#333b4d"
+SLIDER_FILL_COLOR = ACCENT
+SLIDER_THUMB_COLOR = "#e8ecf2"
 # 最小化（折叠成标题条）：浮窗是 WS_EX_TOOLWINDOW，没有任务栏条目，
 # 真 iconify() 之后用户没有任何入口还原，所以折叠成标题条 + 「展开」按钮。
 MINIMIZED_HEIGHT = 34
@@ -178,13 +199,14 @@ def _eye_pad(scale=None) -> tuple[int, int]:
     """眼睛按钮的左右内边距（按当前 DPI 缩放后的 pack padx）。"""
     return (px(_EYE_PAD[0], scale), px(_EYE_PAD[1], scale))
 
+
 # 状态行内布局（左→右）：● 名称 数值 说明 …（「账号」行最右还有眼睛按钮）。
 # 说明列能用的宽度 = 窗口宽 - 这一行其它列，实测按控件真实宽度算（见 _status_row），
 # 所以缩放/字体不同也不会算歪。
-_MARKER_PAD = (10, 4)     # ● 的左右内边距
-_CELL_GAP = 6             # 名称 / 数值 / 说明之间的间距
-_DETAIL_PAD = 10          # 说明列右侧内边距
-_EYE_W, _EYE_PAD = 24, (2, 8)   # 眼睛按钮与它的内边距（只有「账号」行）
+_MARKER_PAD = (10, 4)  # ● 的左右内边距
+_CELL_GAP = 6  # 名称 / 数值 / 说明之间的间距
+_DETAIL_PAD = 10  # 说明列右侧内边距
+_EYE_W, _EYE_PAD = 24, (2, 8)  # 眼睛按钮与它的内边距（只有「账号」行）
 # 说明列最窄也要留这么多，不然换行会碎成一列单字。
 _DETAIL_MIN_PX = 60
 # 说明最多占几行：超过就截断加省略号，避免极端长文把日志区挤没。
@@ -198,15 +220,18 @@ LOG_DANGER_BYTES = 500 * 1024 * 1024
 
 # 浮窗顶部品牌行：本项目大名（放在“自动化日志”标题之前）。
 # 副标题「炉石传说 · 自动对战」已按用户要求删除。
-BRAND_NAME = "HSLegendArriver"
+# 名字取自 version.py，别在这里再写死一份（改了名字只改那一处）。
+BRAND_NAME = version.NAME
+# 品牌行右侧的版本小字：v2026.10.17（版本号 = 发布日期，不带 git 短哈希）。
+VERSION_TEXT = version.version_label()
+VERSION_FONT = ("Consolas", 8)
 # 状态圆点：功能开着 = 绿，关着 = 红，状态未知 = 灰。
 MARKER_ON = GREEN
 MARKER_OFF = DANGER
 MARKER_UNKNOWN = DIM
 
 
-def detail_wrap_px(width: int, used_px: int,
-                   min_px: int = _DETAIL_MIN_PX) -> int:
+def detail_wrap_px(width: int, used_px: int, min_px: int = _DETAIL_MIN_PX) -> int:
     """状态行「说明」列的可用宽度：整行宽度减去"圆点+名称+数值+间距"。
 
     used_px 由调用方按控件真实宽度算出（tkinter 量得到），这里只是把
@@ -225,14 +250,22 @@ def logs_row(info, now=None) -> dict:
     这里只兜底）。刚清理完的 10 秒内，说明列显示"已清理 X"，让用户看到结果。
     """
     if info is None:
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     try:
         total = int(info.get("bytes") or 0)
         files = int(info.get("files") or 0)
     except (TypeError, ValueError):
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     try:
         warn = int(info.get("warn_bytes") or LOG_WARN_BYTES)
         danger = int(info.get("danger_bytes") or LOG_DANGER_BYTES)
@@ -254,8 +287,12 @@ def logs_row(info, now=None) -> dict:
         detail = f"已清理 {script_logs.format_size(cleared_bytes)}"
     else:
         detail = f"{files} 个文件"
-    return {"marker": color, "value": script_logs.format_size(total),
-            "value_color": color, "detail": detail}
+    return {
+        "marker": color,
+        "value": script_logs.format_size(total),
+        "value_color": color,
+        "detail": detail,
+    }
 
 
 def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
@@ -290,9 +327,14 @@ def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
     return f"{kept}{ellipsis}" if kept else ellipsis
 
 
-def minimized_geometry(width: int, height: int, x: int, y: int,
-                       collapsed: bool, min_height: int = MINIMIZED_HEIGHT
-                       ) -> str:
+def minimized_geometry(
+    width: int,
+    height: int,
+    x: int,
+    y: int,
+    collapsed: bool,
+    min_height: int = MINIMIZED_HEIGHT,
+) -> str:
     """折叠/展开时的窗口几何串（折叠只剩标题条那么高）。
 
     min_height 默认取设计值 MINIMIZED_HEIGHT（测试按 96 DPI 基准断言）；
@@ -332,8 +374,7 @@ def _report(text: str) -> None:
 
 
 # 需要“醒目”显示在浮窗里的日志行：存活检测/昵称不匹配等必须马上被看见的告警。
-_ALERT_MARKERS = ("⚠️", "[ERROR]", "ERROR]", "不匹配", "已退出", "无响应",
-                  "疑似卡死")
+_ALERT_MARKERS = ("⚠️", "[ERROR]", "ERROR]", "不匹配", "已退出", "无响应", "疑似卡死")
 
 
 def _is_alert_line(line: str) -> bool:
@@ -345,13 +386,13 @@ def _is_alert_line(line: str) -> bool:
 # 不引入新颜色：一眼看出这一行是“盒子意见 / 实际操作 / 系统提示 / 警告 / 报错”。
 # 注：ERROR 级日志走 alert（红色加粗），所以这里不再单列 error。
 LOG_TAG_COLORS = {
-    "alert": DANGER,   # ⚠️ 告警 / [ERROR] 报错（加粗，优先级最高）
-    "warn": WARN,      # [WARN] 警告
-    "turn": GREEN,     # 我方回合开始
-    "reco": ACCENT,    # [推荐] 盒子建议
-    "exec": GOLD,      # [执行] 实际操作
-    "sys": TEXT,       # [SYS] 系统/阶段/延时
-    "dim": DIM,        # 等待对手、INFO 等次要信息
+    "alert": DANGER,  # ⚠️ 告警 / [ERROR] 报错（加粗，优先级最高）
+    "warn": WARN,  # [WARN] 警告
+    "turn": GREEN,  # 我方回合开始
+    "reco": ACCENT,  # [推荐] 盒子建议
+    "exec": GOLD,  # [执行] 实际操作
+    "sys": TEXT,  # [SYS] 系统/阶段/延时
+    "dim": DIM,  # 等待对手、INFO 等次要信息
 }
 
 
@@ -375,7 +416,6 @@ def log_line_tag(line: str) -> str:
     if "[SYS]" in text or "SYS]" in text:
         return "sys"
     return "dim"
-
 
 
 _DELAY = None
@@ -414,8 +454,10 @@ def _update_delay_from_line(line: str) -> bool:
             label = "延时"
         desc = _delay_desc(line)
         _DELAY = {
-            "label": label, "desc": desc,
-            "total": total, "started": time.time(),
+            "label": label,
+            "desc": desc,
+            "total": total,
+            "started": time.time(),
         }
         # <1s 的短延时（如操作后 0.5s）进度条一闪而过，仍保留在正文日志
         # 以便看清；长延时只驱动进度条、不进正文。
@@ -433,9 +475,7 @@ def _window_fingerprint(lines):
     每进一行必然滑出一行，条数不变但首/末行都变，指纹仍会变化——这保证了
     基于指纹的“整体重建”不会像基于计数下标的增量渲染那样在 500 行后停刷。
     """
-    return (len(lines),
-            lines[0] if lines else None,
-            lines[-1] if lines else None)
+    return (len(lines), lines[0] if lines else None, lines[-1] if lines else None)
 
 
 def push(line: str, _level: str = "INFO") -> None:
@@ -464,12 +504,46 @@ def push(line: str, _level: str = "INFO") -> None:
 
 
 def _save_log() -> str:
-    """把当前对战日志写入 logs/ 子目录，返回保存路径。
+    """把当前对战日志写入 logs/ 子目录，返回可读 TXT 路径。
 
+    结构化数据（每行一个回合块）是唯一数据源：优先用 battle_record 的记录渲染
+    TXT 并落一份 .jsonl；拿不到结构化记录时回退到旧的 ``_FULL_LINES`` 文本，
+    保证任何情况下「保存日志」都能出一份东西。
     目录与命名统一由 script_logs 提供（浮窗的「日志」体积行、「清理日志」按钮
     认的就是同一批文件名，不能各写一份）。
     """
-    path = script_logs.new_battle_log_path()
+    stamp = None
+    try:
+        import battle_record
+
+        stamp = battle_record.session_stamp()
+        when = _parse_stamp(stamp) if stamp else datetime.datetime.now()
+        path = script_logs.new_battle_log_path(when)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blocks = battle_record.build_blocks(battle_record.records())
+        if blocks:
+            jsonl_path = script_logs.new_battle_record_path(when)
+            battle_record.write_jsonl(
+                jsonl_path,
+                blocks,
+                session=battle_record.session_id(),
+                app=f"{version.NAME} {version.version_label()}",
+            )
+            battle_record.write_text(
+                path,
+                blocks,
+                meta={
+                    "date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "session": battle_record.session_id(),
+                    "source": jsonl_path.name,
+                },
+            )
+            return str(path)
+    except Exception:
+        pass  # 结构化渲染失败 → 回退到下面的纯文本兜底
+
+    when = _parse_stamp(stamp) if stamp else datetime.datetime.now()
+    path = script_logs.new_battle_log_path(when)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _LOCK:
         lines = list(_FULL_LINES)
@@ -479,6 +553,14 @@ def _save_log() -> str:
         if lines:
             f.write("\n")
     return str(path)
+
+
+def _parse_stamp(stamp):
+    """把 ``YYYYmmdd_HHMMSS`` 解析成 datetime；解析不了返回 None。"""
+    try:
+        return datetime.datetime.strptime(str(stamp), "%Y%m%d_%H%M%S")
+    except (TypeError, ValueError):
+        return None
 
 
 _STOP = threading.Event()
@@ -514,8 +596,14 @@ _LOGS = None
 # 「打开日志」/「清理日志」按钮（web_ui 传入；清理前浮窗先弹确认）。
 _ON_OPEN_LOGS = None
 _ON_CLEAR_LOGS = None
+# 「导出本次出错截屏与日志」按钮：把本次运行的重试/报错 + 截图打包成 zip（web_ui 传入）。
+_ON_EXPORT_FEEDBACK = None
 # 「退出浮窗」按钮：只关这个窗口，脚本继续跑（web_ui 传入，用来写一行网页日志）。
 _ON_EXIT_OVERLAY = None
+# 「窗口宽度」滑条：读炉石当前客户区宽度做初值（web_ui 传入，拿不到 → None）。
+_WINDOW_WIDTH = None
+# 滑条拖动结束：按 16:9 设炉石客户区宽度（web_ui 传入；返回 [w, h] 或 None）。
+_ON_RESIZE_WINDOW = None
 
 
 def account_visible() -> bool:
@@ -551,27 +639,32 @@ def human_like_row(info) -> dict:
         浮窗只有 263px 宽）。
     """
     if info is None:
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     if not info.get("enabled"):
-        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
-                "detail": ""}
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM, "detail": ""}
     hand_on = bool(info.get("hand_hover_enabled", True))
     minion_on = bool(info.get("minion_hover_enabled", True))
     if not hand_on and not minion_on:
         detail = "两个悬停都已关"
     elif not hand_on:
         m_lo, m_hi = info.get("minion_hover_min"), info.get("minion_hover_max")
-        detail = (f"看随从 {m_lo:g}~{m_hi:g}s"
-                  if m_lo is not None and m_hi is not None else "仅看随从")
+        detail = (
+            f"看随从 {m_lo:g}~{m_hi:g}s"
+            if m_lo is not None and m_hi is not None
+            else "仅看随从"
+        )
     else:
         lo, hi = info.get("post_delay_min"), info.get("post_delay_max")
         h_lo, h_hi = info.get("hover_min"), info.get("hover_max")
         detail = f"{lo:g}~{hi:g}s" if lo is not None and hi is not None else ""
         if h_lo is not None and h_hi is not None:
             detail += (" · " if detail else "") + f"悬停 {h_lo:g}~{h_hi:g}s"
-    return {"marker": MARKER_ON, "value": "开", "value_color": GREEN,
-            "detail": detail}
+    return {"marker": MARKER_ON, "value": "开", "value_color": GREEN, "detail": detail}
 
 
 def concede_detect_row(info) -> dict:
@@ -581,22 +674,33 @@ def concede_detect_row(info) -> dict:
     "checked_turn", "triggered"}；rate=None 表示该回合没读到胜率。
     """
     if info is None:
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     if not info.get("enabled"):
-        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
-                "detail": ""}
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM, "detail": ""}
     rounds = info.get("rounds") or 0
     streak = info.get("streak") or 0
     if info.get("triggered"):
-        return {"marker": MARKER_ON, "value": "已触发认输", "value_color": DANGER,
-                "detail": f"连续 {streak}/{rounds}"}
+        return {
+            "marker": MARKER_ON,
+            "value": "已触发认输",
+            "value_color": DANGER,
+            "detail": f"连续 {streak}/{rounds}",
+        }
     rate = info.get("rate")
     if rate is None:
         turn = info.get("checked_turn")
         where = f"第 {turn} 回合" if turn else "本回合"
-        return {"marker": MARKER_ON, "value": "未读到", "value_color": WARN,
-                "detail": f"{where} · 连续 {streak}/{rounds}"}
+        return {
+            "marker": MARKER_ON,
+            "value": "未读到",
+            "value_color": WARN,
+            "detail": f"{where} · 连续 {streak}/{rounds}",
+        }
     threshold = info.get("threshold")
     below = threshold is not None and float(rate) < float(threshold)
     if threshold is None:
@@ -605,10 +709,12 @@ def concede_detect_row(info) -> dict:
         detail = f"低于阈值 {float(threshold):.0f}% · 连续 {streak}/{rounds}"
     else:
         detail = f"阈值 {float(threshold):.0f}% · 连续 {streak}/{rounds}"
-    return {"marker": MARKER_ON,
-            "value": f"{float(rate):.0f}%",
-            "value_color": WARN if below else TEXT,
-            "detail": detail}
+    return {
+        "marker": MARKER_ON,
+        "value": f"{float(rate):.0f}%",
+        "value_color": WARN if below else TEXT,
+        "detail": detail,
+    }
 
 
 def hearthstone_row(info) -> dict:
@@ -618,40 +724,62 @@ def hearthstone_row(info) -> dict:
         status: ok | warning | stale | gone | idle | disabled | unknown
     """
     if info is None:
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     status = info.get("status")
     age = info.get("log_age")
     if status == "disabled":
-        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM,
-                "detail": ""}
+        return {"marker": MARKER_OFF, "value": "关", "value_color": DIM, "detail": ""}
     if status == "gone":
-        return {"marker": MARKER_OFF, "value": "已退出", "value_color": DANGER,
-                "detail": "已自动停止"}
+        return {
+            "marker": MARKER_OFF,
+            "value": "已退出",
+            "value_color": DANGER,
+            "detail": "已自动停止",
+        }
     if status == "stale":
-        return {"marker": MARKER_OFF, "value": "无响应", "value_color": DANGER,
-                "detail": f"日志停滞 {age:.0f}s" if age is not None else ""}
+        return {
+            "marker": MARKER_OFF,
+            "value": "无响应",
+            "value_color": DANGER,
+            "detail": f"日志停滞 {age:.0f}s" if age is not None else "",
+        }
     if status == "warning":
-        return {"marker": MARKER_ON, "value": "疑似卡死", "value_color": WARN,
-                "detail": f"日志停滞 {age:.0f}s" if age is not None else ""}
+        return {
+            "marker": MARKER_ON,
+            "value": "疑似卡死",
+            "value_color": WARN,
+            "detail": f"日志停滞 {age:.0f}s" if age is not None else "",
+        }
     if status == "idle":
-        return {"marker": MARKER_UNKNOWN, "value": "未运行", "value_color": WARN,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "未运行",
+            "value_color": WARN,
+            "detail": "",
+        }
     if status == "ok":
         # 只有对局中才关心 Power.log 的新鲜度（主菜单/匹配阶段本来就安静）。
         detail = ""
         if info.get("in_game") and age is not None:
             detail = f"日志 {age:.0f}s 前"
-        return {"marker": MARKER_ON, "value": "运行中", "value_color": GREEN,
-                "detail": detail}
-    return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-            "detail": ""}
+        return {
+            "marker": MARKER_ON,
+            "value": "运行中",
+            "value_color": GREEN,
+            "detail": detail,
+        }
+    return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM, "detail": ""}
 
 
 def _clip(text, limit: int = _DETAIL_LIMIT) -> str:
     """截断过长的说明文字（列宽固定，超出会被窗口边缘裁掉）。"""
     text = str(text or "").strip()
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def account_row(info, show_account: bool = True) -> dict:
@@ -664,19 +792,33 @@ def account_row(info, show_account: bool = True) -> dict:
     ``show_account=False``（点了眼睛按钮）时不显示昵称，只保留匹配与否。
     """
     if info is None or info.get("matched") is None:
-        return {"marker": MARKER_UNKNOWN, "value": "—", "value_color": DIM,
-                "detail": ""}
+        return {
+            "marker": MARKER_UNKNOWN,
+            "value": "—",
+            "value_color": DIM,
+            "detail": "",
+        }
     if not show_account:
-        return {"marker": MARKER_ON if info.get("matched") else MARKER_OFF,
-                "value": "匹配" if info.get("matched") else "不匹配",
-                "value_color": GREEN if info.get("matched") else DANGER,
-                "detail": _ACCOUNT_HIDDEN_TEXT}
+        return {
+            "marker": MARKER_ON if info.get("matched") else MARKER_OFF,
+            "value": "匹配" if info.get("matched") else "不匹配",
+            "value_color": GREEN if info.get("matched") else DANGER,
+            "detail": _ACCOUNT_HIDDEN_TEXT,
+        }
     names = sorted(info.get("players", {}).values())
     if info.get("matched"):
-        return {"marker": MARKER_ON, "value": "匹配", "value_color": GREEN,
-                "detail": _clip(names[0] if names else info.get("config"))}
-    return {"marker": MARKER_OFF, "value": "不匹配", "value_color": DANGER,
-            "detail": _clip(names[0] if names else info.get("config"))}
+        return {
+            "marker": MARKER_ON,
+            "value": "匹配",
+            "value_color": GREEN,
+            "detail": _clip(names[0] if names else info.get("config")),
+        }
+    return {
+        "marker": MARKER_OFF,
+        "value": "不匹配",
+        "value_color": DANGER,
+        "detail": _clip(names[0] if names else info.get("config")),
+    }
 
 
 def _join_previous_thread(timeout: float = _SHUTDOWN_TIMEOUT) -> None:
@@ -691,11 +833,11 @@ def _join_previous_thread(timeout: float = _SHUTDOWN_TIMEOUT) -> None:
     global _THREAD
     thread = _THREAD
     if thread is None or thread is threading.current_thread():
-        return                      # 没有上一轮；或从浮窗线程自己调用（不能自 join）
+        return  # 没有上一轮；或从浮窗线程自己调用（不能自 join）
     try:
         alive = bool(thread.is_alive())
     except Exception:
-        alive = False               # 不是真线程（测试替身）：直接放掉即可
+        alive = False  # 不是真线程（测试替身）：直接放掉即可
     if alive:
         try:
             thread.join(timeout)
@@ -739,8 +881,12 @@ def _defer_open(args: dict) -> bool:
         return False
     _OPEN_PENDING.set()
     try:
-        threading.Thread(target=_deferred_open_worker, args=(dict(args),),
-                         name="hs-overlay-open", daemon=True).start()
+        threading.Thread(
+            target=_deferred_open_worker,
+            args=(dict(args),),
+            name="hs-overlay-open",
+            daemon=True,
+        ).start()
     except Exception as exc:
         _OPEN_PENDING.clear()
         _report(f"浮窗重开排队失败：{type(exc).__name__}: {exc}")
@@ -748,31 +894,52 @@ def _defer_open(args: dict) -> bool:
     return True
 
 
-def _deferred_open_worker(args: dict, timeout: float = OPEN_WAIT_SECONDS,
-                          interval: float = 0.1) -> None:
+def _deferred_open_worker(
+    args: dict, timeout: float = OPEN_WAIT_SECONDS, interval: float = 0.1
+) -> None:
     """等上一轮浮窗线程收尾，再把它重新开出来。"""
     try:
         deadline = time.time() + float(timeout)
         while _STARTED[0] and time.time() < deadline:
             time.sleep(interval)
         if _STARTED[0]:
-            _report(f"上一轮浮窗线程超过 {float(timeout):.0f}s 还没结束，"
-                    "这次没能把浮窗开回来；请稍后再点「🪟 日志浮窗」重试。")
+            _report(
+                f"上一轮浮窗线程超过 {float(timeout):.0f}s 还没结束，"
+                "这次没能把浮窗开回来；请稍后再点「🪟 日志浮窗」重试。"
+            )
             return
         start(**args)
     finally:
         _OPEN_PENDING.clear()
 
 
-def start(on_start=None, on_halt=None, is_running=None,
-          on_stop_after=None, is_stop_after=None,
-          is_in_game=None, is_starting=None, score_callback=None, on_exit=None,
-          human_like_callback=None, concede_callback=None,
-          liveness_callback=None, account_callback=None,
-          account_visible_setting=None, on_toggle_account=None,
-          on_calibrate=None, on_calibrate_close=None, on_restart=None,
-          logs_callback=None, on_open_logs=None, on_clear_logs=None,
-          on_exit_overlay=None) -> str:
+def start(
+    on_start=None,
+    on_halt=None,
+    is_running=None,
+    on_stop_after=None,
+    is_stop_after=None,
+    is_in_game=None,
+    is_starting=None,
+    score_callback=None,
+    on_exit=None,
+    human_like_callback=None,
+    concede_callback=None,
+    liveness_callback=None,
+    account_callback=None,
+    account_visible_setting=None,
+    on_toggle_account=None,
+    on_calibrate=None,
+    on_calibrate_close=None,
+    on_restart=None,
+    logs_callback=None,
+    on_open_logs=None,
+    on_clear_logs=None,
+    on_export_feedback=None,
+    on_exit_overlay=None,
+    window_width_callback=None,
+    on_resize_window=None,
+) -> str:
     """开（或重开）浮窗，返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING。
 
     三种结果都要让调用方**知道**：以前 start() 遇到"已经开着"或"上一轮还没
@@ -783,14 +950,20 @@ def start(on_start=None, on_halt=None, is_running=None,
     global _IS_IN_GAME, _IS_STARTING, _SCORE, _ON_EXIT, _HUMAN_LIKE, _CONCEDE_DETECT
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
-    global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS
+    global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS, _ON_EXPORT_FEEDBACK
+    global _WINDOW_WIDTH, _ON_RESIZE_WINDOW
     # 排队重开时要原样复用这一轮的绑定（start() 会重写全部回调，不能只重开窗口）。
     args = {
-        "on_start": on_start, "on_halt": on_halt, "is_running": is_running,
-        "on_stop_after": on_stop_after, "is_stop_after": is_stop_after,
-        "is_in_game": is_in_game, "is_starting": is_starting,
+        "on_start": on_start,
+        "on_halt": on_halt,
+        "is_running": is_running,
+        "on_stop_after": on_stop_after,
+        "is_stop_after": is_stop_after,
+        "is_in_game": is_in_game,
+        "is_starting": is_starting,
         "score_callback": score_callback,
-        "on_exit": on_exit, "human_like_callback": human_like_callback,
+        "on_exit": on_exit,
+        "human_like_callback": human_like_callback,
         "concede_callback": concede_callback,
         "liveness_callback": liveness_callback,
         "account_callback": account_callback,
@@ -802,11 +975,14 @@ def start(on_start=None, on_halt=None, is_running=None,
         "logs_callback": logs_callback,
         "on_open_logs": on_open_logs,
         "on_clear_logs": on_clear_logs,
+        "on_export_feedback": on_export_feedback,
         "on_exit_overlay": on_exit_overlay,
+        "window_width_callback": window_width_callback,
+        "on_resize_window": on_resize_window,
     }
     with _START_LOCK:
         if _STARTED[0] and not _STOP.is_set() and not _CLOSING.is_set():
-            return OPEN_ALREADY         # 真的开着：不重开
+            return OPEN_ALREADY  # 真的开着：不重开
         if _STARTED[0] and not _STOP.is_set():
             # 「退出浮窗」按下了，但它的 root.after(150, stop) 还没到：
             # 立刻收尾再来，别把这次请求当成"浮窗还开着"吞掉。
@@ -837,7 +1013,10 @@ def start(on_start=None, on_halt=None, is_running=None,
         _LOGS = logs_callback
         _ON_OPEN_LOGS = on_open_logs
         _ON_CLEAR_LOGS = on_clear_logs
+        _ON_EXPORT_FEEDBACK = on_export_feedback
         _ON_EXIT_OVERLAY = on_exit_overlay
+        _WINDOW_WIDTH = window_width_callback
+        _ON_RESIZE_WINDOW = on_resize_window
         if account_visible_setting is not None:
             _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
         _STOP.clear()
@@ -846,8 +1025,9 @@ def start(on_start=None, on_halt=None, is_running=None,
         _GENERATION[0] += 1
         # 线程入口是 _run_overlay_thread（它包住 _run，好在帧释放后回收 Tk 对象）；
         # 单独提出来是为了让测试仍能 patch _run 而不真的开窗。
-        thread = threading.Thread(target=_run_overlay_thread,
-                                  name="hs-log-overlay", daemon=True)
+        thread = threading.Thread(
+            target=_run_overlay_thread, name="hs-log-overlay", daemon=True
+        )
         _THREAD = thread
         thread.start()
     return OPEN_STARTED
@@ -860,6 +1040,7 @@ def stop() -> None:
     # 屏幕上还叠着「校准」区域框时一并收掉，别让框留在桌面上。
     try:
         import region_overlay
+
         region_overlay.hide()
     except Exception:
         pass
@@ -879,9 +1060,7 @@ def is_running() -> bool:
     重开时 start() 会先等上一轮线程收尾（必要时排队），不会出现两个 Tk
     解释器交叠，也不会静默失败。
     """
-    return (bool(_STARTED[0]) and not _STOP.is_set()
-            and not _CLOSING.is_set())
-
+    return bool(_STARTED[0]) and not _STOP.is_set() and not _CLOSING.is_set()
 
 
 def _raise_hearthstone() -> None:
@@ -920,8 +1099,8 @@ def _raise_hearthstone() -> None:
         return
     # 模拟 Alt 键，授予本进程“可切换到前台”的权限（等同用户按了一次键）。
     try:
-        ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)   # VK_MENU 按下
-        ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)   # VK_MENU 抬起
+        ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)  # VK_MENU 按下
+        ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)  # VK_MENU 抬起
     except Exception:
         pass
     try:
@@ -951,8 +1130,7 @@ def _disable_overlay_activation(root) -> None:
         return
     try:
         root.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) \
-            or root.winfo_id()
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
         GWL_EXSTYLE = -20
         WS_EX_TOOLWINDOW = 0x00000080
         WS_EX_NOACTIVATE = 0x08000000
@@ -969,25 +1147,58 @@ CONFIRM_RESTART_TITLE = "⚠  中止炉石并清空日志？"
 CONFIRM_RESTART_DETAIL = (
     "将依次执行：停止自动化 → 强制结束 Hearthstone.exe → "
     "清空日志目录内容（保留 Log.config）→ 重新启动炉石。\n"
-    "对局进行中会直接判负；重启后需再点「开始对战」。")
+    "对局进行中会直接判负；重启后需再点「开始对战」。"
+)
 CONFIRM_RESTART_OK = "确认执行"
-CONFIRM_CLEAR_TITLE = "清空脚本日志？"
+CONFIRM_CLEAR_TITLE = "清空脚本日志？（含出错存档）"
 CONFIRM_CLEAR_OK = "确认清空"
 
 
-def confirm_clear_detail(files, battle_size, runtime_size, total_size) -> str:
-    """「清理日志」确认弹窗的正文（体积/数量都由浮窗实时算出来）。"""
-    return (f"将删除 logs 里的 {int(files)} 个对战日志（{battle_size}）"
-            f"和运行日志 ui_log_last.txt（{runtime_size}），共 {total_size}。\n"
-            "日志是排查问题的依据，删除后无法恢复；对局与设置不受影响。")
+def confirm_clear_detail(
+    files,
+    battle_size,
+    runtime_size,
+    total_size,
+    feedback_count=0,
+    feedback_size=None,
+) -> str:
+    """「清理日志」确认弹窗的正文（体积/数量都由浮窗实时算出来）。
+
+    显式列出**出错存档（截图/错误日志）**会被删掉，并给出“删除后无法恢复、
+    建议先导出”的告警——不然用户一键清理就把没导出的错误证据清了。
+    """
+    lines = [
+        "将删除 logs 里的：",
+        f"· {int(files)} 个对战日志（{battle_size}）",
+        f"· 运行日志 ui_log_last.txt（{runtime_size}）",
+    ]
+    count = int(feedback_count or 0)
+    if count:
+        lines.append(f"· 出错存档（截图/错误日志）{count} 份（{feedback_size or '—'}）")
+    lines.append(f"共 {total_size}。")
+    if count:
+        lines.append(
+            "⚠️ 出错存档删除后无法恢复：本次及历史未导出的出错截图/错误日志都会"
+            "一起没掉，建议先点「导出本次出错截屏与日志」再清理。"
+        )
+    else:
+        lines.append("日志是排查问题的依据，删除后无法恢复；对局与设置不受影响。")
+    return "\n".join(lines)
 
 
-def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
-                    confirm_bg=DANGER) -> bool:
+def _confirm_dialog(
+    root,
+    title: str,
+    detail: str,
+    confirm_text: str,
+    confirm_bg=DANGER,
+    height=None,
+) -> bool:
     """浮窗样式的确认小窗：确认返回 True，取消/Esc/关闭返回 False。
 
     故意不用 tkinter.messagebox：炉石全屏独占时系统对话框可能被压在游戏后面，
     这里用与浮窗完全相同的 -topmost + overrideredirect 机制，一定看得见。
+    ``height`` 可调高（清理日志正文较长，需要更多空间）。
     """
     try:
         import tkinter as tk
@@ -999,7 +1210,7 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
     except Exception:
         return False
     try:
-        width, height = px(344), px(208)
+        width, height = px(344), px(height or 208)
         dialog.overrideredirect(True)
         dialog.attributes("-topmost", True)
         dialog.configure(bg=BG)
@@ -1011,12 +1222,23 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
         dialog.geometry(f"{width}x{height}+{x}+{y}")
 
         tk.Frame(dialog, bg=confirm_bg, height=px(3)).pack(fill="x")
-        tk.Label(dialog, text=title, bg=BG, fg=confirm_bg,
-                 font=("Microsoft YaHei", 11, "bold"),
-                 anchor="w").pack(fill="x", padx=px(12), pady=(px(10), px(4)))
-        tk.Label(dialog, text=detail, bg=BG, fg=TEXT, justify="left",
-                 font=("Microsoft YaHei", 9),
-                 wraplength=width - px(28)).pack(fill="x", padx=px(12))
+        tk.Label(
+            dialog,
+            text=title,
+            bg=BG,
+            fg=confirm_bg,
+            font=("Microsoft YaHei", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=px(12), pady=(px(10), px(4)))
+        tk.Label(
+            dialog,
+            text=detail,
+            bg=BG,
+            fg=TEXT,
+            justify="left",
+            font=("Microsoft YaHei", 9),
+            wraplength=width - px(28),
+        ).pack(fill="x", padx=px(12))
 
         def _close(confirm: bool):
             outcome["ok"] = bool(confirm)
@@ -1033,18 +1255,30 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
         row.pack(fill="x", padx=px(12), pady=(px(12), px(12)), side="bottom")
         row.columnconfigure(0, weight=1)
         row.columnconfigure(1, weight=1)
-        tk.Button(row, text=confirm_text, bg=confirm_bg, fg="#ffffff",
-                  activebackground=confirm_bg, activeforeground="#ffffff", bd=0,
-                  font=("Microsoft YaHei", 10, "bold"), cursor="hand2",
-                  command=lambda: _close(True)
-                  ).grid(row=0, column=0, sticky="ew", padx=(0, px(4)),
-                         ipady=px(6))
-        tk.Button(row, text="取消", bg=NEUTRAL, fg=TEXT,
-                  activebackground=NEUTRAL, activeforeground=TEXT, bd=0,
-                  font=("Microsoft YaHei", 10), cursor="hand2",
-                  command=lambda: _close(False)
-                  ).grid(row=0, column=1, sticky="ew", padx=(px(4), 0),
-                         ipady=px(6))
+        tk.Button(
+            row,
+            text=confirm_text,
+            bg=confirm_bg,
+            fg="#ffffff",
+            activebackground=confirm_bg,
+            activeforeground="#ffffff",
+            bd=0,
+            font=("Microsoft YaHei", 10, "bold"),
+            cursor="hand2",
+            command=lambda: _close(True),
+        ).grid(row=0, column=0, sticky="ew", padx=(0, px(4)), ipady=px(6))
+        tk.Button(
+            row,
+            text="取消",
+            bg=NEUTRAL,
+            fg=TEXT,
+            activebackground=NEUTRAL,
+            activeforeground=TEXT,
+            bd=0,
+            font=("Microsoft YaHei", 10),
+            cursor="hand2",
+            command=lambda: _close(False),
+        ).grid(row=0, column=1, sticky="ew", padx=(px(4), 0), ipady=px(6))
         dialog.bind("<Escape>", lambda _event: _close(False))
         dialog.bind("<Return>", lambda _event: _close(True))
 
@@ -1062,21 +1296,33 @@ def _confirm_dialog(root, title: str, detail: str, confirm_text: str,
 
 def _confirm_restart(root) -> bool:
     """「重启炉石」的确认小窗：确认返回 True。"""
-    return _confirm_dialog(root, CONFIRM_RESTART_TITLE, CONFIRM_RESTART_DETAIL,
-                           CONFIRM_RESTART_OK)
+    return _confirm_dialog(
+        root, CONFIRM_RESTART_TITLE, CONFIRM_RESTART_DETAIL, CONFIRM_RESTART_OK
+    )
 
 
 def _confirm_clear_logs(root, info) -> bool:
-    """「清理日志」的确认小窗：把要删的体积/数量摆出来，确认返回 True。"""
+    """「清理日志」的确认小窗：把要删的体积/数量（含出错存档）与危害摆出来。"""
     info = info or {}
     files = int(info.get("battle_files") or 0)
+    feedback_count = int(info.get("feedback_files") or 0)
     detail = confirm_clear_detail(
         files,
         script_logs.format_size(info.get("battle_bytes")),
         script_logs.format_size(info.get("runtime_bytes")),
-        script_logs.format_size(info.get("bytes")))
-    return _confirm_dialog(root, CONFIRM_CLEAR_TITLE, detail,
-                           CONFIRM_CLEAR_OK, confirm_bg=WARN)
+        script_logs.format_size(info.get("bytes")),
+        feedback_count=feedback_count,
+        feedback_size=script_logs.format_size(info.get("feedback_bytes")),
+    )
+    # 含出错存档时用红色 + 更高的弹窗（正文行数多），强调危害。
+    return _confirm_dialog(
+        root,
+        CONFIRM_CLEAR_TITLE,
+        detail,
+        CONFIRM_CLEAR_OK,
+        confirm_bg=DANGER if feedback_count else WARN,
+        height=248 if feedback_count else 208,
+    )
 
 
 def _run() -> None:
@@ -1121,18 +1367,34 @@ def _run() -> None:
         content.pack(fill="both", expand=True)
         mini_bar = tk.Frame(root, bg=TITLE_BG, height=px(MINIMIZED_HEIGHT))
         mini_bar.pack_propagate(False)
-        tk.Label(mini_bar, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
-                 font=("Georgia", 12, "bold")).pack(side="left",
-                                                    padx=(px(10), 0))
+        tk.Label(
+            mini_bar,
+            text=BRAND_NAME,
+            bg=TITLE_BG,
+            fg=GOLD,
+            font=("Georgia", 12, "bold"),
+        ).pack(side="left", padx=(px(10), 0))
         # 「展开」做成一个小小的面板按钮：只有文字、悬停提亮，不再靠特殊字形。
-        restore_btn = tk.Label(mini_bar, text=RESTORE_TEXT, bg=PANEL, fg=DIM,
-                               font=("Microsoft YaHei", 8), cursor="hand2",
-                               padx=px(8), pady=px(2))
+        restore_btn = tk.Label(
+            mini_bar,
+            text=RESTORE_TEXT,
+            bg=PANEL,
+            fg=DIM,
+            font=("Microsoft YaHei", 8),
+            cursor="hand2",
+            padx=px(8),
+            pady=px(2),
+        )
         restore_btn.pack(side="right", padx=(0, px(8)), pady=px(6))
-        restore_btn.bind("<Enter>", lambda _e: restore_btn.config(
-            fg=TEXT, bg=_hover(PANEL)))
-        restore_btn.bind("<Leave>", lambda _e: restore_btn.config(
-            fg=DIM, bg=PANEL))
+        restore_btn.bind(
+            "<Enter>", lambda _e: restore_btn.config(fg=TEXT, bg=_hover(PANEL))
+        )
+        restore_btn.bind("<Leave>", lambda _e: restore_btn.config(fg=DIM, bg=PANEL))
+        # 折叠成标题条时也留版本号：pack 顺序决定位置，必须在「展开」之后 pack，
+        # 才会排在它左边。
+        tk.Label(
+            mini_bar, text=VERSION_TEXT, bg=TITLE_BG, fg=DIM, font=VERSION_FONT
+        ).pack(side="right", padx=(0, px(8)))
 
         def _set_collapsed(flag):
             """折叠/展开浮窗（同时把窗口几何改成标题条那么高）。"""
@@ -1145,10 +1407,16 @@ def _run() -> None:
                 content.pack(fill="both", expand=True)
             # 用**当前位置**（不是启动位置）：用户拖动过浮窗以后，最小化/展开
             # 不该把它弹回右上角。
-            root.geometry(minimized_geometry(W, H, root.winfo_x(),
-                                             root.winfo_y(),
-                                             collapsed=collapsed[0],
-                                             min_height=px(MINIMIZED_HEIGHT)))
+            root.geometry(
+                minimized_geometry(
+                    W,
+                    H,
+                    root.winfo_x(),
+                    root.winfo_y(),
+                    collapsed=collapsed[0],
+                    min_height=px(MINIMIZED_HEIGHT),
+                )
+            )
 
         def _on_minimize(_event=None):
             _set_collapsed(not collapsed[0])
@@ -1186,50 +1454,80 @@ def _run() -> None:
 
         def _make_btn(parent, text_, bg, command):
             btn = tk.Button(
-                parent, text=text_, bg=bg, fg="white",
+                parent,
+                text=text_,
+                bg=bg,
+                fg="white",
                 font=("Microsoft YaHei", BTN_FONT_SIZE, "bold"),
-                relief="flat", bd=0, pady=px(BTN_PADY), cursor="hand2",
-                activebackground=bg, activeforeground="white",
-                command=command)
-            btn.bind(
-                "<Enter>", lambda _e, b=bg: btn.config(bg=_hover(b)))
+                relief="flat",
+                bd=0,
+                pady=px(BTN_PADY),
+                cursor="hand2",
+                activebackground=bg,
+                activeforeground="white",
+                command=command,
+            )
+            btn.bind("<Enter>", lambda _e, b=bg: btn.config(bg=_hover(b)))
             btn.bind("<Leave>", lambda _e, b=bg: btn.config(bg=b))
             return btn
 
-        # ---- 品牌行：本项目大名（放在“自动化日志”标题之前） ------------
+        # ---- 品牌行：本项目大名 + 右侧版本号（放在“自动化日志”标题之前） ----
         # 副标题「炉石传说 · 自动对战」按用户要求删除（那一行高度留给日志区）。
         brand = tk.Frame(content, bg=TITLE_BG)
         brand.pack(fill="x")
-        tk.Label(brand, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD,
-                 font=("Georgia", 13, "bold")).pack(pady=(px(9), px(7)))
+        # 品牌名**左对齐**、版本号右对齐，挤在同一行里。
+        # 不能再用「品牌名居中 + 版本号 place 到右下角」：263px 的宽度里居中的
+        # 名字尾部正好压在版本号上（实测版本串把名字压成 "HSLegendAr"）。
+        # 也不能加高一行放版本，浮窗高度是按行数精算的（见 WINDOW_HEIGHT）。
+        tk.Label(
+            brand, text=BRAND_NAME, bg=TITLE_BG, fg=GOLD, font=("Georgia", 13, "bold")
+        ).pack(side="left", padx=(px(10), 0), pady=(px(9), px(7)))
+        tk.Label(brand, text=VERSION_TEXT, bg=TITLE_BG, fg=DIM, font=VERSION_FONT).pack(
+            side="right", padx=(0, px(10))
+        )
         tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=px(10))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- header ----------------------------------------------------
         head = tk.Frame(content, bg=TITLE_BG)
         head.pack(fill="x")
-        dot = tk.Label(head, text="●", bg=TITLE_BG, fg=GREEN,
-                       font=("Segoe UI", 10))
+        dot = tk.Label(head, text="●", bg=TITLE_BG, fg=GREEN, font=("Segoe UI", 10))
         dot.pack(side="left", padx=(px(10), px(4)), pady=px(8))
-        title = tk.Label(head, text="自动化日志", bg=TITLE_BG, fg=TEXT,
-                         font=("Microsoft YaHei", 10, "bold"))
+        title = tk.Label(
+            head,
+            text="自动化日志",
+            bg=TITLE_BG,
+            fg=TEXT,
+            font=("Microsoft YaHei", 10, "bold"),
+        )
         title.pack(side="left", pady=px(8))
         # 标题行右侧的「最小化」：折叠成标题条，再点标题条上的「展开」还原。
         # 做成一枚小小的面板按钮（悬停提亮），只用文字，不再拿块状字形当图标。
-        mini_btn = tk.Label(head, text=MINIMIZE_TEXT, bg=PANEL, fg=DIM,
-                            font=("Microsoft YaHei", 8), cursor="hand2",
-                            padx=px(8), pady=px(2))
+        mini_btn = tk.Label(
+            head,
+            text=MINIMIZE_TEXT,
+            bg=PANEL,
+            fg=DIM,
+            font=("Microsoft YaHei", 8),
+            cursor="hand2",
+            padx=px(8),
+            pady=px(2),
+        )
         mini_btn.pack(side="right", padx=(0, px(10)), pady=px(6))
         mini_btn.bind("<Button-1>", _on_minimize)
-        mini_btn.bind("<Enter>", lambda _e: mini_btn.config(
-            fg=TEXT, bg=_hover(PANEL)))
-        mini_btn.bind("<Leave>", lambda _e: mini_btn.config(
-            fg=DIM, bg=PANEL))
+        mini_btn.bind("<Enter>", lambda _e: mini_btn.config(fg=TEXT, bg=_hover(PANEL)))
+        mini_btn.bind("<Leave>", lambda _e: mini_btn.config(fg=DIM, bg=PANEL))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- 战绩行 -------------------------------------------------
-        score_label = tk.Label(content, text="战绩： —", bg=TITLE_BG, fg=DIM,
-                               font=("Microsoft YaHei", 9), anchor="w")
+        score_label = tk.Label(
+            content,
+            text="战绩： —",
+            bg=TITLE_BG,
+            fg=DIM,
+            font=("Microsoft YaHei", 9),
+            anchor="w",
+        )
         score_label.pack(fill="x", padx=px(8), pady=(px(6), 0))
         # ---- 状态面板：活人感 / 投降检测 / 炉石 / 账号 ----------------
         # 每行一个独立 Frame（**不用**共享 grid 列）：grid 会把每一列按"所有行里
@@ -1258,59 +1556,83 @@ def _run() -> None:
                 # 「账号」行最右侧的眼睛按钮：点一下在“显示昵称 / 隐藏昵称”之间
                 # 互换（隐藏状态会记住），适合截图/录屏/开直播。
                 # 固定尺寸的小容器能让整行布局绝对稳定（Tk 重排偶尔留重影）。
-                eye_box = tk.Frame(row, bg=PANEL, width=px(_EYE_W),
-                                   height=px(18))
+                eye_box = tk.Frame(row, bg=PANEL, width=px(_EYE_W), height=px(18))
                 eye_box.pack(side="right", padx=_eye_pad(), pady=1)
                 eye_box.pack_propagate(False)
                 eye_px = px(_EYE_W) + sum(_eye_pad())
-            marker = tk.Label(row, text="●", bg=PANEL, fg=DIM,
-                              font=("Segoe UI", 7))
+            marker = tk.Label(row, text="●", bg=PANEL, fg=DIM, font=("Segoe UI", 7))
             marker.pack(side="left", padx=_marker_pad(), pady=1)
-            name = tk.Label(row, text=name_text, bg=PANEL, fg=DIM,
-                            font=("Microsoft YaHei", 8))
+            name = tk.Label(
+                row, text=name_text, bg=PANEL, fg=DIM, font=("Microsoft YaHei", 8)
+            )
             name.pack(side="left", pady=1)
-            value = tk.Label(row, text="—", bg=PANEL, fg=TEXT,
-                             font=("Microsoft YaHei", 8, "bold"))
+            value = tk.Label(
+                row, text="—", bg=PANEL, fg=TEXT, font=("Microsoft YaHei", 8, "bold")
+            )
             value.pack(side="left", padx=(px(_CELL_GAP), 0), pady=1)
-            detail = tk.Label(row, text="", bg=PANEL, fg=DIM,
-                              font=("Microsoft YaHei", 8), justify="left",
-                              anchor="w", wraplength=px(_DETAIL_MIN_PX))
-            detail.pack(side="left", fill="x", expand=True,
-                        padx=(px(_CELL_GAP), px(_DETAIL_PAD)), pady=1)
+            detail = tk.Label(
+                row,
+                text="",
+                bg=PANEL,
+                fg=DIM,
+                font=("Microsoft YaHei", 8),
+                justify="left",
+                anchor="w",
+                wraplength=px(_DETAIL_MIN_PX),
+            )
+            detail.pack(
+                side="left",
+                fill="x",
+                expand=True,
+                padx=(px(_CELL_GAP), px(_DETAIL_PAD)),
+                pady=1,
+            )
             # 这一行"圆点 + 名称 + 数值 + 间距"实际占掉的宽度（用来算说明列）。
-            used_px = (marker.winfo_reqwidth() + sum(_marker_pad())
-                       + name.winfo_reqwidth()
-                       + 2 * px(_CELL_GAP) + px(_DETAIL_PAD) + eye_px)
+            used_px = (
+                marker.winfo_reqwidth()
+                + sum(_marker_pad())
+                + name.winfo_reqwidth()
+                + 2 * px(_CELL_GAP)
+                + px(_DETAIL_PAD)
+                + eye_px
+            )
             return marker, value, detail, eye_box, used_px
 
         def _set_detail(detail, used_px, value_text, info, fg=DIM):
             """说明文字：按这一行剩余宽度换行（放不下换行，绝不被窗口边缘切掉）。"""
             wrap_px = detail_wrap_px(
-                px(WINDOW_WIDTH),
-                used_px + value_font.measure(str(value_text)))
-            _set(detail, text=fit_text(info, wrap_px * _DETAIL_MAX_LINES,
-                                       detail_font.measure),
-                 wraplength=wrap_px, fg=fg)
+                px(WINDOW_WIDTH), used_px + value_font.measure(str(value_text))
+            )
+            _set(
+                detail,
+                text=fit_text(info, wrap_px * _DETAIL_MAX_LINES, detail_font.measure),
+                wraplength=wrap_px,
+                fg=fg,
+            )
 
         hl_marker, hl_value, hl_detail, _, hl_used = _status_row("活人感")
         cd_marker, cd_value, cd_detail, _, cd_used = _status_row("投降检测")
         lv_marker, lv_value, lv_detail, _, lv_used = _status_row("炉石")
         ac_marker, ac_value, ac_detail, eye_box, ac_used = _status_row(
-            "账号", with_eye=True)
+            "账号", with_eye=True
+        )
         lg_marker, lg_value, lg_detail, _, lg_used = _status_row("日志")
 
         # 图标只有一个 👁，状态靠颜色区分：绿色 = 显示中，白色 = 已隐藏。
         initial_visible = account_visible()
         eye_btn = tk.Label(
-            eye_box, text=EYE_ICON, bg=PANEL,
+            eye_box,
+            text=EYE_ICON,
+            bg=PANEL,
             fg=EYE_COLOR_ON if initial_visible else EYE_COLOR_OFF,
-            font=("Segoe UI Emoji", 10), cursor="hand2")
+            font=("Segoe UI Emoji", 10),
+            cursor="hand2",
+        )
         eye_btn.place(relx=0.5, rely=0.5, anchor="center")
 
         def _refresh_eye():
             visible = account_visible()
-            _set(eye_btn, text=EYE_ICON,
-                 fg=EYE_COLOR_ON if visible else EYE_COLOR_OFF)
+            _set(eye_btn, text=EYE_ICON, fg=EYE_COLOR_ON if visible else EYE_COLOR_OFF)
 
         def _on_eye(_event=None):
             toggle_account_visibility()
@@ -1319,6 +1641,186 @@ def _run() -> None:
 
         eye_btn.bind("<Button-1>", _on_eye)
         tk.Frame(content, bg=TITLE_BG, height=1).pack(fill="x")
+
+        # ---- 炉石窗口宽度滑条（保持 16:9）-----------------------------
+        # 拖动过程中只更新数值文字，**松开鼠标**才真正调 Win32 改窗口
+        # （否则每帧都 SetWindowPos 会卡）。范围/步进取 hs_window 的真值。
+        try:
+            import hs_window as _hsw
+
+            _sw_min = int(_hsw.MIN_16_9_WIDTH)
+            _sw_max = int(_hsw.MAX_16_9_WIDTH)
+            _sw_step = int(_hsw.STEP_16_9)
+        except Exception:
+            _sw_min, _sw_max, _sw_step = (
+                SIZE_SLIDER_MIN,
+                SIZE_SLIDER_MAX,
+                SIZE_SLIDER_STEP,
+            )
+
+        size_head = tk.Frame(content, bg=PANEL)
+        size_head.pack(fill="x", padx=px(10), pady=(px(5), 0))
+        tk.Label(
+            size_head,
+            text=SIZE_ROW_TITLE,
+            bg=PANEL,
+            fg=DIM,
+            font=("Microsoft YaHei", 8),
+        ).pack(side="left")
+        size_value = tk.Label(
+            size_head,
+            text="—",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Microsoft YaHei", 8, "bold"),
+        )
+        size_value.pack(side="right")
+
+        size_row = tk.Frame(content, bg=PANEL)
+        size_row.pack(fill="x", padx=px(10), pady=(0, px(4)))
+
+        def _fmt_size(width):
+            try:
+                w = int(round(float(width)))
+                return f"{w}×{int(round(w * 9 / 16.0))}"
+            except Exception:
+                return "—"
+
+        # 自绘 Canvas 滑条：tk.Scale 的滑钮是方块（丑），而且它的按下事件会继续
+        # 冒泡到 root 上绑的「拖窗」handler（按滑钮 → 整个浮窗跟着动）。自绘既能
+        # 做成圆角轨道 + 圆形滑钮，也能在 widget 级绑定里 return "break" 把事件
+        # 吃掉，彻底杜绝误拖窗口。
+        track_width = max(20, px(WINDOW_WIDTH - 40))
+        slider_canvas = tk.Canvas(
+            size_row,
+            height=px(SLIDER_HEIGHT),
+            width=track_width,
+            bg=PANEL,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        slider_canvas.pack(fill="x")
+        slider = {"value": _sw_min, "dragging": False, "enabled": True}
+
+        def _ratio(value):
+            span = float(_sw_max - _sw_min) or 1.0
+            return (float(value) - _sw_min) / span
+
+        def _value_at(x):
+            width = slider_canvas.winfo_width() or track_width
+            pad = px(SLIDER_THUMB_RADIUS) + px(2)
+            usable = max(1.0, width - 2 * pad)
+            raw = _sw_min + (x - pad) / usable * (_sw_max - _sw_min)
+            steps = int(round((raw - _sw_min) / float(_sw_step)))
+            return max(_sw_min, min(_sw_max, _sw_min + steps * _sw_step))
+
+        def _draw_slider():
+            canvas = slider_canvas
+            canvas.delete("all")
+            width = canvas.winfo_width() or track_width
+            height = px(SLIDER_HEIGHT)
+            cy = height // 2
+            radius = px(SLIDER_THUMB_RADIUS)
+            pad = radius + px(2)
+            x0, x1 = pad, max(pad + 1, width - pad)
+            thumb_x = x0 + _ratio(slider["value"]) * (x1 - x0)
+            track = px(SLIDER_TRACK_HEIGHT)
+            fill = SLIDER_FILL_COLOR if slider["enabled"] else DISABLED
+            thumb = SLIDER_THUMB_COLOR if slider["enabled"] else "#7c8391"
+            canvas.create_line(
+                x0,
+                cy,
+                x1,
+                cy,
+                width=track,
+                capstyle="round",
+                fill=SLIDER_TRACK_COLOR,
+            )
+            if thumb_x > x0:
+                canvas.create_line(
+                    x0, cy, thumb_x, cy, width=track, capstyle="round", fill=fill
+                )
+            canvas.create_oval(
+                thumb_x - radius,
+                cy - radius,
+                thumb_x + radius,
+                cy + radius,
+                fill=thumb,
+                outline=fill,
+                width=px(2),
+            )
+
+        def _on_slide(value):
+            size_value.config(text=_fmt_size(value))
+
+        def _set_value(width):
+            try:
+                value = int(round(float(width)))
+            except Exception:
+                return
+            slider["value"] = max(_sw_min, min(_sw_max, value))
+            _draw_slider()
+            _on_slide(slider["value"])
+
+        def _apply_width(_event=None):
+            slider["dragging"] = False
+            if _ON_RESIZE_WINDOW is None or not slider["enabled"]:
+                return
+            try:
+                result = _ON_RESIZE_WINDOW(int(slider["value"]))
+            except Exception:
+                result = None
+            if result:
+                slider["value"] = max(_sw_min, min(_sw_max, int(result[0])))
+                _draw_slider()
+                size_value.config(text=f"{int(result[0])}×{int(result[1])}")
+
+        def _on_slider_press(event):
+            if not slider["enabled"]:
+                return "break"
+            slider["dragging"] = True
+            _set_value(_value_at(event.x))
+            return "break"  # 别冒泡到 root 的拖窗 handler
+
+        def _on_slider_move(event):
+            if slider["enabled"] and slider["dragging"]:
+                _set_value(_value_at(event.x))
+            return "break"
+
+        def _on_slider_release(_event=None):
+            _apply_width()
+            return "break"
+
+        slider_canvas.bind("<Configure>", lambda _e: _draw_slider())
+        slider_canvas.bind("<Button-1>", _on_slider_press)
+        slider_canvas.bind("<B1-Motion>", _on_slider_move)
+        slider_canvas.bind("<ButtonRelease-1>", _on_slider_release)
+
+        try:
+            initial_width = _WINDOW_WIDTH() if _WINDOW_WIDTH is not None else None
+        except Exception:
+            initial_width = None
+        if initial_width:
+            _set_value(initial_width)
+        else:
+            # 炉石没开 / 读不到：滑条置灰并说明，别让用户拖了个没反应。
+            slider["enabled"] = False
+            size_value.config(text="炉石未运行")
+            _draw_slider()
+
+        def _sync_size_slider():
+            """刷新循环里同步滑条：炉石窗口被外部改动（如 tools 脚本）时跟上。"""
+            if slider["dragging"] or _WINDOW_WIDTH is None:
+                return
+            try:
+                current = _WINDOW_WIDTH()
+            except Exception:
+                current = None
+            if not current:
+                return
+            if abs(int(slider["value"]) - int(current)) >= _sw_step:
+                _set_value(current)
 
         # ---- buttons ---------------------------------------------------
         # 一行两个，「本局结束后停止」单独一行；字号/内边距都比原来小，
@@ -1333,8 +1835,14 @@ def _run() -> None:
             span = BTN_SPAN.get(key, 1)
             left = 0 if column == 0 else px(3)
             right = 0 if column + span >= 2 else px(3)
-            btn.grid(row=row, column=column, columnspan=span, sticky="ew",
-                     padx=(left, right), pady=px(2))
+            btn.grid(
+                row=row,
+                column=column,
+                columnspan=span,
+                sticky="ew",
+                padx=(left, right),
+                pady=px(2),
+            )
 
         def _call_start():
             try:
@@ -1346,9 +1854,15 @@ def _run() -> None:
                 # 立即反馈，不等下一次 350ms 刷新：首次启动要导入组件/初始化，
                 # 这段空窗里按钮若不变化，看起来就像"点了没反应"。
                 if _IS_STARTING is not None and _IS_STARTING():
-                    _set(start_btn, state="disabled", text="启动中…",
-                         bg=DISABLED, activebackground=DISABLED,
-                         disabledforeground=DIM, cursor="arrow")
+                    _set(
+                        start_btn,
+                        state="disabled",
+                        text="启动中…",
+                        bg=DISABLED,
+                        activebackground=DISABLED,
+                        disabledforeground=DIM,
+                        cursor="arrow",
+                    )
             finally:
                 _raise_hearthstone()
 
@@ -1368,12 +1882,19 @@ def _run() -> None:
         def _set_stop_after_state():
             active = bool(_IS_STOP_AFTER() if _IS_STOP_AFTER is not None else False)
             if active:
-                _set(stop_after_btn,
-                     text="本局结束后停止（点击取消）",
-                     bg=OK, activebackground=OK)
+                _set(
+                    stop_after_btn,
+                    text="本局结束后停止（点击取消）",
+                    bg=OK,
+                    activebackground=OK,
+                )
             else:
-                _set(stop_after_btn,
-                     text="本局结束后停止", bg=WARN, activebackground=WARN)
+                _set(
+                    stop_after_btn,
+                    text="本局结束后停止",
+                    bg=WARN,
+                    activebackground=WARN,
+                )
 
         def _call_stop_after():
             try:
@@ -1383,8 +1904,7 @@ def _run() -> None:
                 _raise_hearthstone()
                 _set_stop_after_state()
 
-        stop_after_btn = _make_btn(btn_frame, "本局结束后停止", WARN,
-                                   _call_stop_after)
+        stop_after_btn = _make_btn(btn_frame, "本局结束后停止", WARN, _call_stop_after)
         _place(stop_after_btn, "stop_after")
 
         def _call_save():
@@ -1392,13 +1912,11 @@ def _run() -> None:
                 path = _save_log()
                 push(f"[SYS] 对战日志已保存：{path}")
                 save_btn.config(text="已保存", bg=OK)
-                root.after(2000, lambda: save_btn.config(
-                    text="保存日志", bg=OK))
+                root.after(2000, lambda: save_btn.config(text="保存日志", bg=OK))
             except Exception as exc:
                 push(f"[SYS] 保存对战日志失败：{exc}")
                 save_btn.config(text="保存失败", bg=DANGER)
-                root.after(2000, lambda: save_btn.config(
-                    text="保存日志", bg=OK))
+                root.after(2000, lambda: save_btn.config(text="保存日志", bg=OK))
             finally:
                 _raise_hearthstone()
 
@@ -1419,8 +1937,10 @@ def _run() -> None:
                 # 顺手把炉石切回前台，方便对着游戏画面调盒子。
                 _raise_hearthstone()
             if visible:
-                push("[SYS] 校准窗口已打开：1 推荐面板 / 2 换牌确认 / 3 AI胜率"
-                     "（Tab 切换，拖框对齐后按 S 保存，Esc 或再点「校准」关闭）")
+                push(
+                    "[SYS] 校准窗口已打开：1 推荐面板 / 2 换牌确认 / 3 AI胜率"
+                    "（Tab 切换，拖框对齐后按 S 保存，Esc 或再点「校准」关闭）"
+                )
             else:
                 push("[SYS] 已关闭校准窗口。")
 
@@ -1435,8 +1955,7 @@ def _run() -> None:
             finally:
                 _raise_hearthstone()
 
-        open_logs_btn = _make_btn(btn_frame, "打开日志", NEUTRAL,
-                                  _call_open_logs)
+        open_logs_btn = _make_btn(btn_frame, "打开日志", NEUTRAL, _call_open_logs)
         _place(open_logs_btn, "open_logs")
 
         def _call_clear_logs():
@@ -1468,9 +1987,26 @@ def _run() -> None:
             finally:
                 _raise_hearthstone()
 
-        clear_logs_btn = _make_btn(btn_frame, "清理日志", WARN,
-                                   _call_clear_logs)
+        clear_logs_btn = _make_btn(btn_frame, "清理日志", WARN, _call_clear_logs)
         _place(clear_logs_btn, "clear_logs")
+
+        def _call_export_feedback():
+            """导出本次出错截屏与日志：打包成 zip 并发给作者，完成后定位到文件。"""
+            push("[SYS] 正在导出本次出错截屏与日志……")
+            try:
+                if _ON_EXPORT_FEEDBACK is not None:
+                    result = _ON_EXPORT_FEEDBACK()
+                    if isinstance(result, dict) and not result.get("ok", True):
+                        push(f"[SYS] 导出失败：{result.get('error')}")
+            except Exception as exc:
+                push(f"[SYS] 导出失败：{exc}")
+            finally:
+                _raise_hearthstone()
+
+        export_feedback_btn = _make_btn(
+            btn_frame, "导出本次出错截屏与日志", ACCENT, _call_export_feedback
+        )
+        _place(export_feedback_btn, "export_feedback")
 
         def _call_restart():
             """重启炉石：先弹确认，确认后交给 web_ui 后台跑（不阻塞浮窗）。
@@ -1514,8 +2050,7 @@ def _run() -> None:
             # 留一拍，让上面那行“已退出浮窗”先画出来再关窗；而且只关自己这一代。
             root.after(150, lambda: _stop_generation(generation))
 
-        exit_overlay_btn = _make_btn(btn_frame, "退出浮窗", NEUTRAL,
-                                     _call_exit_overlay)
+        exit_overlay_btn = _make_btn(btn_frame, "退出浮窗", NEUTRAL, _call_exit_overlay)
         _place(exit_overlay_btn, "exit_overlay")
 
         def _call_exit():
@@ -1534,23 +2069,39 @@ def _run() -> None:
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
         delay_frame = tk.Frame(content, bg=BG)
         delay_frame.pack(side="bottom", fill="x", padx=px(8), pady=(0, px(8)))
-        delay_canvas = tk.Canvas(delay_frame, height=px(8), bg=PANEL,
-                                 highlightthickness=0)
+        delay_canvas = tk.Canvas(
+            delay_frame, height=px(8), bg=PANEL, highlightthickness=0
+        )
         delay_canvas.pack(fill="x", pady=(0, px(2)))
-        delay_label = tk.Label(delay_frame, text="延时：无", bg=BG, fg=DIM,
-                               font=("Microsoft YaHei", 8), anchor="w")
+        delay_label = tk.Label(
+            delay_frame,
+            text="延时：无",
+            bg=BG,
+            fg=DIM,
+            font=("Microsoft YaHei", 8),
+            anchor="w",
+        )
         delay_label.pack(fill="x")
 
         # ---- log body --------------------------------------------------
         body = tk.Frame(content, bg=BG)
         body.pack(fill="both", expand=True, padx=px(8), pady=(px(6), px(8)))
-        text = tk.Text(body, bg=BG, fg=TEXT, font=("Microsoft YaHei", 9),
-                       bd=0, highlightthickness=0, wrap="word",
-                       height=12, padx=px(2), pady=px(2),
-                       spacing1=px(2), spacing3=px(2))
+        text = tk.Text(
+            body,
+            bg=BG,
+            fg=TEXT,
+            font=("Microsoft YaHei", 9),
+            bd=0,
+            highlightthickness=0,
+            wrap="word",
+            height=12,
+            padx=px(2),
+            pady=px(2),
+            spacing1=px(2),
+            spacing3=px(2),
+        )
         text.pack(side="left", fill="both", expand=True)
-        scroll = tk.Scrollbar(body, orient="vertical", command=text.yview,
-                              width=px(10))
+        scroll = tk.Scrollbar(body, orient="vertical", command=text.yview, width=px(10))
         scroll.pack(side="right", fill="y")
         text.config(yscrollcommand=scroll.set)
         # 正文按标签着色：盒子意见、实际操作、系统提示、警告、报错各一色，
@@ -1560,16 +2111,31 @@ def _run() -> None:
                 continue
             text.tag_config(tag_name, foreground=color)
         # 存活检测/昵称不匹配这类“必须马上看见”的告警行：红色加粗。
-        text.tag_config("alert", foreground=LOG_TAG_COLORS["alert"],
-                        font=("Microsoft YaHei", 9, "bold"))
+        text.tag_config(
+            "alert",
+            foreground=LOG_TAG_COLORS["alert"],
+            font=("Microsoft YaHei", 9, "bold"),
+        )
 
         # ---- drag ------------------------------------------------------
-        _drag = {"x": 0, "y": 0}
+        # 整窗拖动绑在 root 上；但点滑条时事件会冒泡到这里，若不排除就会「按滑钮
+        # 整个浮窗跟着动」。滑条自己在 widget 级绑定里 return "break" 已经吃掉事件，
+        # 这里再兜一层（事件来源是滑条 canvas 就绝不拖窗）。
+        _drag = {"x": 0, "y": 0, "active": False}
+
+        def _from_slider(event):
+            return getattr(event, "widget", None) is slider_canvas
 
         def _start_drag(event):
+            if _from_slider(event):
+                _drag["active"] = False
+                return
+            _drag["active"] = True
             _drag["x"], _drag["y"] = event.x, event.y
 
         def _on_drag(event):
+            if not _drag["active"] or _from_slider(event):
+                return
             nx = root.winfo_x() + event.x - _drag["x"]
             ny = root.winfo_y() + event.y - _drag["y"]
             root.geometry(f"+{nx}+{ny}")
@@ -1594,6 +2160,7 @@ def _run() -> None:
                 return
             with _LOCK:
                 lines = list(_LINES)
+            _sync_size_slider()
             pos = text.yview()
             at_bottom = pos[1] >= 0.999
             # 增量渲染的坑：_LINES 满 _MAX_LINES 后每进一行就从头部滑出一行，
@@ -1609,25 +2176,42 @@ def _run() -> None:
                 shown[0] = fp
             if _IS_RUNNING is not None:
                 if _IS_RUNNING():
-                    _set(halt_btn, text="中止", bg=DANGER,
-                         activebackground=DANGER)
+                    _set(halt_btn, text="中止", bg=DANGER, activebackground=DANGER)
                 else:
                     _set(halt_btn, text="恢复", bg=OK, activebackground=OK)
             starting = bool(_IS_STARTING()) if _IS_STARTING is not None else False
             if starting and not (_IS_RUNNING is not None and _IS_RUNNING()):
                 # 点完「开始」到自动化线程挂上之间：给个「启动中…」，别让用户以为
                 # 点了没反应（首次启动要导入组件 + 初始化，会有一小段空窗）。
-                _set(start_btn, state="disabled", text="启动中…",
-                     bg=DISABLED, activebackground=DISABLED,
-                     disabledforeground=DIM, cursor="arrow")
+                _set(
+                    start_btn,
+                    state="disabled",
+                    text="启动中…",
+                    bg=DISABLED,
+                    activebackground=DISABLED,
+                    disabledforeground=DIM,
+                    cursor="arrow",
+                )
             elif _IS_IN_GAME is not None and _IS_IN_GAME():
-                _set(start_btn, state="disabled", text="对局进行中",
-                     bg=DISABLED, activebackground=DISABLED,
-                     disabledforeground=DIM, cursor="arrow")
+                _set(
+                    start_btn,
+                    state="disabled",
+                    text="对局进行中",
+                    bg=DISABLED,
+                    activebackground=DISABLED,
+                    disabledforeground=DIM,
+                    cursor="arrow",
+                )
             else:
-                _set(start_btn, state="normal", text="开始对战",
-                     bg=ACCENT, activebackground=ACCENT,
-                     disabledforeground=DIM, cursor="hand2")
+                _set(
+                    start_btn,
+                    state="normal",
+                    text="开始对战",
+                    bg=ACCENT,
+                    activebackground=ACCENT,
+                    disabledforeground=DIM,
+                    cursor="hand2",
+                )
             if _SCORE is not None:
                 score = _SCORE()
                 if score is not None:
@@ -1643,9 +2227,12 @@ def _run() -> None:
                     rate = (wins / games * 100) if games else 0.0
                     rate_txt = f"{rate:.1f}%" if games else "--"
                     concede_txt = f" · 认输 {concedes}" if concedes else ""
-                    _set(score_label,
-                         text=f"战绩： 胜 {wins} · 负 {losses} · "
-                              f"胜率 {rate_txt}{concede_txt}", fg=TEXT)
+                    _set(
+                        score_label,
+                        text=f"战绩： 胜 {wins} · 负 {losses} · "
+                        f"胜率 {rate_txt}{concede_txt}",
+                        fg=TEXT,
+                    )
                 else:
                     _set(score_label, text="战绩： —", fg=DIM)
             if _HUMAN_LIKE is not None:
@@ -1685,8 +2272,13 @@ def _run() -> None:
                 _set(ac_marker, fg=row["marker"])
                 _set(ac_value, text=row["value"], fg=row["value_color"])
                 # 隐藏时「已隐藏」用白色，和白色的眼睛保持同一套语义。
-                _set_detail(ac_detail, ac_used, row["value"], row["detail"],
-                            fg=TEXT if hidden else DIM)
+                _set_detail(
+                    ac_detail,
+                    ac_used,
+                    row["value"],
+                    row["detail"],
+                    fg=TEXT if hidden else DIM,
+                )
                 _refresh_eye()
             if _LOGS is not None:
                 try:
@@ -1714,15 +2306,18 @@ def _run() -> None:
                         delay_canvas.delete("all")
                         delay_bar[0] = None
                 else:
-                    _set(delay_label,
-                         text=f"{delay['desc']}（{remaining:.0f}/{total:.0f}s）",
-                         fg=TEXT)
+                    _set(
+                        delay_label,
+                        text=f"{delay['desc']}（{remaining:.0f}/{total:.0f}s）",
+                        fg=TEXT,
+                    )
                     # 进度条每 350ms 重画一次会明显闪烁：进度变化小于 2% 时不重画。
                     if delay_bar[0] is None or abs(frac - delay_bar[0]) >= 0.02:
                         w = max(delay_canvas.winfo_width(), 1)
                         delay_canvas.delete("all")
                         delay_canvas.create_rectangle(
-                            0, 0, w * frac, 8, fill=ACCENT, outline="")
+                            0, 0, w * frac, 8, fill=ACCENT, outline=""
+                        )
                         delay_bar[0] = frac
             else:
                 _set(delay_label, text="延时：无", fg=DIM)

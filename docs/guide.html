@@ -122,6 +122,7 @@
   <a href="#setup-check" class="sub">4 环境自检</a>
   <a href="#play">开始打</a>
   <a href="#daily">日常操作</a>
+  <a href="#daily-version" class="sub">版本号在哪看</a>
   <a href="#optional">可选开关</a>
   <a href="#concede">两套认输</a>
   <a href="#trouble">出问题先看这里</a>
@@ -302,6 +303,16 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
 </table>
 <p>浮窗只移动鼠标、不点击，不会干扰出牌；标题行右侧有「最小化」可以把整个浮窗折叠成一条。</p>
 
+<h3 id="daily-version">版本号在哪看</h3>
+<p>版本号就是<b>发布日期</b>，形如 <code>v2026.10.17</code>。想知道手上这份是不是最新的，看三个地方之一就够，显示的是同一个串：</p>
+<table>
+  <tr><th>位置</th><th>长什么样</th></tr>
+  <tr><td>浮窗最上面一行（项目名右边）</td><td><code>HSLegendArriver&nbsp;&nbsp;v2026.10.17</code></td></tr>
+  <tr><td>网页控制台顶栏右侧（状态圆点左边）</td><td>金色小圆角标签 <code>v2026.10.17</code></td></tr>
+  <tr><td>命令行</td><td><code>python hsctl.py --version</code></td></tr>
+</table>
+<p>只有 <code>version.py</code> 里那个 <code>VERSION</code> 能改，改完三处一起变。</p>
+
 <h2 id="optional">可选开关</h2>
 <p>默认关着的都不影响第一次跑通，按需要开。</p>
 <table>
@@ -385,6 +396,7 @@ python hsctl.py --json status     <span class="c"># 之后按需探活、干活<
 
 <h2 id="cmd">命令速查</h2>
 <pre><code><span class="c"># 状态与自检</span>
+python hsctl.py --version            <span class="c"># 版本号（就是发布日期）</span>
 python hsctl.py --json doctor        <span class="c"># 一条命令自诊（会话第一条）</span>
 python hsctl.py status               <span class="c"># 阶段 / 账号 / 战绩 / 参数</span>
 python hsctl.py log -f               <span class="c"># 实时跟随日志</span>

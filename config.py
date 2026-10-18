@@ -12,6 +12,7 @@
       不要再在代码里写死机器路径/用户身份/延时数值。
     * web 层与推荐自动化层共用本文件，不再各自读 ui_config.json。
 """
+
 from __future__ import annotations
 
 import json
@@ -70,7 +71,8 @@ USER_NAME = _first(_env("HS_USER_NAME"), _UI.get("name"), "YOURNAME#1234")
 # 用于：log_iter_func / 自动换牌与对战识别读取对局日志。
 # 自动探测路径：%LOCALAPPDATA%\\Blizzard\\Hearthstone\\Logs。
 _LOCALAPPDATA_BLIZZARD = os.path.join(
-    os.environ.get("LOCALAPPDATA", ""), "Blizzard", "Hearthstone", "Logs")
+    os.environ.get("LOCALAPPDATA", ""), "Blizzard", "Hearthstone", "Logs"
+)
 
 
 def _resolve_log_root() -> str:
@@ -154,8 +156,12 @@ DEFAULT_AUTO_SURRENDER = {"enabled": False, "aliases": {}, "decks": []}
 #                          直到名次数值 >= 目标才恢复正常对战。
 # 注意方向：炉石传说的名次**数值越小 = 排名越高**。所以「控制不超过某名次」=
 # 名次太靠前（数值太小）时主动投降，数值涨到阈值附近就不再投降。
-DEFAULT_RANK_STOP = {"enabled": False, "mode": "legend",
-                     "legend_number": 1, "action": "stop"}
+DEFAULT_RANK_STOP = {
+    "enabled": False,
+    "mode": "legend",
+    "legend_number": 1,
+    "action": "stop",
+}
 # 目标名次的取值范围（防配置写坏成 0 / 负数 / 天文数字）。
 RANK_STOP_MIN_NUMBER = 1
 RANK_STOP_MAX_NUMBER = 100000
@@ -185,8 +191,7 @@ def rank_stop_settings() -> dict:
         number = int(cfg["legend_number"])
     except (TypeError, ValueError):
         number = DEFAULT_RANK_STOP["legend_number"]
-    cfg["legend_number"] = max(RANK_STOP_MIN_NUMBER,
-                               min(RANK_STOP_MAX_NUMBER, number))
+    cfg["legend_number"] = max(RANK_STOP_MIN_NUMBER, min(RANK_STOP_MAX_NUMBER, number))
     return cfg
 
 
@@ -304,8 +309,7 @@ def watchdog_settings() -> dict:
         cfg["enabled"] = bool(cfg["enabled"])
         cfg["stale_seconds"] = max(30.0, float(cfg["stale_seconds"]))
         cfg["max_restarts"] = max(1, int(cfg["max_restarts"]))
-        cfg["window_seconds"] = max(cfg["stale_seconds"],
-                                    float(cfg["window_seconds"]))
+        cfg["window_seconds"] = max(cfg["stale_seconds"], float(cfg["window_seconds"]))
         cfg["check_seconds"] = max(5.0, float(cfg["check_seconds"]))
         cfg["settle_seconds"] = max(0.0, float(cfg["settle_seconds"]))
     except (TypeError, ValueError):
@@ -340,6 +344,7 @@ def human_like_settings() -> dict:
     except (TypeError, ValueError):
         return dict(DEFAULT_HUMAN_LIKE)
     return cfg
+
 
 # ---------------------------------------------------------------- 浮窗显示偏好
 # 日志浮窗自己的显示开关（与自动化行为无关，纯显示）：
@@ -377,8 +382,97 @@ def save_overlay_setting(key: str, value) -> dict:
     section[key] = bool(value)
     data["overlay"] = section
     CONFIG_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {**DEFAULT_OVERLAY, **section}
+
+
+# ---------------------------------------------------------------- 出错反馈
+# ui_config.json 的 feedback 段（出错自动截图 + 反馈包导出）。
+#   enabled:              总开关。
+#   retry_threshold:      同一诊断码连续重试多少次触发一次截图（含该次）。
+#   capture_on_error:     出现 ERROR/⚠️ 报错时立即截图。
+#   throttle_seconds:     两次截图之间的最短间隔（防止刷屏/刷盘）。
+#   max_shots_per_run:    每次运行最多截多少张（兜底上限）。
+#   auto_export_on_stop:  自动化停止时是否自动导出反馈 zip。
+DEFAULT_FEEDBACK = {
+    "enabled": True,
+    "retry_threshold": 3,
+    "capture_on_error": True,
+    "throttle_seconds": 10.0,
+    "max_shots_per_run": 30,
+    "auto_export_on_stop": False,
+}
+_FEEDBACK_FLOAT_KEYS = ("throttle_seconds",)
+_FEEDBACK_INT_KEYS = ("retry_threshold", "max_shots_per_run")
+_FEEDBACK_BOOL_KEYS = ("enabled", "capture_on_error", "auto_export_on_stop")
+
+
+def feedback_settings() -> dict:
+    """读取 ui_config.json 的 feedback 段（缺字段/写坏时回退默认值）。"""
+    cfg = dict(DEFAULT_FEEDBACK)
+    data = _load_ui_config().get("feedback")
+    if not isinstance(data, dict):
+        return cfg
+    for key in _FEEDBACK_BOOL_KEYS:
+        if data.get(key) is not None:
+            cfg[key] = bool(data[key])
+    for key in _FEEDBACK_INT_KEYS:
+        if data.get(key) is None:
+            continue
+        try:
+            value = int(data[key])
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            cfg[key] = value
+    for key in _FEEDBACK_FLOAT_KEYS:
+        if data.get(key) is None:
+            continue
+        try:
+            value = float(data[key])
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            cfg[key] = value
+    return cfg
+
+
+def save_feedback_setting(key: str, value) -> dict:
+    """把 feedback 段里的某一项写进 ui_config.json（只改这一段）。"""
+    if key not in DEFAULT_FEEDBACK:
+        raise KeyError(f"未知的反馈配置项：{key}")
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    section = data.get("feedback")
+    section = dict(section) if isinstance(section, dict) else {}
+    if key in _FEEDBACK_BOOL_KEYS:
+        section[key] = bool(value)
+    elif key in _FEEDBACK_INT_KEYS:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} 必须是整数")
+        if number < 1:
+            raise ValueError(f"{key} 必须 ≥ 1")
+        section[key] = number
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{key} 必须是数字")
+        if number < 0:
+            raise ValueError(f"{key} 必须 ≥ 0")
+        section[key] = number
+    data["feedback"] = section
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return {**DEFAULT_FEEDBACK, **section}
 
 
 # ---------------------------------------------------------------- 进入对战
@@ -394,8 +488,11 @@ DEFAULT_BATTLE_ENTRY = {
     "main_menu_timeout_seconds": 180.0,
     "deck_select_timeout_seconds": 90.0,
 }
-_BATTLE_ENTRY_FLOAT_KEYS = ("check_interval_seconds", "main_menu_timeout_seconds",
-                            "deck_select_timeout_seconds")
+_BATTLE_ENTRY_FLOAT_KEYS = (
+    "check_interval_seconds",
+    "main_menu_timeout_seconds",
+    "deck_select_timeout_seconds",
+)
 
 
 def battle_entry_settings() -> dict:
@@ -465,7 +562,8 @@ def save_battle_entry_setting(key: str, value) -> dict:
         section[key] = number
     data["battle_entry"] = section
     CONFIG_PATH.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {**DEFAULT_BATTLE_ENTRY, **section}
 
 
@@ -480,11 +578,16 @@ def save_battle_entry_setting(key: str, value) -> dict:
 def _mode_click_defaults() -> dict:
     try:
         from screen_regions import mode_click_points
+
         return {key: tuple(point) for key, point in mode_click_points().items()}
     except Exception:
         # screen_regions 不可用（理论上不会）时给一份内联兜底，保证点击有坐标可用。
-        return {"menu_open": (1405, 55), "wild": (617, 380),
-                "standard": (955, 375), "casual": (1290, 380)}
+        return {
+            "menu_open": (1405, 55),
+            "wild": (617, 380),
+            "standard": (955, 375),
+            "casual": (1290, 380),
+        }
 
 
 _MODE_CLICK_DEFAULTS = _mode_click_defaults()
@@ -503,8 +606,11 @@ def load_mode_click_points() -> dict:
         return points
     for key, default in _MODE_CLICK_DEFAULTS.items():
         raw = section.get(key)
-        if (isinstance(raw, (list, tuple)) and len(raw) == 2
-                and all(isinstance(v, (int, float)) for v in raw)):
+        if (
+            isinstance(raw, (list, tuple))
+            and len(raw) == 2
+            and all(isinstance(v, (int, float)) for v in raw)
+        ):
             points[key] = (float(raw[0]), float(raw[1]))
     return points
 
@@ -528,8 +634,9 @@ SNAPSHOT_WRITE_INTERVAL = float(_env("HS_SNAPSHOT_WRITE_INTERVAL", "5.0"))
 # 炉石卡牌 JSON 数据源（hearthstonejson.com，zhCN 最新版本）。
 # 用于 cards.json 缺失时联网下载、以及未知卡牌触发一次重下载补齐名称。
 # 可通过 HS_JSON_URL 指向镜像/本地文件。
-JSON_URL = _env("HS_JSON_URL",
-                "https://api.hearthstonejson.com/v1/latest/zhCN/cards.json")
+JSON_URL = _env(
+    "HS_JSON_URL", "https://api.hearthstonejson.com/v1/latest/zhCN/cards.json"
+)
 # 联网下载/重下载的超时（秒）。防止无网/慢网时主循环被 requests.get 卡死。
 # 经 HS_DOWNLOAD_TIMEOUT_SECONDS 覆盖。
 DOWNLOAD_TIMEOUT_SECONDS = int(_env("HS_DOWNLOAD_TIMEOUT_SECONDS", "30"))
@@ -540,21 +647,32 @@ DOWNLOAD_TIMEOUT_SECONDS = int(_env("HS_DOWNLOAD_TIMEOUT_SECONDS", "30"))
 # 来源优先级：环境变量 HS_OCR_MODEL_ROOT >
 #             %LOCALAPPDATA%/AutoHS/ocr_models/paddleocr（默认自动探测）。
 OCR_MODEL_ROOT = os.environ.get("HS_OCR_MODEL_ROOT") or os.path.normpath(
-    os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-                 "AutoHS", "ocr_models", "paddleocr"))
+    os.path.join(
+        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+        "AutoHS",
+        "ocr_models",
+        "paddleocr",
+    )
+)
 
 
 # ---------------------------------------------------------------- 推荐自动化调优
 # 校准工具可以写回 ui_config.json 的区域键白名单（同时是 RecommendationConfig
 # 的字段名）。新增一个可校准区域时，这里和 screen_regions.CALIBRATION_TARGETS
 # 一起加即可。
-_USER_BOX_KEYS = ("recommendation_roi", "mulligan_confirm_roi",
-                  "ai_win_rate_roi", "ai_win_rate_wide_roi",
-                  "post_game_start_roi", "post_game_rank_roi",
-                  # 界面识别（battle_entry）：主界面「传统对战」文字框、
-                  # 选择套牌界面「选择套牌」标题框、9 个卡组网格框。
-                  "main_menu_battle_roi", "deck_select_title_roi",
-                  "deck_grid_roi")
+_USER_BOX_KEYS = (
+    "recommendation_roi",
+    "mulligan_confirm_roi",
+    "ai_win_rate_roi",
+    "ai_win_rate_wide_roi",
+    "post_game_start_roi",
+    "post_game_rank_roi",
+    # 界面识别（battle_entry）：主界面「传统对战」文字框、
+    # 选择套牌界面「选择套牌」标题框、9 个卡组网格框。
+    "main_menu_battle_roi",
+    "deck_select_title_roi",
+    "deck_grid_roi",
+)
 
 
 def _roi_declared_client(data: dict) -> bool:
@@ -570,7 +688,7 @@ def _roi_declared_client(data: dict) -> bool:
     try:
         from display_mapping import roi_frame_is_credible
     except Exception:
-        return True          # 拿不到判定逻辑时尊重文件里的声明
+        return True  # 拿不到判定逻辑时尊重文件里的声明
     boxes = [data[key] for key in _USER_BOX_KEYS if key in data]
     if not boxes:
         return True
@@ -589,18 +707,21 @@ def _interpret_roi(box, declared_client: bool, default):
     global _ROI_FRAME_WARNED
     try:
         from display_mapping import display_mapping, interpret_roi_box
+
         mapping = display_mapping()
-        converted = interpret_roi_box(box, mapping,
-                                      declared_client=declared_client,
-                                      default=default)
+        converted = interpret_roi_box(
+            box, mapping, declared_client=declared_client, default=default
+        )
     except Exception:
         return box
     if tuple(converted) != tuple(box) and not _ROI_FRAME_WARNED:
         # 只提示一次：每局都会重建配置，反复刷屏没有意义。
         _ROI_FRAME_WARNED = True
-        print("[配置] ui_config.json 里的 ROI 没有「客户区相对」标记（或标记不可信），"
-              "已按**屏幕坐标**换算成客户区相对坐标 —— 框仍跟着炉石窗口走；"
-              "用校准工具按一次 S 保存即固定该口径。")
+        print(
+            "[配置] ui_config.json 里的 ROI 没有「客户区相对」标记（或标记不可信），"
+            "已按**屏幕坐标**换算成客户区相对坐标 —— 框仍跟着炉石窗口走；"
+            "用校准工具按一次 S 保存即固定该口径。"
+        )
     return converted
 
 
@@ -658,8 +779,7 @@ def _user_confirm_roi() -> Optional[tuple[int, int, int, int]]:
     用于换牌阶段检测“确认”按钮是否在场：按钮在 → 可安全执行换牌并点击确认；
     按钮不在 → 面板未就绪或已提交，不盲目点击。格式同 recommendation_roi。
     """
-    return _user_box("mulligan_confirm_roi",
-                     _code_default("mulligan_confirm_roi"))
+    return _user_box("mulligan_confirm_roi", _code_default("mulligan_confirm_roi"))
 
 
 # 可通过 ui_config.json 的 delays 段覆盖的延时字段白名单。

@@ -49,6 +49,9 @@ body{
 .repo-bar a.repo-link:hover{color:#241a05;border-color:#8a6a1c;filter:brightness(1.08);transform:translateY(-1px)}
 .repo-bar-note{color:var(--muted);font-size:12.5px}
 .clock{font-family:Consolas,monospace;color:var(--muted);font-size:13px;text-align:right;line-height:1.5}
+/* 版本徽标：v2026.10.17（版本号 = 发布日期，不挂 git 哈希） */
+.ver-chip{font-family:Consolas,monospace;font-size:12px;color:var(--gold-bright);border:1px solid var(--border);background:var(--panel2);border-radius:999px;padding:5px 12px;white-space:nowrap;cursor:default}
+.ver-chip.muted{color:var(--muted)}
 .pill{display:flex;align-items:center;gap:8px;padding:7px 15px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid var(--border);background:var(--panel2)}
 .pill .dot{width:9px;height:9px;border-radius:50%;background:#8b8071;flex:none}
 .pill.idle .dot{background:#8b8071}
@@ -216,6 +219,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
       </div>
     </div>
     <div class="header-right">
+      <div id="appVersion" class="ver-chip muted" title="当前控制台版本">v—</div>
       <div id="statusPill" class="pill idle"><span class="dot"></span><span id="pillText">空闲</span></div>
       <div id="clock" class="clock">--:--:--</div>
     </div>
@@ -701,6 +705,22 @@ function render(s){
   var info = PHASE_INFO[s.phase] || PHASE_INFO.idle;
   var pill = $("statusPill");
   pill.className = "pill " + info.cls;
+
+  /* 版本徽标：v2026.10.17（版本号就是发布日期）。
+     老版本后端不带 version 字段，显示 "v—" 而不是报错。 */
+  var verBox = $("appVersion");
+  if (verBox){
+    var vi = s.version || null;
+    if (vi && vi.label){
+      verBox.textContent = vi.label;
+      verBox.className = "ver-chip";
+      verBox.title = "控制台版本（发布日期）：" + vi.label;
+    } else {
+      verBox.textContent = "v—";
+      verBox.className = "ver-chip muted";
+      verBox.title = "后端未返回版本信息（可能是老版本控制台）";
+    }
+  }
   var pillText = s.starting ? "启动中…" : info.label;
   if (s.running && s.state) pillText += " · " + s.state_label;
   $("pillText").textContent = pillText;

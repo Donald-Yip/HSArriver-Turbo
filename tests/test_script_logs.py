@@ -41,9 +41,9 @@ class FormatSizeTests(unittest.TestCase):
             (999, "999 B"),
             (1024, "1.0 KB"),
             (1536, "1.5 KB"),
-            (1024 ** 2, "1.0 MB"),
-            (int(214.2 * 1024 ** 2), "214.2 MB"),
-            (int(1.2 * 1024 ** 3), "1.2 GB"),
+            (1024**2, "1.0 MB"),
+            (int(214.2 * 1024**2), "214.2 MB"),
+            (int(1.2 * 1024**3), "1.2 GB"),
         )
         for value, expected in cases:
             with self.subTest(value=value):
@@ -58,8 +58,7 @@ class FormatSizeTests(unittest.TestCase):
 
 class NamingTests(unittest.TestCase):
     def test_new_battle_log_path(self):
-        path = script_logs.new_battle_log_path(
-            datetime(2026, 10, 8, 13, 5, 9))
+        path = script_logs.new_battle_log_path(datetime(2026, 10, 8, 13, 5, 9))
         self.assertEqual("对战日志_20261008_130509.txt", path.name)
         self.assertEqual(script_logs.LOG_DIR, path.parent)
         self.assertTrue(script_logs.is_battle_log(path.name))
@@ -80,21 +79,32 @@ class ScanTests(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_empty_directory(self):
         result = script_logs.scan(self.logs, self.runtime)
 
-        self.assertEqual({"files": 0, "bytes": 0, "battle_files": 0,
-                          "battle_bytes": 0, "runtime_bytes": 0, "newest": None},
-                         result)
+        self.assertEqual(
+            {
+                "files": 0,
+                "bytes": 0,
+                "battle_files": 0,
+                "battle_bytes": 0,
+                "feedback_files": 0,
+                "feedback_bytes": 0,
+                "runtime_bytes": 0,
+                "newest": None,
+            },
+            result,
+        )
 
     def test_counts_only_battle_logs_plus_runtime(self):
-        first = _write(self.logs / "对战日志_20261008_120000.txt", "a" * 10,
-                       1_700_000_000)
-        _write(self.logs / "对战日志_20261008_130000.txt", "b" * 20,
-               1_700_000_100)
-        _write(self.logs / "notes.txt", "c" * 5)          # 不匹配，不计
+        first = _write(
+            self.logs / "对战日志_20261008_120000.txt", "a" * 10, 1_700_000_000
+        )
+        _write(self.logs / "对战日志_20261008_130000.txt", "b" * 20, 1_700_000_100)
+        _write(self.logs / "notes.txt", "c" * 5)  # 不匹配，不计
         (self.logs / "subdir").mkdir()
         _write(self.runtime, "r" * 7)
 
@@ -103,11 +113,10 @@ class ScanTests(unittest.TestCase):
         self.assertEqual(2, result["battle_files"])
         self.assertEqual(30, result["battle_bytes"])
         self.assertEqual(7, result["runtime_bytes"])
-        self.assertEqual(3, result["files"])          # 2 份对战日志 + 运行日志
+        self.assertEqual(3, result["files"])  # 2 份对战日志 + 运行日志
         self.assertEqual(37, result["bytes"])
         self.assertNotEqual(first, result["newest"])
-        self.assertEqual("对战日志_20261008_130000.txt",
-                         Path(result["newest"]).name)
+        self.assertEqual("对战日志_20261008_130000.txt", Path(result["newest"]).name)
 
     def test_missing_directory_is_not_an_error(self):
         result = script_logs.scan(self.tmp / "nope", self.runtime)
@@ -122,8 +131,7 @@ class ScanTests(unittest.TestCase):
 
         result = script_logs.scan(self.logs, self.runtime)
 
-        self.assertEqual("对战日志_20261008_120001.txt",
-                         Path(result["newest"]).name)
+        self.assertEqual("对战日志_20261008_120001.txt", Path(result["newest"]).name)
 
     def test_stat_failure_skips_that_entry(self):
         _write(self.logs / "对战日志_20261008_120000.txt", "a" * 10)
@@ -137,8 +145,7 @@ class ScanTests(unittest.TestCase):
             def stat(self):
                 raise OSError("读不到")
 
-        with patch.object(script_logs.os, "scandir",
-                          return_value=[_BadEntry()]):
+        with patch.object(script_logs.os, "scandir", return_value=[_BadEntry()]):
             result = script_logs.scan(self.logs, self.runtime)
 
         self.assertEqual(0, result["battle_files"])
@@ -153,27 +160,29 @@ class ClearTests(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_deletes_battle_logs_and_runtime_only(self):
-        (self.logs / "对战日志_20261008_120000.txt").write_text("a" * 10,
-                                                               encoding="utf-8")
-        (self.logs / "对战日志_20261008_130000.txt").write_text("b" * 20,
-                                                               encoding="utf-8")
+        (self.logs / "对战日志_20261008_120000.txt").write_text(
+            "a" * 10, encoding="utf-8"
+        )
+        (self.logs / "对战日志_20261008_130000.txt").write_text(
+            "b" * 20, encoding="utf-8"
+        )
         keep = self.logs / "notes.txt"
         keep.write_text("c" * 5, encoding="utf-8")
         self.runtime.write_text("r" * 7, encoding="utf-8")
         logged = []
 
-        result = script_logs.clear(self.logs, self.runtime,
-                                   logger=logged.append)
+        result = script_logs.clear(self.logs, self.runtime, logger=logged.append)
 
         self.assertTrue(result["ok"])
-        self.assertEqual(3, result["removed"])          # 2 份对战日志 + 运行日志
+        self.assertEqual(3, result["removed"])  # 2 份对战日志 + 运行日志
         self.assertEqual(37, result["freed_bytes"])
         self.assertFalse(self.runtime.exists())
         self.assertEqual([], list(self.logs.glob("对战日志_*.txt")))
-        self.assertTrue(keep.exists())                  # 不匹配的一个不动
+        self.assertTrue(keep.exists())  # 不匹配的一个不动
         self.assertIn("notes.txt", result["skipped"])
         # 单份对战日志不逐条播报（一次可能删几百份），只留运行日志那一句。
         self.assertFalse(any("对战日志_" in text for text in logged), logged)
@@ -196,8 +205,7 @@ class ClearTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(1, result["removed"])
         self.assertEqual([bad.name], result["failed"])
-        self.assertTrue(any("PermissionError" in err
-                            for err in result["errors"]))
+        self.assertTrue(any("PermissionError" in err for err in result["errors"]))
         self.assertFalse(good.exists())
 
     def test_runtime_log_falls_back_to_truncate(self):
@@ -213,7 +221,7 @@ class ClearTests(unittest.TestCase):
         with patch.object(Path, "unlink", fake_unlink):
             result = script_logs.clear(self.logs, self.runtime)
 
-        self.assertTrue(result["ok"])                   # 截断成功也算清掉
+        self.assertTrue(result["ok"])  # 截断成功也算清掉
         self.assertEqual(1, result["removed"])
         self.assertEqual(100, result["freed_bytes"])
         self.assertEqual("", self.runtime.read_text(encoding="utf-8"))
@@ -236,6 +244,7 @@ class OpenLocationTests(unittest.TestCase):
 
     def tearDown(self):
         import shutil
+
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _runner(self, argv):
@@ -249,8 +258,9 @@ class OpenLocationTests(unittest.TestCase):
         _write(self.logs / "对战日志_20261008_120000.txt", "a", 1_700_000_000)
         _write(self.logs / "对战日志_20261008_130000.txt", "b", 1_700_000_100)
 
-        result = script_logs.open_location(self.logs, opener=self._opener,
-                                           runner=self._runner)
+        result = script_logs.open_location(
+            self.logs, opener=self._opener, runner=self._runner
+        )
 
         self.assertTrue(result["ok"])
         self.assertEqual("file", result["opened"])
@@ -260,24 +270,39 @@ class OpenLocationTests(unittest.TestCase):
         self.assertEqual([], self.opened)
 
     def test_opens_the_folder_when_there_is_no_battle_log(self):
-        result = script_logs.open_location(self.logs, opener=self._opener,
-                                           runner=self._runner)
+        result = script_logs.open_location(
+            self.logs, opener=self._opener, runner=self._runner
+        )
 
         self.assertTrue(result["ok"])
         self.assertEqual("folder", result["opened"])
         self.assertEqual([str(self.logs)], self.opened)
         self.assertEqual([], self.runs)
-        self.assertTrue(self.logs.is_dir())              # 目录会被建出来
+        self.assertTrue(self.logs.is_dir())  # 目录会被建出来
 
     def test_failure_is_reported_not_raised(self):
         def boom(_argv):
             raise OSError("explorer 不给开")
 
-        result = script_logs.open_location(self.logs, opener=self._opener,
-                                           runner=boom)
+        result = script_logs.open_location(self.logs, opener=self._opener, runner=boom)
 
-        self.assertTrue(result["ok"])                    # 退回打开目录
+        self.assertTrue(result["ok"])  # 退回打开目录
         self.assertEqual([str(self.logs)], self.opened)
+
+
+class IsFeedbackTests(unittest.TestCase):
+    def test_recognizes_work_dir_and_new_zip_names(self):
+        # 工作目录 / 旧包名（前缀）
+        self.assertTrue(script_logs.is_feedback("反馈_20261018_120000"))
+        self.assertTrue(script_logs.is_feedback("反馈_20261018_120000.zip"))
+        # 按天合并的自动出错存档目录
+        self.assertTrue(script_logs.is_feedback("出错记录_20261018"))
+        # 新包名：<紧凑日期>-<盒子推荐>-错误反馈.zip
+        self.assertTrue(script_logs.is_feedback("20261018-打出1号位随从-错误反馈.zip"))
+        # 别误伤
+        self.assertFalse(script_logs.is_feedback("对战日志_20261018_120000.txt"))
+        self.assertFalse(script_logs.is_feedback("my_错误反馈.zip.bak"))
+        self.assertFalse(script_logs.is_feedback(""))
 
 
 if __name__ == "__main__":

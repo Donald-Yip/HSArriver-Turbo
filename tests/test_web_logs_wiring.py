@@ -36,16 +36,14 @@ class TempLogsCase(unittest.TestCase):
         self._paths = (web_ui.LOG_DIR, web_ui.RUNTIME_LOG)
         web_ui.LOG_DIR, web_ui.RUNTIME_LOG = self.logs, self.runtime
         self._cache = (web_ui._log_scan_cache["at"], web_ui._log_scan_cache["data"])
-        self._clear = (web_ui._log_clear_state["at"],
-                       web_ui._log_clear_state["bytes"])
+        self._clear = (web_ui._log_clear_state["at"], web_ui._log_clear_state["bytes"])
         web_ui._log_scan_cache.update({"at": 0.0, "data": None})
         web_ui._log_clear_state.update({"at": 0.0, "bytes": 0})
 
     def tearDown(self):
         web_ui.LOG_DIR, web_ui.RUNTIME_LOG = self._paths
         web_ui._log_scan_cache.update({"at": self._cache[0], "data": self._cache[1]})
-        web_ui._log_clear_state.update({"at": self._clear[0],
-                                        "bytes": self._clear[1]})
+        web_ui._log_clear_state.update({"at": self._clear[0], "bytes": self._clear[1]})
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _battle_log(self, name="对战日志_20261008_120000.txt", size=1000):
@@ -64,7 +62,7 @@ class LogsRowTests(unittest.TestCase):
         self.assertEqual(log_overlay.MARKER_UNKNOWN, row["marker"])
 
     def test_small_logs_are_green(self):
-        row = log_overlay.logs_row({"bytes": 40 * 1024 ** 2, "files": 12})
+        row = log_overlay.logs_row({"bytes": 40 * 1024**2, "files": 12})
 
         self.assertEqual("40.0 MB", row["value"])
         self.assertEqual("12 个文件", row["detail"])
@@ -72,39 +70,49 @@ class LogsRowTests(unittest.TestCase):
         self.assertEqual(log_overlay.GREEN, row["value_color"])
 
     def test_mid_size_logs_are_warn(self):
-        row = log_overlay.logs_row({"bytes": 270 * 1024 ** 2, "files": 194})
+        row = log_overlay.logs_row({"bytes": 270 * 1024**2, "files": 194})
 
         self.assertEqual("270.0 MB", row["value"])
         self.assertEqual(log_overlay.WARN, row["marker"])
 
     def test_huge_logs_are_danger(self):
-        row = log_overlay.logs_row({"bytes": 2 * 1024 ** 3, "files": 900})
+        row = log_overlay.logs_row({"bytes": 2 * 1024**3, "files": 900})
 
         self.assertEqual(log_overlay.DANGER, row["marker"])
         self.assertEqual("2.0 GB", row["value"])
 
     def test_thresholds_come_from_the_caller(self):
-        row = log_overlay.logs_row({"bytes": 10 * 1024 ** 2, "files": 1,
-                                    "warn_bytes": 5 * 1024 ** 2,
-                                    "danger_bytes": 8 * 1024 ** 2})
+        row = log_overlay.logs_row(
+            {
+                "bytes": 10 * 1024**2,
+                "files": 1,
+                "warn_bytes": 5 * 1024**2,
+                "danger_bytes": 8 * 1024**2,
+            }
+        )
 
         self.assertEqual(log_overlay.DANGER, row["marker"])
 
     def test_recent_clear_is_flashed_in_the_detail(self):
         now = time.time()
-        row = log_overlay.logs_row({"bytes": 0, "files": 0,
-                                    "cleared_at": now - 1.0,
-                                    "cleared_bytes": 270 * 1024 ** 2},
-                                   now=now)
+        row = log_overlay.logs_row(
+            {
+                "bytes": 0,
+                "files": 0,
+                "cleared_at": now - 1.0,
+                "cleared_bytes": 270 * 1024**2,
+            },
+            now=now,
+        )
 
         self.assertEqual("已清理 270.0 MB", row["detail"])
 
     def test_old_clear_goes_back_to_the_file_count(self):
         now = time.time()
-        row = log_overlay.logs_row({"bytes": 0, "files": 0,
-                                    "cleared_at": now - 60.0,
-                                    "cleared_bytes": 123},
-                                   now=now)
+        row = log_overlay.logs_row(
+            {"bytes": 0, "files": 0, "cleared_at": now - 60.0, "cleared_bytes": 123},
+            now=now,
+        )
 
         self.assertEqual("0 个文件", row["detail"])
 
@@ -135,8 +143,8 @@ class SnapshotTests(TempLogsCase):
         cached = web_ui._script_logs_snapshot()
         forced = web_ui._script_logs_snapshot(force=True)
 
-        self.assertEqual(first["bytes"], cached["bytes"])     # 还是旧结果
-        self.assertEqual(30, forced["bytes"])                 # 强制重扫
+        self.assertEqual(first["bytes"], cached["bytes"])  # 还是旧结果
+        self.assertEqual(30, forced["bytes"])  # 强制重扫
 
     def test_invalidate_makes_the_next_read_fresh(self):
         self._battle_log(size=10)
@@ -148,8 +156,9 @@ class SnapshotTests(TempLogsCase):
         self.assertEqual(30, web_ui._script_logs_snapshot()["bytes"])
 
     def test_overlay_callback_survives_a_broken_scanner(self):
-        with patch.object(web_ui, "_script_logs_snapshot",
-                          side_effect=RuntimeError("磁盘挂了")):
+        with patch.object(
+            web_ui, "_script_logs_snapshot", side_effect=RuntimeError("磁盘挂了")
+        ):
             self.assertIsNone(web_ui._overlay_logs())
 
 
@@ -161,8 +170,9 @@ class OverlayLogActionsTests(TempLogsCase):
             self.assertTrue(web_ui._overlay_clear_logs())
 
         thread_cls.assert_called_once()
-        self.assertIs(web_ui._clear_script_logs_worker,
-                      thread_cls.call_args.kwargs["target"])
+        self.assertIs(
+            web_ui._clear_script_logs_worker, thread_cls.call_args.kwargs["target"]
+        )
         self.assertTrue(thread_cls.call_args.kwargs["daemon"])
 
     def test_clear_worker_deletes_and_reports(self):
@@ -170,9 +180,11 @@ class OverlayLogActionsTests(TempLogsCase):
         self.runtime.write_text("r" * 1000, encoding="utf-8")
         logged = []
 
-        with patch.object(web_ui, "_log",
-                          side_effect=lambda level, msg: logged.append(
-                              (level, str(msg)))):
+        with patch.object(
+            web_ui,
+            "_log",
+            side_effect=lambda level, msg: logged.append((level, str(msg))),
+        ):
             web_ui._clear_script_logs_worker()
 
         self.assertFalse(self.runtime.exists())
@@ -186,9 +198,11 @@ class OverlayLogActionsTests(TempLogsCase):
     def test_clear_worker_says_when_there_is_nothing_to_clear(self):
         logged = []
 
-        with patch.object(web_ui, "_log",
-                          side_effect=lambda level, msg: logged.append(
-                              (level, str(msg)))):
+        with patch.object(
+            web_ui,
+            "_log",
+            side_effect=lambda level, msg: logged.append((level, str(msg))),
+        ):
             web_ui._clear_script_logs_worker()
 
         self.assertEqual([("SYS", "已无可清理的脚本日志。")], logged)
@@ -198,18 +212,28 @@ class OverlayLogActionsTests(TempLogsCase):
         logged = []
 
         def fake_clear(log_dir=None, runtime_log=None, logger=None):
-            return {"ok": False, "removed": 0, "freed_bytes": 0,
-                    "failed": ["对战日志_20261008_120000.txt"],
-                    "errors": ["PermissionError"], "skipped": []}
+            return {
+                "ok": False,
+                "removed": 0,
+                "freed_bytes": 0,
+                "failed": ["对战日志_20261008_120000.txt"],
+                "errors": ["PermissionError"],
+                "skipped": [],
+            }
 
-        with (patch.object(script_logs, "clear", side_effect=fake_clear),
-              patch.object(web_ui, "_log",
-                           side_effect=lambda level, msg: logged.append(
-                               (level, str(msg))))):
+        with (
+            patch.object(script_logs, "clear", side_effect=fake_clear),
+            patch.object(
+                web_ui,
+                "_log",
+                side_effect=lambda level, msg: logged.append((level, str(msg))),
+            ),
+        ):
             web_ui._clear_script_logs_worker()
 
-        self.assertTrue(any(level == "WARN" and "删不掉" in msg
-                            for level, msg in logged), logged)
+        self.assertTrue(
+            any(level == "WARN" and "删不掉" in msg for level, msg in logged), logged
+        )
 
     def test_open_logs_reports_the_paths_and_result(self):
         self._battle_log()
@@ -218,19 +242,23 @@ class OverlayLogActionsTests(TempLogsCase):
 
         def fake_open(log_dir=None, opener=None, runner=None):
             opened.append(log_dir)
-            return {"ok": True, "opened": "file", "target": "X",
-                    "error": ""}
+            return {"ok": True, "opened": "file", "target": "X", "error": ""}
 
-        with (patch.object(script_logs, "open_location",
-                           side_effect=fake_open),
-              patch.object(web_ui, "_log",
-                           side_effect=lambda level, msg: logged.append(
-                               (level, str(msg))))):
+        with (
+            patch.object(script_logs, "open_location", side_effect=fake_open),
+            patch.object(
+                web_ui,
+                "_log",
+                side_effect=lambda level, msg: logged.append((level, str(msg))),
+            ),
+        ):
             self.assertTrue(web_ui._overlay_open_logs())
 
         self.assertEqual([self.logs], opened)
-        self.assertTrue(any("已打开" in msg and str(self.logs) in msg
-                            for _level, msg in logged), logged)
+        self.assertTrue(
+            any("已打开" in msg and str(self.logs) in msg for _level, msg in logged),
+            logged,
+        )
 
     def test_open_logs_failure_is_a_warning(self):
         logged = []
@@ -238,10 +266,14 @@ class OverlayLogActionsTests(TempLogsCase):
         def fake_open(log_dir=None, opener=None, runner=None):
             return {"ok": False, "opened": None, "target": "", "error": "炸了"}
 
-        with (patch.object(script_logs, "open_location", side_effect=fake_open),
-              patch.object(web_ui, "_log",
-                           side_effect=lambda level, msg: logged.append(
-                               (level, str(msg))))):
+        with (
+            patch.object(script_logs, "open_location", side_effect=fake_open),
+            patch.object(
+                web_ui,
+                "_log",
+                side_effect=lambda level, msg: logged.append((level, str(msg))),
+            ),
+        ):
             self.assertFalse(web_ui._overlay_open_logs())
 
         self.assertEqual("WARN", logged[0][0])
@@ -249,8 +281,9 @@ class OverlayLogActionsTests(TempLogsCase):
 
 class OverlayKeyTests(unittest.TestCase):
     def test_log_lines_reach_the_overlay(self):
-        self.assertTrue(web_ui._overlay_key(
-            "已清理脚本日志：删除 193 个文件，释放 214.2 MB"))
+        self.assertTrue(
+            web_ui._overlay_key("已清理脚本日志：删除 193 个文件，释放 214.2 MB")
+        )
         self.assertTrue(web_ui._overlay_key("已打开最新一份对战日志：C:\\logs"))
 
     def test_ocr_spam_still_filtered(self):
@@ -276,8 +309,9 @@ class LogTrimTests(TempLogsCase):
             web_ui._log("SYS", "新日志")
 
         self.assertLessEqual(self.runtime.stat().st_size, web_ui.LOG_TRIM_BYTES)
-        self.assertIn("新日志",
-                      self.runtime.read_text(encoding="utf-8", errors="replace"))
+        self.assertIn(
+            "新日志", self.runtime.read_text(encoding="utf-8", errors="replace")
+        )
         self.assertFalse(self.runtime.with_suffix(".txt.tmp").exists())
 
     def test_trim_is_throttled_by_interval(self):
@@ -289,24 +323,27 @@ class LogTrimTests(TempLogsCase):
             calls.append((str(src), str(dst)))
             return real_replace(src, dst)
 
-        web_ui.LOG_TRIM_MIN_INTERVAL = 3600.0       # 本进程内只裁一次
-        with (patch.object(web_ui.os, "replace", fake_replace),
-              patch.object(web_ui, "_overlay_key", return_value=False)):
+        web_ui.LOG_TRIM_MIN_INTERVAL = 3600.0  # 本进程内只裁一次
+        with (
+            patch.object(web_ui.os, "replace", fake_replace),
+            patch.object(web_ui, "_overlay_key", return_value=False),
+        ):
             for index in range(5):
                 web_ui._log("SYS", f"第 {index} 行")
 
         self.assertEqual(1, len(calls))
 
     def test_small_runtime_log_is_left_alone(self):
-        with (patch.object(web_ui, "_overlay_key", return_value=False),
-              patch.object(web_ui.os, "replace") as replace):
+        with (
+            patch.object(web_ui, "_overlay_key", return_value=False),
+            patch.object(web_ui.os, "replace") as replace,
+        ):
             web_ui._log("SYS", "小日志")
 
         replace.assert_not_called()
 
     def test_trim_helper_returns_false_for_a_missing_file(self):
-        self.assertFalse(web_ui._trim_runtime_log(self.tmp / "nope.txt",
-                                                  time.time()))
+        self.assertFalse(web_ui._trim_runtime_log(self.tmp / "nope.txt", time.time()))
 
 
 class OverlayWiringTests(unittest.TestCase):
@@ -314,6 +351,7 @@ class OverlayWiringTests(unittest.TestCase):
 
     def test_start_accepts_the_log_callbacks(self):
         import inspect
+
         params = inspect.signature(log_overlay.start).parameters
         for name in ("logs_callback", "on_open_logs", "on_clear_logs"):
             self.assertIn(name, params)
@@ -336,9 +374,10 @@ class OverlayWiringTests(unittest.TestCase):
 
     def test_run_uses_the_log_row_and_confirms_before_clearing(self):
         import inspect
+
         source = inspect.getsource(log_overlay._run)
 
-        self.assertIn("_status_row(\"日志\")", source)
+        self.assertIn('_status_row("日志")', source)
         self.assertIn("logs_row(lg_info)", source)
         self.assertIn('_make_btn(btn_frame, "打开日志", NEUTRAL', source)
         self.assertIn('_make_btn(btn_frame, "清理日志", WARN', source)
@@ -349,8 +388,9 @@ class OverlayWiringTests(unittest.TestCase):
 
     def test_bind_overlay_passes_the_log_callbacks(self):
         bound = {}
-        overlay = SimpleNamespace(start=lambda **kwargs: bound.update(kwargs),
-                                  is_running=lambda: False)
+        overlay = SimpleNamespace(
+            start=lambda **kwargs: bound.update(kwargs), is_running=lambda: False
+        )
 
         with patch.object(web_ui, "log_overlay", overlay):
             web_ui._bind_overlay()
@@ -360,13 +400,34 @@ class OverlayWiringTests(unittest.TestCase):
         self.assertIs(bound["on_clear_logs"], web_ui._overlay_clear_logs)
 
     def test_confirm_dialog_text_mentions_both_files(self):
-        detail = log_overlay.confirm_clear_detail(193, "214.2 MB", "56.0 MB",
-                                                 "270.2 MB")
+        detail = log_overlay.confirm_clear_detail(
+            193, "214.2 MB", "56.0 MB", "270.2 MB"
+        )
 
         self.assertIn("193 个对战日志", detail)
         self.assertIn("214.2 MB", detail)
         self.assertIn("ui_log_last.txt", detail)
         self.assertIn("270.2 MB", detail)
+
+    def test_confirm_dialog_warns_about_error_archives(self):
+        # 有出错存档时，必须把「会删掉未导出的错误截图/日志」的危害写清楚。
+        detail = log_overlay.confirm_clear_detail(
+            10,
+            "10.0 MB",
+            "1.0 MB",
+            "29.0 MB",
+            feedback_count=12,
+            feedback_size="18.0 MB",
+        )
+        self.assertIn("出错存档", detail)
+        self.assertIn("12 份", detail)
+        self.assertIn("18.0 MB", detail)
+        self.assertIn("无法恢复", detail)
+        self.assertIn("建议先", detail)
+
+    def test_confirm_without_archives_no_danger_line(self):
+        detail = log_overlay.confirm_clear_detail(1, "1.0 MB", "0 B", "1.0 MB")
+        self.assertNotIn("出错存档", detail)
 
 
 if __name__ == "__main__":

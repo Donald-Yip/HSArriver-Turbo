@@ -38,6 +38,8 @@ log/hs_serve_elevated.cmd
 .tmp-tests/
 .workbuddy/
 log/
+# 脚本自写日志与出错反馈包（对战日志 .txt/.jsonl、反馈_*.zip、截图）都是本机产物
+logs/
 out.jpg
 snapshot_live.jpg
 __pycache__/

@@ -23,7 +23,7 @@ class _FakeThread:
         self._target = target
 
     def start(self):
-        return None       # 不真的开 Tk 窗口
+        return None  # 不真的开 Tk 窗口
 
 
 class AccountEyeToggleTests(unittest.TestCase):
@@ -76,8 +76,9 @@ class AccountEyeToggleTests(unittest.TestCase):
             patch.object(log_overlay.threading, "Thread", _FakeThread),
         ):
             log_overlay._STARTED[0] = False
-            log_overlay.start(account_visible_setting=False,
-                              on_toggle_account=lambda _v: None)
+            log_overlay.start(
+                account_visible_setting=False, on_toggle_account=lambda _v: None
+            )
 
         self.assertFalse(log_overlay.account_visible())
 
@@ -85,14 +86,23 @@ class AccountEyeToggleTests(unittest.TestCase):
         """隐藏账号时行内容：不泄露昵称、但保留匹配/不匹配的结论与告警色。"""
         cases = (
             # (info, show_account, 期望 value/color/marker, detail 里不该出现的)
-            ({"config": "TestUser#12345",
-              "players": {"1": "TestUser#12345", "2": "Other#2"},
-              "matched": True}, False,
-             ("匹配", log_overlay.MARKER_ON), "TestUser"),
-            ({"config": "Old#1", "players": {"1": "New#2"}, "matched": False},
-             False, ("不匹配", log_overlay.MARKER_OFF), "New#2"),
-            ({"config": "", "players": {}, "matched": None}, False,
-             ("—", None), None),
+            (
+                {
+                    "config": "TestUser#12345",
+                    "players": {"1": "TestUser#12345", "2": "Other#2"},
+                    "matched": True,
+                },
+                False,
+                ("匹配", log_overlay.MARKER_ON),
+                "TestUser",
+            ),
+            (
+                {"config": "Old#1", "players": {"1": "New#2"}, "matched": False},
+                False,
+                ("不匹配", log_overlay.MARKER_OFF),
+                "New#2",
+            ),
+            ({"config": "", "players": {}, "matched": None}, False, ("—", None), None),
         )
         for info, show_account, (value, marker), leaked in cases:
             with self.subTest(value=value, show_account=show_account):
@@ -103,20 +113,24 @@ class AccountEyeToggleTests(unittest.TestCase):
                     self.assertEqual(marker, row["marker"])
                 if leaked is not None:
                     self.assertNotIn(leaked, row["detail"])
-                    self.assertEqual(log_overlay._ACCOUNT_HIDDEN_TEXT,
-                                     row["detail"])
+                    self.assertEqual(log_overlay._ACCOUNT_HIDDEN_TEXT, row["detail"])
 
         self.assertEqual(
             log_overlay.DANGER,
             log_overlay.account_row(
-                {"config": "Old#1", "players": {"1": "New#2"},
-                 "matched": False},
-                show_account=False)["value_color"])
+                {"config": "Old#1", "players": {"1": "New#2"}, "matched": False},
+                show_account=False,
+            )["value_color"],
+        )
 
         visible = log_overlay.account_row(
-            {"config": "TestUser#12345",
-             "players": {"1": "TestUser#12345"}, "matched": True},
-            show_account=True)
+            {
+                "config": "TestUser#12345",
+                "players": {"1": "TestUser#12345"},
+                "matched": True,
+            },
+            show_account=True,
+        )
         self.assertEqual("TestUser#12345", visible["detail"])
 
     def test_eye_is_rendered_and_clickable(self):
@@ -134,10 +148,17 @@ class AccountPreferencePersistenceTests(unittest.TestCase):
         self.path = Path(self._tmp.name) / "ui_config.json"
         self._saved_path = config.CONFIG_PATH
         config.CONFIG_PATH = self.path
-        self.path.write_text(json.dumps(
-            {"name": "TestUser#12345", "log_root": "D:\\Logs",
-             "auto_concede": {"enabled": True, "threshold": 20.0, "rounds": 3}},
-            ensure_ascii=False), encoding="utf-8")
+        self.path.write_text(
+            json.dumps(
+                {
+                    "name": "TestUser#12345",
+                    "log_root": "D:\\Logs",
+                    "auto_concede": {"enabled": True, "threshold": 20.0, "rounds": 3},
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     def tearDown(self):
         config.CONFIG_PATH = self._saved_path
@@ -176,24 +197,35 @@ class AccountPreferencePersistenceTests(unittest.TestCase):
         self.assertFalse(web_ui._overlay_account_visible())
 
         bound = {}
-        overlay = type("O", (), {
-            "start": lambda self, **kwargs: bound.update(kwargs),
-            "is_running": lambda self: False})()
+        overlay = type(
+            "O",
+            (),
+            {
+                "start": lambda self, **kwargs: bound.update(kwargs),
+                "is_running": lambda self: False,
+            },
+        )()
 
         with patch.object(web_ui, "log_overlay", overlay):
             web_ui._bind_overlay()
 
         self.assertIn("account_visible_setting", bound)
         self.assertIn("on_toggle_account", bound)
-        self.assertIs(bound["on_toggle_account"],
-                      web_ui._overlay_save_account_visible)
+        self.assertIs(bound["on_toggle_account"], web_ui._overlay_save_account_visible)
 
 
 class LogColorTests(unittest.TestCase):
     def test_colors_come_from_the_existing_palette(self):
-        palette = {log_overlay.GREEN, log_overlay.ACCENT, log_overlay.GOLD,
-                   log_overlay.WARN, log_overlay.DANGER, log_overlay.TEXT,
-                   log_overlay.DIM, log_overlay.OK}
+        palette = {
+            log_overlay.GREEN,
+            log_overlay.ACCENT,
+            log_overlay.GOLD,
+            log_overlay.WARN,
+            log_overlay.DANGER,
+            log_overlay.TEXT,
+            log_overlay.DIM,
+            log_overlay.OK,
+        }
         for tag, color in log_overlay.LOG_TAG_COLORS.items():
             self.assertIn(color, palette, tag)
 
@@ -217,9 +249,11 @@ class LogColorTests(unittest.TestCase):
 
     def test_error_and_alerts_are_the_highlighted_tag(self):
         """ERROR 与 ⚠️ 都算“必须马上看见”，用红色加粗。"""
-        for line in ("[12:04:57 ERROR] 自动化线程异常退出",
-                     "[12:04:57 ERROR] ⚠️ 炉石已退出：Hearthstone.exe 进程消失",
-                     "[12:04:58 WARN] ⚠️ 用户 ID 与日志玩家名不匹配……"):
+        for line in (
+            "[12:04:57 ERROR] 自动化线程异常退出",
+            "[12:04:57 ERROR] ⚠️ 炉石已退出：Hearthstone.exe 进程消失",
+            "[12:04:58 WARN] ⚠️ 用户 ID 与日志玩家名不匹配……",
+        ):
             self.assertEqual("alert", log_overlay.log_line_tag(line), line)
 
     def test_renderer_uses_the_tag_function_and_configures_every_tag(self):
@@ -237,10 +271,11 @@ class ButtonLayoutTests(unittest.TestCase):
         for key, (row, column) in log_overlay.BTN_LAYOUT.items():
             rows.setdefault(row, []).append(column)
 
-        # 6 行：开始/中止、本局结束后停止、校准/保存日志、打开日志/清理日志、
-        # 重启炉石/退出浮窗、退出脚本（横跨整行）。
-        self.assertEqual({0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0, 1],
-                          5: [0]}, rows)
+        # 7 行：开始/中止、本局结束后停止、校准/保存日志、打开日志/清理日志、
+        # 导出反馈（横跨整行）、重启炉石/退出浮窗、退出脚本（横跨整行）。
+        self.assertEqual(
+            {0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0], 5: [0, 1], 6: [0]}, rows
+        )
         for columns in rows.values():
             self.assertLessEqual(len(columns), 2)
 
@@ -251,8 +286,9 @@ class ButtonLayoutTests(unittest.TestCase):
         # 新增的日志行插在「校准/保存日志」与「重启炉石/退出浮窗」之间。
         self.assertEqual(log_overlay.BTN_LAYOUT["open_logs"], (3, 0))
         self.assertEqual(log_overlay.BTN_LAYOUT["clear_logs"], (3, 1))
-        self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (4, 0))
-        self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (4, 1))
+        self.assertEqual(log_overlay.BTN_LAYOUT["export_feedback"], (4, 0))
+        self.assertEqual(log_overlay.BTN_LAYOUT["restart"], (5, 0))
+        self.assertEqual(log_overlay.BTN_LAYOUT["exit_overlay"], (5, 1))
         self.assertNotIn("restart", log_overlay.BTN_SPAN)
         self.assertNotIn("exit_overlay", log_overlay.BTN_SPAN)
         slots = list(log_overlay.BTN_LAYOUT.values())
@@ -260,8 +296,9 @@ class ButtonLayoutTests(unittest.TestCase):
 
     def test_destructive_buttons_guard_themselves(self):
         """退出浮窗 ≠ 退出脚本；重启炉石/清理日志都必须先确认。"""
-        self.assertNotEqual(log_overlay.BTN_LAYOUT["exit_overlay"],
-                            log_overlay.BTN_LAYOUT["exit"])
+        self.assertNotEqual(
+            log_overlay.BTN_LAYOUT["exit_overlay"], log_overlay.BTN_LAYOUT["exit"]
+        )
         source = inspect.getsource(log_overlay._run)
         self.assertIn('_make_btn(btn_frame, "退出浮窗", NEUTRAL', source)
         self.assertIn('_make_btn(btn_frame, "退出脚本", DANGER', source)
@@ -284,8 +321,7 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertIn('attributes("-topmost", True)', confirm)
         self.assertIn("Hearthstone.exe", log_overlay.CONFIRM_RESTART_DETAIL)
         self.assertIn("Log.config", log_overlay.CONFIRM_RESTART_DETAIL)
-        self.assertEqual("⚠  中止炉石并清空日志？",
-                         log_overlay.CONFIRM_RESTART_TITLE)
+        self.assertEqual("⚠  中止炉石并清空日志？", log_overlay.CONFIRM_RESTART_TITLE)
 
         clear = source.split("def _call_clear_logs", 1)[1]
         clear = clear.split("clear_logs_btn = ", 1)[0]
@@ -299,21 +335,39 @@ class ButtonLayoutTests(unittest.TestCase):
         「排版美观」的一部分：按钮/标题/延时行一律纯文字，别再放这些图标。
         """
         source = inspect.getsource(log_overlay._run)
-        for glyph in ("▶", "⏹", "⏸", "💾", "♻", "🚪", "✖", "📊", "⏳", "▁",
-                      "▣", "✓", "✗"):
+        for glyph in (
+            "▶",
+            "⏹",
+            "⏸",
+            "💾",
+            "♻",
+            "🚪",
+            "✖",
+            "📊",
+            "⏳",
+            "▁",
+            "▣",
+            "✓",
+            "✗",
+        ):
             self.assertNotIn(glyph, source)
 
     def test_spanning_rows(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
         row, _column = log_overlay.BTN_LAYOUT["exit"]
-        rows = [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
-                if key != "exit"]
+        rows = [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items() if key != "exit"]
         self.assertEqual(max(rows) + 1, row)
 
         self.assertEqual(2, log_overlay.BTN_SPAN["stop_after"])
         row, _column = log_overlay.BTN_LAYOUT["stop_after"]
-        self.assertNotIn(row, [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
-                               if key != "stop_after"])
+        self.assertNotIn(
+            row,
+            [
+                r
+                for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
+                if key != "stop_after"
+            ],
+        )
 
     def test_window_metrics_and_grid_helpers(self):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
@@ -322,11 +376,10 @@ class ButtonLayoutTests(unittest.TestCase):
         # 用户要求收窄 10%（292 → 263）：说明放不下靠换行，不许再靠加宽窗口
         # （加宽到 300 被用户打回："整个浮窗又变宽了"）。
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertLessEqual(log_overlay.WINDOW_WIDTH,
-                             int(292 * 0.9) + 1)
+        self.assertLessEqual(log_overlay.WINDOW_WIDTH, int(292 * 0.9) + 1)
         # 654 - 17（删副标题）→ 637；再 +56 给「日志」状态行与「打开日志/
-        # 清理日志」按钮行，日志正文仍是 9 行左右。
-        self.assertEqual(693, log_overlay.WINDOW_HEIGHT)
+        # 清理日志」按钮行，+30 给「导出反馈」按钮行，+49 给「窗口宽度」滑条行。
+        self.assertEqual(772, log_overlay.WINDOW_HEIGHT)
 
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)
@@ -339,10 +392,11 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertIn('marker.pack(side="left", padx=_marker_pad()', source)
         self.assertIn('name.pack(side="left"', source)
         self.assertIn('value.pack(side="left"', source)
-        self.assertIn('detail.pack(side="left", fill="x", expand=True',
-                      source)
+        # 说明列可能被格式化器折成多行，先把空白归一化再断言（换行不该让测试挂掉）。
+        flat = " ".join(source.split())
+        self.assertIn('detail.pack( side="left", fill="x", expand=True', flat)
         self.assertNotIn('detail.pack(side="right"', source)
-        self.assertNotIn("justify=\"right\"", source)
+        self.assertNotIn('justify="right"', source)
 
     def test_status_rows_wrap_instead_of_being_clipped(self):
         """说明列按 wraplength 换行：绝不再被窗口右边缘切掉。"""
@@ -355,31 +409,40 @@ class ButtonLayoutTests(unittest.TestCase):
         # 263 宽、圆点 25 + 名称 50 + 间距/内边距 22、数值 39 → 127
         self.assertEqual(127, log_overlay.detail_wrap_px(263, 136))
         # 空间被挤光时也不能变成 0（否则换行会碎成一列单字）
-        self.assertEqual(log_overlay._DETAIL_MIN_PX,
-                         log_overlay.detail_wrap_px(263, 400))
-        self.assertEqual(log_overlay._DETAIL_MIN_PX,
-                         log_overlay.detail_wrap_px(10, 0))
+        self.assertEqual(
+            log_overlay._DETAIL_MIN_PX, log_overlay.detail_wrap_px(263, 400)
+        )
+        self.assertEqual(log_overlay._DETAIL_MIN_PX, log_overlay.detail_wrap_px(10, 0))
 
     def test_overlay_can_be_minimized_to_a_title_bar(self):
         """最小化 = 折叠成标题条（浮窗是 TOOLWINDOW，iconify 之后无法还原）。"""
-        self.assertLess(log_overlay.MINIMIZED_HEIGHT,
-                        log_overlay.WINDOW_HEIGHT)
+        self.assertLess(log_overlay.MINIMIZED_HEIGHT, log_overlay.WINDOW_HEIGHT)
         self.assertEqual(
             f"{log_overlay.WINDOW_WIDTH}x{log_overlay.MINIMIZED_HEIGHT}+8+9",
-            log_overlay.minimized_geometry(log_overlay.WINDOW_WIDTH,
-                                           log_overlay.WINDOW_HEIGHT,
-                                           8, 9, collapsed=True))
+            log_overlay.minimized_geometry(
+                log_overlay.WINDOW_WIDTH,
+                log_overlay.WINDOW_HEIGHT,
+                8,
+                9,
+                collapsed=True,
+            ),
+        )
         self.assertEqual(
             f"{log_overlay.WINDOW_WIDTH}x{log_overlay.WINDOW_HEIGHT}+8+9",
-            log_overlay.minimized_geometry(log_overlay.WINDOW_WIDTH,
-                                           log_overlay.WINDOW_HEIGHT,
-                                           8, 9, collapsed=False))
+            log_overlay.minimized_geometry(
+                log_overlay.WINDOW_WIDTH,
+                log_overlay.WINDOW_HEIGHT,
+                8,
+                9,
+                collapsed=False,
+            ),
+        )
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _set_collapsed(flag)", source)
         self.assertIn("MINIMIZE_TEXT", source)
         self.assertIn("RESTORE_TEXT", source)
         self.assertIn("content.pack_forget()", source)
-        self.assertIn("mini_bar.pack(fill=\"x\")", source)
+        self.assertIn('mini_bar.pack(fill="x")', source)
 
     def test_minimize_button_is_plain_text_not_a_stray_glyph(self):
         """用户反馈「▁ 最小化」太丑：别再拿块状字形当按钮。"""
@@ -391,7 +454,7 @@ class ButtonLayoutTests(unittest.TestCase):
 
     def test_details_are_fitted_by_real_font_width(self):
         """fit_text：放得下原样返回，放不下按字符截断加省略号。"""
-        measure = lambda text: 10 * len(text)          # noqa: E731
+        measure = lambda text: 10 * len(text)  # noqa: E731
 
         self.assertEqual("连  续", log_overlay.fit_text("连  续", 200, measure))
         self.assertEqual("", log_overlay.fit_text("", 50, measure))
@@ -400,8 +463,7 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertTrue(fitted.endswith("…"))
         self.assertLessEqual(measure(fitted), 45)
         # 截断点上正好落着一个省略号：只能留一个，不能变成「一二……」。
-        self.assertEqual("一二…",
-                         log_overlay.fit_text("一二…三四五六", 45, measure))
+        self.assertEqual("一二…", log_overlay.fit_text("一二…三四五六", 45, measure))
 
 
 if __name__ == "__main__":

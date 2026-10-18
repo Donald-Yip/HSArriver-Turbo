@@ -44,7 +44,8 @@ class ComputeUiScaleTests(unittest.TestCase):
     def test_zero_or_unreadable_dpi_falls_back_to_one(self):
         self.assertEqual(1.0, log_overlay.compute_ui_scale(_FakeRoot(0)))
         self.assertEqual(
-            1.0, log_overlay.compute_ui_scale(_FakeRoot(RuntimeError("x"))))
+            1.0, log_overlay.compute_ui_scale(_FakeRoot(RuntimeError("x")))
+        )
 
 
 class PxTests(unittest.TestCase):
@@ -60,7 +61,7 @@ class PxTests(unittest.TestCase):
         self.assertEqual(8, log_overlay.px(8))
 
     def test_scales_with_the_current_factor(self):
-        self.assertEqual(395, log_overlay.px(263, 1.5))   # 263 * 1.5 = 394.5 → 395
+        self.assertEqual(395, log_overlay.px(263, 1.5))  # 263 * 1.5 = 394.5 → 395
         self.assertEqual(12, log_overlay.px(8, 1.5))
         self.assertEqual(526, log_overlay.px(263, 2.0))
 
@@ -69,10 +70,10 @@ class PxTests(unittest.TestCase):
         self.assertEqual(104, log_overlay.px(69))  # 103.5 → 104
 
     def test_never_returns_zero_or_negative(self):
-        self.assertEqual(1, log_overlay.px(0, 1.5))   # 0px 设计值也至少占 1px
-        self.assertEqual(1, log_overlay.px(1, 0.0))   # 极端缩放也不会塌成 0
-        self.assertEqual(2, log_overlay.px(1, 1.5))   # 1.5px 半像素正常进位
-        self.assertEqual(1, log_overlay.px(1, 1.0))   # 100% 下逐像素一致
+        self.assertEqual(1, log_overlay.px(0, 1.5))  # 0px 设计值也至少占 1px
+        self.assertEqual(1, log_overlay.px(1, 0.0))  # 极端缩放也不会塌成 0
+        self.assertEqual(2, log_overlay.px(1, 1.5))  # 1.5px 半像素正常进位
+        self.assertEqual(1, log_overlay.px(1, 1.0))  # 100% 下逐像素一致
 
     def test_garbage_input_falls_back_to_one(self):
         # 数值字符串能转就照常缩放；真转不了的（None 等）退回 1px，绝不炸开窗。
@@ -84,22 +85,31 @@ class MinimizedGeometryTests(unittest.TestCase):
     def test_collapsed_uses_the_passed_min_height(self):
         self.assertEqual(
             "395x51+8+9",
-            log_overlay.minimized_geometry(395, 1040, 8, 9, collapsed=True,
-                                           min_height=51))
+            log_overlay.minimized_geometry(
+                395, 1040, 8, 9, collapsed=True, min_height=51
+            ),
+        )
 
     def test_expanded_ignores_the_min_height(self):
         self.assertEqual(
             "395x1040+8+9",
-            log_overlay.minimized_geometry(395, 1040, 8, 9, collapsed=False,
-                                           min_height=51))
+            log_overlay.minimized_geometry(
+                395, 1040, 8, 9, collapsed=False, min_height=51
+            ),
+        )
 
     def test_default_stays_the_design_value(self):
         # 不传 min_height 时与旧行为一致（96 DPI 基准，测试锁的口径）。
         self.assertEqual(
             f"{log_overlay.WINDOW_WIDTH}x{log_overlay.MINIMIZED_HEIGHT}+8+9",
-            log_overlay.minimized_geometry(log_overlay.WINDOW_WIDTH,
-                                           log_overlay.WINDOW_HEIGHT, 8, 9,
-                                           collapsed=True))
+            log_overlay.minimized_geometry(
+                log_overlay.WINDOW_WIDTH,
+                log_overlay.WINDOW_HEIGHT,
+                8,
+                9,
+                collapsed=True,
+            ),
+        )
 
 
 class WindowWiringTests(unittest.TestCase):
@@ -120,13 +130,13 @@ class WindowWiringTests(unittest.TestCase):
 
     def test_detail_wrap_uses_the_scaled_window_width(self):
         source = inspect.getsource(log_overlay._run)
-        self.assertIn("detail_wrap_px(\n                px(WINDOW_WIDTH),",
-                      source)
+        self.assertIn("detail_wrap_px(\n                px(WINDOW_WIDTH),", source)
 
     def test_base_constants_keep_the_design_values(self):
-        # 263/693/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
+        # 263/772/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
+        # （723 → 772：新增「炉石窗口宽度」滑条行。）
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertEqual(693, log_overlay.WINDOW_HEIGHT)
+        self.assertEqual(772, log_overlay.WINDOW_HEIGHT)
         self.assertEqual(34, log_overlay.MINIMIZED_HEIGHT)
         self.assertEqual(1.0, log_overlay.UI_SCALE)
 
