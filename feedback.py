@@ -58,6 +58,12 @@ FEEDBACK_NAME_SUFFIX = "错误反馈"
 UNKNOWN_RECOMMENDATION = "未知推荐"
 # 包名里推荐摘要最长多少个字（太长会顶爆文件名）。
 MAX_RECO_NAME_LEN = 24
+# 只有真正在回合内才自动截图（阶段标签来自 web_ui 的阶段监测）：
+#   * 我方出牌 / 对手回合：对局进行中，截图有排查价值；
+#   * 大厅、匹配、换牌、结算：只记录错误文本，不截图。
+# 换牌阶段（"换牌"）按用户 2026-10-23 口径不算“回合内”。
+CAPTURE_PHASES = ("我方出牌", "对手回合")
+CAPTURE_SKIPPED_NOT_IN_TURN = "not_in_turn"
 # 错误报告文件名（zip 内）。
 REPORT_TEXT_NAME = "错误报告.txt"
 REPORT_JSON_NAME = "errors.json"
@@ -218,6 +224,16 @@ def wait_idle(timeout: float = 3.0) -> bool:
 
 
 # ---------------------------------------------------------------- 事件
+def _capture_allowed(ctx: Optional[dict]) -> bool:
+    """当前阶段是否允许自动截图（只在回合内）。
+
+    `ctx` 由 web_ui 传入，`phase` 是阶段监测写的中文标签。缺阶段/未知阶段
+    一律不截图：宁可少一张图，也不在大厅/结算里截无关画面。
+    """
+    phase = str((ctx or {}).get("phase") or "").strip()
+    return phase in CAPTURE_PHASES
+
+
 def note_event(
     info: dict, ctx: Optional[dict] = None, now: Optional[float] = None
 ) -> Optional[dict]:
@@ -230,6 +246,7 @@ def note_event(
     settings = _settings()
     now = time.time() if now is None else float(now)
     ctx = ctx or {}
+    capture_allowed = _capture_allowed(ctx)
     kind = str(info.get("kind") or "")
     if kind not in ("retry", "error", "warn"):
         return None
@@ -264,6 +281,8 @@ def note_event(
             should_record = capture
         if not should_record:
             return None
+        if not capture_allowed:
+            capture = False
 
         incident = {
             "index": len(_INCIDENTS) + 1,
@@ -278,6 +297,8 @@ def note_event(
             "detail": detail,
             "screenshots": [],
             "folder": None,
+            "capture_skipped": (None if capture_allowed
+                                else CAPTURE_SKIPPED_NOT_IN_TURN),
         }
         _INCIDENTS.append(incident)
 
@@ -449,6 +470,8 @@ def _incident_text(incident: dict) -> str:
         out.append(f"详情    {incident['detail']}")
     if incident.get("screenshots"):
         out.append(f"截图    {SHOT_FILENAME}")
+    elif incident.get("capture_skipped") == CAPTURE_SKIPPED_NOT_IN_TURN:
+        out.append("截图    （非回合内，按设置不截图）")
     else:
         out.append("截图    （未截到）")
     return "\n".join(out) + "\n"
@@ -540,6 +563,8 @@ def build_report_text(items, meta: Optional[dict] = None) -> str:
         if shots:
             for shot in shots:
                 out.append(f"  截图    {shot}")
+        elif item.get("capture_skipped") == CAPTURE_SKIPPED_NOT_IN_TURN:
+            out.append("  截图    （非回合内，按设置不截图）")
         else:
             out.append("  截图    （未截到，可能已截图节流/达上限或炉石不可见）")
         out.append("")

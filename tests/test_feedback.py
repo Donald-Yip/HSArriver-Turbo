@@ -70,12 +70,13 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual([], self.calls)
 
     def test_retry_at_threshold_records_once_and_captures(self):
+        ctx = {"turn": 3, "phase": "我方出牌"}
         with self._settings():
-            feedback.note_event(retry_info(), now=1.0)
-            feedback.note_event(retry_info(), now=2.0)
-            hit = feedback.note_event(retry_info(), now=3.0)
+            feedback.note_event(retry_info(), ctx=ctx, now=1.0)
+            feedback.note_event(retry_info(), ctx=ctx, now=2.0)
+            hit = feedback.note_event(retry_info(), ctx=ctx, now=3.0)
             # 继续重试不再重复记账。
-            self.assertIsNone(feedback.note_event(retry_info(), now=4.0))
+            self.assertIsNone(feedback.note_event(retry_info(), ctx=ctx, now=4.0))
         self.assertIsNotNone(hit)
         self.assertEqual(3, hit["retries"])
         self.assertEqual(1, len(feedback.incidents()))
@@ -93,7 +94,9 @@ class FeedbackTests(unittest.TestCase):
 
     def test_error_records_and_captures_immediately(self):
         with self._settings():
-            hit = feedback.note_event(error_info("invalid_entity"), now=1.0)
+            hit = feedback.note_event(
+                error_info("invalid_entity"),
+                ctx={"turn": 2, "phase": "我方出牌"}, now=1.0)
         self.assertIsNotNone(hit)
         self.assertEqual("error", hit["type"])
         self.assertIn("invalid_entity", hit["detail"])
@@ -105,24 +108,27 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual([], feedback.incidents())
 
     def test_throttle_skips_second_retry_capture(self):
+        ctx = {"turn": 2, "phase": "对手回合"}
         with self._settings(throttle_seconds=10.0, retry_threshold=1):
-            feedback.note_event(retry_info("a"), now=1_700_000_000.0)
-            feedback.note_event(retry_info("b"), now=1_700_000_001.0)
+            feedback.note_event(retry_info("a"), ctx=ctx, now=1_700_000_000.0)
+            feedback.note_event(retry_info("b"), ctx=ctx, now=1_700_000_001.0)
         # 两条都记账，但只有第一条截了图（第二条在节流窗口内被挡）。
         self.assertEqual(2, len(feedback.incidents()))
         self.assertEqual(1, len(self.calls))
 
     def test_error_bypasses_throttle(self):
         # 出错一定要留图：报错不受 10s 节流限制。
+        ctx = {"turn": 2, "phase": "我方出牌"}
         with self._settings(throttle_seconds=10.0):
-            feedback.note_event(error_info("a"), now=1_700_000_000.0)
-            feedback.note_event(error_info("b"), now=1_700_000_001.0)
+            feedback.note_event(error_info("a"), ctx=ctx, now=1_700_000_000.0)
+            feedback.note_event(error_info("b"), ctx=ctx, now=1_700_000_001.0)
         self.assertEqual(2, len(self.calls))
 
     def test_max_shots_cap(self):
+        ctx = {"turn": 2, "phase": "我方出牌"}
         with self._settings(max_shots_per_run=1, throttle_seconds=0.0):
-            feedback.note_event(error_info("a"), now=1.0)
-            feedback.note_event(error_info("b"), now=2.0)
+            feedback.note_event(error_info("a"), ctx=ctx, now=1.0)
+            feedback.note_event(error_info("b"), ctx=ctx, now=2.0)
         self.assertEqual(1, len(self.calls))
 
     def test_context_is_carried_into_incident(self):
@@ -137,6 +143,33 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(4, hit["turn"])
         self.assertEqual("对局", hit["phase"])
         self.assertEqual("打出1号位随从", hit["instruction"])
+
+    def test_error_outside_a_turn_is_recorded_but_not_captured(self):
+        for phase in ("对局结束", "未对局", "换牌", "匹配", ""):
+            with self.subTest(phase=phase):
+                self.calls.clear()
+                with self._settings():
+                    hit = feedback.note_event(
+                        error_info("boom"),
+                        ctx={"turn": 2, "phase": phase}, now=1.0)
+                self.assertIsNotNone(hit)
+                self.assertEqual([], hit["screenshots"])
+                self.assertEqual(
+                    feedback.CAPTURE_SKIPPED_NOT_IN_TURN,
+                    hit["capture_skipped"])
+                self.assertEqual([], self.calls)
+
+    def test_retry_outside_a_turn_never_captures(self):
+        with self._settings(retry_threshold=1):
+            hit = feedback.note_event(
+                retry_info("recommendation_changed"),
+                ctx={"turn": 2, "phase": "换牌"}, now=1.0)
+
+        self.assertIsNotNone(hit)
+        self.assertEqual([], hit["screenshots"])
+        self.assertEqual(
+            feedback.CAPTURE_SKIPPED_NOT_IN_TURN, hit["capture_skipped"])
+        self.assertEqual([], self.calls)
 
 
 class ReportTests(unittest.TestCase):
@@ -214,7 +247,9 @@ class ExportTests(unittest.TestCase):
                 "auto_export_on_stop": False,
             },
         ):
-            feedback.note_event(error_info("boom"), now=1.0)
+            feedback.note_event(
+                error_info("boom"),
+                ctx={"turn": 2, "phase": "我方出牌"}, now=1.0)
 
     def tearDown(self):
         self._dir_patch.stop()
@@ -330,7 +365,8 @@ class ExportOpenTests(unittest.TestCase):
         ):
             feedback.note_event(
                 error_info("boom"),
-                ctx={"turn": 2, "instruction": "打出1号位随从"},
+                ctx={"turn": 2, "phase": "我方出牌",
+                     "instruction": "打出1号位随从"},
                 now=1_700_000_000.0,
             )
 
@@ -401,7 +437,8 @@ class ArchiveTests(unittest.TestCase):
         with self._settings():
             feedback.note_event(
                 error_info("invalid_entity"),
-                ctx={"turn": 2, "instruction": "打出1号位随从"},
+                ctx={"turn": 2, "phase": "我方出牌",
+                     "instruction": "打出1号位随从"},
                 now=1_766_000_000.0,
             )
         folders = self._folders()
