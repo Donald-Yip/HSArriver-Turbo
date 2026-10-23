@@ -8,7 +8,7 @@
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
   * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-十三個可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
+十三个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
 | # | 目标 | 写入 ui_config.json | 对齐方法 |
 | --- | --- | --- | --- |
@@ -23,11 +23,14 @@
 | 9 | 选择套牌 9 个卡组（天蓝） | `deck_grid_roi` | 框住 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
 | 10-13 | 模式按钮 + 三个盾牌（红） | `mode_click` 段 | 选卡组界面的模式按钮、以及狂野/标准/休闲三个盾牌：**框中心=点击点** |
 
-目标 6/7/8 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
+目标 7/8/9 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
 （`框内文字匹配 1.00（阈值 0.80），对准了` / `9 格里 9 格有卡组名牌文字`），
 用的就是脚本运行时**同一个**判定函数，所以"这里说对、脚本说不对"不会发生。
-目标 6/7 是文字框（传统对战 259×27、选择套牌标题 104×24），所以它们的缩放下限
+目标 7/8 是文字框（传统对战 259×27、选择套牌标题 104×24），所以它们的缩放下限
 单独放宽到 20px（见 `min_size`）。
+
+**目标条按系统 DPI 放大**：4K/150% 屏上卡片、字号、右侧 OCR 预览一起按 1.5×
+缩放，不会缩成一条看不清；100% 屏与旧版尺寸口径一致（设计宽度 520px）。
 
 **随时只有一个框在屏幕上**：只画当前目标那一个（切目标时框就换位置），
 非当前目标一个都不画 —— 十几个框同时铺出来根本看不清要对齐哪个。
@@ -151,7 +154,10 @@ PANEL_BORDER = (118, 124, 132, 245)
 # 目标条画在**屏幕正中央**：左上角正好压着盒子「AI胜率」浮动条
 # （95,0,300,60，校准时要能看见它），顶部中间又是「请对齐相应UI」提示条，
 # 屏幕正中才是空出来的地方（推荐面板在左、换牌确认在右下、判定点不在正中）。
-CARD_W = 356
+#
+# 下面的宽高/字号都是 **96 DPI 的设计值**；运行时按系统 DPI 乘 UI_SCALE，
+# 避免 4K/150% 屏上 356px 的卡片缩成一条、字也看不清（用户 2026-10-23 反馈）。
+CARD_W = 520
 CARD_PAD = 12
 ROW_H = 32
 SAVE_BTN_H = 36
@@ -162,12 +168,43 @@ HINT_FONT_SIZE = 13
 HINT_LINE_H = 17
 HINT_MAX_LINES = 3
 INFO_LINE_H = 18
+# 右侧「尺寸」列的固定宽度（设计值）：标签再长也不能压到这列。
+ROW_SIZE_COL_W = 78
 # 基础高度：标题 + 目标行 + 5 行信息（当前目标 / 说明 / 屏幕位置 / 坐标 / 保存状态）
 # + 按钮行。说明换行后会由 CalibrationSession._card_height() 按实际行数加高。
 CARD_H = (CARD_PAD + 20 + 8          # 标题
           + len(CALIBRATION_TARGETS) * ROW_H + 6   # 目标行
           + 5 * INFO_LINE_H + 8      # 当前目标 / 说明 / 屏幕位置 / 坐标 / 保存状态
           + SAVE_BTN_H + CARD_PAD)
+
+# 运行时 DPI 缩放系数（96 DPI = 1.0）。测试默认 1.0；main() 里按系统 DPI 设置。
+UI_SCALE = 1.0
+MAX_UI_SCALE = 2.5
+
+
+def sp(value) -> int:
+    """把 96 DPI 设计值换算成当前 DPI 的实际像素（至少 1px）。"""
+    return max(1, int(round(float(value) * UI_SCALE)))
+
+
+def detect_ui_scale() -> float:
+    """按系统 DPI 算校准窗口的缩放系数；拿不到时返回 1.0。"""
+    try:
+        import ctypes
+
+        dpi = int(ctypes.windll.user32.GetDpiForSystem())
+    except Exception:
+        return 1.0
+    if dpi <= 0:
+        return 1.0
+    return max(1.0, min(MAX_UI_SCALE, dpi / 96.0))
+
+
+def init_ui_scale() -> float:
+    """初始化全局 UI_SCALE（必须在进程声明 DPI 感知之后调用）。"""
+    global UI_SCALE
+    UI_SCALE = detect_ui_scale()
+    return UI_SCALE
 
 
 def _hint_parts(hint: str) -> tuple[str, str]:
@@ -225,19 +262,20 @@ def card_rect(width: int, height: int, card_h: int | None = None,
     它**只活在这次会话里**，不写进 ui_config.json：那是 ROI 配置，不该混界面状态。
     拖动后仍会把整张卡片夹回屏幕内（只保证"看得见"，不改变卡片尺寸）。
     """
-    card_h = CARD_H if card_h is None else int(card_h)
+    card_h = sp(CARD_H) if card_h is None else int(card_h)
+    card_w = sp(CARD_W)
     dx, dy = (0, 0) if offset is None else (int(offset[0]), int(offset[1]))
     width, height = int(width), int(height)
     # 居中位置（屏幕比卡片还小时贴左上角 8px，不出现负数坐标）。
-    home_left = max(8, (width - CARD_W) // 2)
+    home_left = max(8, (width - card_w) // 2)
     home_top = max(8, (height - card_h) // 2)
     if offset is None:
-        return (home_left, home_top, home_left + CARD_W, home_top + card_h)
+        return (home_left, home_top, home_left + card_w, home_top + card_h)
     # 拖动后夹回屏幕内。下限用 **0 而不是 8**：贴边是用户主动拖过去的，
     # 应该能真正贴到边上（否则右/下边缘永远差 8px 对不齐）。
-    left = min(max(0, home_left + dx), max(0, width - CARD_W))
+    left = min(max(0, home_left + dx), max(0, width - card_w))
     top = min(max(0, home_top + dy), max(0, height - card_h))
-    return (left, top, left + CARD_W, top + card_h)
+    return (left, top, left + card_w, top + card_h)
 
 # ---------------------------------------------------------------- 预览面板
 PREVIEW_W, PREVIEW_H = 360, 430
@@ -489,12 +527,14 @@ class CalibrationSession:
     # ------------------------------------------------------------ 布局/命中
     def _card_height(self) -> int:
         """目标条高度：说明按实际换行行数加高（每个目标算一次后缓存）。"""
-        key = self.active["key"]
+        key = (self.active["key"], UI_SCALE)
         cached = self._card_h_cache.get(key)
         if cached is None:
-            lines = wrap_text(self.active["hint"], label_font(HINT_FONT_SIZE),
-                              CARD_W - 2 * CARD_PAD)
-            cached = CARD_H + (max(1, len(lines)) - 1) * HINT_LINE_H
+            lines = wrap_text(self.active["hint"],
+                              label_font(sp(HINT_FONT_SIZE)),
+                              sp(CARD_W) - 2 * sp(CARD_PAD))
+            cached = (sp(CARD_H)
+                      + (max(1, len(lines)) - 1) * sp(HINT_LINE_H))
             self._card_h_cache[key] = cached
         return cached
 
@@ -505,11 +545,14 @@ class CalibrationSession:
     def _chip_rects(self, width: int, height: int):
         left, top = self._card_rect(width, height)[:2]
         rects = []
-        row_top = top + CARD_PAD + 20 + 8
+        pad = sp(CARD_PAD)
+        row_h = sp(ROW_H)
+        card_w = sp(CARD_W)
+        row_top = top + pad + sp(20) + sp(8)
         for index in range(len(self.targets)):
-            rects.append(((left + CARD_PAD, row_top,
-                           left + CARD_W - CARD_PAD, row_top + ROW_H - 4), index))
-            row_top += ROW_H
+            rects.append(((left + pad, row_top,
+                           left + card_w - pad, row_top + row_h - sp(4)), index))
+            row_top += row_h
         return rects
 
     def _card_drag_rect(self, width: int, height: int):
@@ -528,13 +571,16 @@ class CalibrationSession:
     def _button_rects(self, width: int, height: int):
         """底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」。"""
         left, top = self._card_rect(width, height)[:2]
-        bottom = top + self._card_height() - CARD_PAD
-        inner_left = left + CARD_PAD
-        inner_right = left + CARD_W - CARD_PAD
-        button_w = (inner_right - inner_left - BTN_GAP) // 2
-        save = (inner_left, bottom - SAVE_BTN_H,
+        pad = sp(CARD_PAD)
+        bottom = top + self._card_height() - pad
+        inner_left = left + pad
+        inner_right = left + sp(CARD_W) - pad
+        gap = sp(BTN_GAP)
+        save_h = sp(SAVE_BTN_H)
+        button_w = (inner_right - inner_left - gap) // 2
+        save = (inner_left, bottom - save_h,
                 inner_left + button_w, bottom)
-        exit_ = (inner_left + button_w + BTN_GAP, bottom - SAVE_BTN_H,
+        exit_ = (inner_left + button_w + gap, bottom - save_h,
                  inner_right, bottom)
         return save, exit_
 
@@ -546,8 +592,9 @@ class CalibrationSession:
 
     @staticmethod
     def _preview_rect(width: int) -> tuple[int, int, int, int]:
-        left = max(8, width - PREVIEW_W - 16)
-        return (left, 16, left + PREVIEW_W, 16 + PREVIEW_H)
+        preview_w, preview_h = sp(PREVIEW_W), sp(PREVIEW_H)
+        left = max(8, width - preview_w - sp(16))
+        return (left, sp(16), left + preview_w, sp(16) + preview_h)
 
     def _move_cross_rect(self) -> tuple[int, int, int, int]:
         """当前目标框正中央那个「整体拖动」十字标的方块（屏幕坐标）。
@@ -587,8 +634,9 @@ class CalibrationSession:
                 return ("card", None)
         # 当前目标的框与鼠标事件同口径（都是屏幕上量出来的坐标），直接比较。
         left, top, right, bottom = (int(v) for v in self.active["box"])
-        if (right + 2 <= sx <= right + 2 + HANDLE
-                and bottom + 2 <= sy <= bottom + 2 + HANDLE):
+        handle = sp(HANDLE)
+        if (right + sp(2) <= sx <= right + sp(2) + handle
+                and bottom + sp(2) <= sy <= bottom + sp(2) + handle):
             return ("corner", None)
         cross = self._move_cross_rect()
         if cross[0] <= sx <= cross[2] and cross[1] <= sy <= cross[3]:
@@ -672,9 +720,10 @@ class CalibrationSession:
             # 这种累积误差。
             _, grab_x, grab_y = self.drag
             card_h = self._card_height()
-            want_left = min(max(0, sx - grab_x), max(0, width - CARD_W))
+            card_w = sp(CARD_W)
+            want_left = min(max(0, sx - grab_x), max(0, width - card_w))
             want_top = min(max(0, sy - grab_y), max(0, height - card_h))
-            self.card_offset = [want_left - max(8, (width - CARD_W) // 2),
+            self.card_offset = [want_left - max(8, (width - card_w) // 2),
                                 want_top - max(8, (height - card_h) // 2)]
             self.dirty = True
             return
@@ -1036,8 +1085,9 @@ class CalibrationSession:
         return layer
 
     def _draw_text(self, draw, xy, text: str, size: int, color) -> None:
-        font = _FONT_CACHE.get(size) or label_font(size)
-        _FONT_CACHE[size] = font
+        font_size = sp(size)
+        font = _FONT_CACHE.get(font_size) or label_font(font_size)
+        _FONT_CACHE[font_size] = font
         if font is None:
             return
         draw.text(xy, text, fill=color, font=font)
@@ -1059,15 +1109,17 @@ class CalibrationSession:
         """
         left, top, right, bottom = (int(v) for v in self.active["box"])
         color = _rgba(self.active["color"])
-        draw.rectangle((left, top, right, bottom), outline=color, width=3)
+        draw.rectangle((left, top, right, bottom), outline=color, width=max(2, sp(3)))
         # 右下角缩放手柄
-        hx, hy = min(width - 1, right + 2), min(height - 1, bottom + 2)
-        hx1, hy1 = min(width, hx + HANDLE), min(height, hy + HANDLE)
+        handle = sp(HANDLE)
+        hx, hy = min(width - 1, right + sp(2)), min(height - 1, bottom + sp(2))
+        hx1, hy1 = min(width, hx + handle), min(height, hy + handle)
         draw.rectangle((hx, hy, hx1, hy1), fill=color)
-        for offset in range(6, HANDLE - 4, 7):
+        for offset in range(sp(6), max(sp(6) + 1, handle - sp(4)), max(2, sp(7))):
             x, y = hx + offset, hy + offset
             if x < hx1 and y < hy1:
-                draw.line((x, y, x + 4, y + 4), fill=TEXT_MAIN, width=2)
+                draw.line((x, y, x + sp(4), y + sp(4)), fill=TEXT_MAIN,
+                          width=max(1, sp(2)))
 
     @staticmethod
     def _draw_move_glyph(draw, x: int, y: int, color) -> None:
@@ -1136,22 +1188,34 @@ class CalibrationSession:
           * 底部两个按钮：左「保存全部区域 (S)」、右「退出 (Esc)」，悬停会提亮；
           * 标题带是**拖动把手**（✥ + 高亮条），抓卡片空白处能整块挪开——卡片
             默认压在屏幕正中，正好挡住"正中那个框"时挪一下就能看见。
+          * 目标行右侧留固定「尺寸」列；标签可用宽度扣掉这一列，超长省略，
+            长标签不会再压在尺寸文字上（用户 2026-10-23 反馈卡片太窄）。
         """
+        pad = sp(CARD_PAD)
         card_left, card_top, card_right, card_bottom = self._card_rect(width,
                                                                       height)
         draw.rectangle((card_left, card_top, card_right, card_bottom),
-                       fill=CARD_BG, outline=CARD_BORDER, width=2)
+                       fill=CARD_BG, outline=CARD_BORDER, width=sp(2))
         # 标题带 = 拖动把手：悬停时整条提亮，一眼看出"这里能拖"。
-        title_h = CARD_PAD + 20 + 8
+        title_h = pad + sp(20) + sp(8)
         dragging_card = self.drag is not None and self.drag[0] == "card"
         if dragging_card or self.hover == ("card", None):
-            draw.rectangle((card_left + 2, card_top + 2, card_right - 2,
-                            card_top + title_h - 4),
+            draw.rectangle((card_left + sp(2), card_top + sp(2),
+                            card_right - sp(2), card_top + title_h - sp(4)),
                            fill=CARD_ROW_HOVER)
-        self._draw_move_glyph(draw, card_left + CARD_PAD, card_top + CARD_PAD,
+        self._draw_move_glyph(draw, card_left + pad, card_top + pad,
                               CARD_BORDER)
-        self._draw_text(draw, (card_left + CARD_PAD + 18, card_top + CARD_PAD),
+        self._draw_text(draw, (card_left + pad + sp(18), card_top + pad),
                         "校准目标（Tab 切换 · 拖这里挪动）", 15, CARD_BORDER)
+        row_font = _FONT_CACHE.get(sp(15))
+        if row_font is None:
+            row_font = label_font(sp(15))
+            _FONT_CACHE[sp(15)] = row_font
+        size_font = _FONT_CACHE.get(sp(13))
+        if size_font is None:
+            size_font = label_font(sp(13))
+            _FONT_CACHE[sp(13)] = size_font
+        size_col_w = sp(ROW_SIZE_COL_W)
         for rect, index in self._chip_rects(width, height):
             target = self.targets[index]
             active = index == self.active_index
@@ -1159,38 +1223,50 @@ class CalibrationSession:
             fill = (CARD_ROW_ACTIVE if active
                     else (CARD_ROW_HOVER if hovered else CARD_ROW_BG))
             draw.rectangle(rect, fill=fill)
-            swatch = (rect[0] + 6, rect[1] + 7, rect[0] + 22, rect[1] + 21)
+            swatch = (rect[0] + sp(6), rect[1] + sp(7),
+                      rect[0] + sp(22), rect[1] + sp(21))
             draw.rectangle(swatch, fill=_rgba(target["color"]))
             if active:
                 # 当前行再加一条左侧竖条，扫一眼就知道在拖哪个目标。
-                draw.rectangle((rect[0], rect[1], rect[0] + 3, rect[3]),
+                draw.rectangle((rect[0], rect[1], rect[0] + sp(3), rect[3]),
                                fill=_rgba(target["color"]))
-            text = f"{index + 1}. {target['label']}"
-            self._draw_text(draw, (rect[0] + 30, rect[1] + 6), text, 15,
+            label_x = rect[0] + sp(30)
+            label_max = max(sp(40), rect[2] - label_x - size_col_w - sp(8))
+            label_lines = wrap_text(f"{index + 1}. {target['label']}",
+                                    row_font, label_max, max_lines=1)
+            self._draw_text(draw, (label_x, rect[1] + sp(6)),
+                            label_lines[0], 15,
                             TEXT_MAIN if active else TEXT_DIM)
             box = target["box"]
             size_text = f"{box[2] - box[0]}×{box[3] - box[1]}"
-            self._draw_text(draw, (rect[2] - 74, rect[1] + 7), size_text, 13,
+            try:
+                size_w = int(size_font.getlength(size_text))
+            except Exception:
+                size_w = len(size_text) * sp(8)
+            size_x = max(rect[0] + sp(30),
+                         rect[2] - sp(8) - size_w)
+            self._draw_text(draw, (size_x, rect[1] + sp(7)), size_text, 13,
                             _rgba(target["color"]) if active else TEXT_DIM)
 
         # ---- 当前目标 / 说明 / 坐标 / 保存状态 --------------------------
-        inner_w = CARD_W - 2 * CARD_PAD
-        line_y = card_top + CARD_PAD + 20 + 8 + len(self.targets) * ROW_H + 4
+        inner_w = sp(CARD_W) - 2 * pad
+        line_y = (card_top + pad + sp(20) + sp(8)
+                  + len(self.targets) * sp(ROW_H) + sp(4))
         target = self.active
-        self._draw_text(draw, (card_left + CARD_PAD, line_y),
+        self._draw_text(draw, (card_left + pad, line_y),
                         f"当前目标：{target['label']}", 13,
                         _rgba(target["color"]))
-        line_y += INFO_LINE_H
+        line_y += sp(INFO_LINE_H)
 
         head, _body = _hint_parts(target["hint"])
-        hint_font = _FONT_CACHE.get(HINT_FONT_SIZE)
+        hint_font = _FONT_CACHE.get(sp(HINT_FONT_SIZE))
         if hint_font is None:
-            hint_font = label_font(HINT_FONT_SIZE)
-            _FONT_CACHE[HINT_FONT_SIZE] = hint_font
+            hint_font = label_font(sp(HINT_FONT_SIZE))
+            _FONT_CACHE[sp(HINT_FONT_SIZE)] = hint_font
         hint_lines = wrap_text(target["hint"], hint_font, inner_w)
         take_head = min(len(hint_lines[0]), len(head)) if head else 0
         for index, line in enumerate(hint_lines):
-            x = card_left + CARD_PAD
+            x = card_left + pad
             if index == 0 and take_head:
                 self._draw_text(draw, (x, line_y), line[:take_head],
                                 HINT_FONT_SIZE, CARD_BORDER)
@@ -1201,27 +1277,27 @@ class CalibrationSession:
             else:
                 self._draw_text(draw, (x, line_y), line, HINT_FONT_SIZE,
                                 TEXT_DIM)
-            line_y += HINT_LINE_H
+            line_y += sp(HINT_LINE_H)
         # 说明行数不足 3 行时把底部信息顶到固定位置（卡片高度已经算过换行数）。
-        line_y = (card_bottom - CARD_PAD - SAVE_BTN_H - 8
-                  - 3 * INFO_LINE_H)
+        line_y = (card_bottom - pad - sp(SAVE_BTN_H) - sp(8)
+                  - 3 * sp(INFO_LINE_H))
 
         box = target["box"]
         # 第一行 = 现在框在**屏幕上**的位置（跟着炉石窗口实时变）；
         # 第二行 = 权威的**客户区相对**坐标（存进 ui_config.json 的就是它，
         #          窗口移动/换分辨率后它不变，所以它才是"校对准了没有"的依据）。
-        self._draw_text(draw, (card_left + CARD_PAD, line_y),
+        self._draw_text(draw, (card_left + pad, line_y),
                         f"屏幕：{box[0]},{box[1]} → {box[2]},{box[3]}"
                         f"（{box[2] - box[0]}×{box[3] - box[1]}）", 13, TEXT_MAIN)
-        self._draw_text(draw, (card_left + CARD_PAD, line_y + INFO_LINE_H),
+        self._draw_text(draw, (card_left + pad, line_y + sp(INFO_LINE_H)),
                         self._client_box_line(target), 13, TEXT_DIM)
         if time.time() < self.saved_flash_until:
             self._draw_text(draw,
-                            (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),
+                            (card_left + pad, line_y + 2 * sp(INFO_LINE_H)),
                             "已保存，下次「开始对战」生效", 13, TEXT_OK)
         else:
             self._draw_text(draw,
-                            (card_left + CARD_PAD, line_y + 2 * INFO_LINE_H),
+                            (card_left + pad, line_y + 2 * sp(INFO_LINE_H)),
                             self._client_line(mapping), 13, TEXT_DIM)
 
         # ---- 底部两个按钮：保存（金） / 退出（灰） ----------------------
@@ -1231,9 +1307,9 @@ class CalibrationSession:
             rect = (self._save_rect(width, height) if name == "save"
                     else self._exit_rect(width, height))
             bg = hover if self.hover == (name, None) else base
-            draw.rectangle(rect, fill=bg, outline=CARD_BORDER, width=1)
-            self._draw_text(draw, (rect[0] + 12, rect[1] + 8), text, 15,
-                            BUTTON_TEXT)
+            draw.rectangle(rect, fill=bg, outline=CARD_BORDER, width=sp(1))
+            self._draw_text(draw, (rect[0] + sp(12), rect[1] + sp(8)),
+                            text, 15, BUTTON_TEXT)
 
     @staticmethod
     def _client_line(mapping=None) -> str:
@@ -1268,47 +1344,49 @@ class CalibrationSession:
     def _draw_preview(self, draw, width: int, layer) -> None:
         left, top, right, bottom = self._preview_rect(width)
         draw.rectangle((left, top, right, bottom), fill=PANEL_BG,
-                       outline=PANEL_BORDER, width=2)
-        self._draw_text(draw, (left + 10, top + 8),
+                       outline=PANEL_BORDER, width=sp(2))
+        self._draw_text(draw, (left + sp(10), top + sp(8)),
                         "推荐区域预览（OCR 实时识别）", 14, TEXT_MAIN)
-        img_top = top + 32
-        area_w = right - left - 20
+        img_top = top + sp(32)
+        area_w = right - left - sp(20)
         crop = self.last_crop
+        img_h = sp(PREVIEW_IMG_H)
         if crop is not None and crop.size[0] > 0 and crop.size[1] > 0:
-            scale = min(area_w / crop.size[0], PREVIEW_IMG_H / crop.size[1])
+            scale = min(area_w / crop.size[0], img_h / crop.size[1])
             target_size = (max(1, int(crop.size[0] * scale)),
                            max(1, int(crop.size[1] * scale)))
             resized = crop.resize(target_size, Image.LANCZOS).convert("RGBA")
-            layer.alpha_composite(resized, dest=(left + 10, img_top))
+            layer.alpha_composite(resized, dest=(left + sp(10), img_top))
         else:
-            self._draw_text(draw, (left + 12, img_top + 8),
+            self._draw_text(draw, (left + sp(12), img_top + sp(8)),
                             "等待画面……（拖动后自动刷新）", 12, TEXT_DIM)
-        draw.rectangle((left + 10, img_top, left + 10 + area_w,
-                        img_top + PREVIEW_IMG_H), outline=PANEL_BORDER)
+        draw.rectangle((left + sp(10), img_top, left + sp(10) + area_w,
+                        img_top + img_h), outline=PANEL_BORDER)
         # OCR 结果
         result = self.ocr_result
         status = result.get("status")
-        text_y = img_top + PREVIEW_IMG_H + 8
+        text_y = img_top + img_h + sp(8)
         if status == "ok":
             for index, line in enumerate((result.get("lines") or [])[:6]):
                 color = (TEXT_OK if ("打法参考A" in line
                                      or "打法参考Ａ" in line) else TEXT_MAIN)
-                self._draw_text(draw, (left + 12, text_y + index * 17),
+                self._draw_text(draw, (left + sp(12),
+                                       text_y + index * sp(17)),
                                 line[:34], 13, color)
-            msg_y = text_y + 6 * 17 + 2
-            self._draw_text(draw, (left + 12, msg_y), result.get("msg", ""), 12,
-                            TEXT_DIM)
+            msg_y = text_y + 6 * sp(17) + sp(2)
+            self._draw_text(draw, (left + sp(12), msg_y),
+                            result.get("msg", ""), 12, TEXT_DIM)
             if result.get("beacon"):
-                self._draw_text(draw, (left + 12, msg_y + 18),
+                self._draw_text(draw, (left + sp(12), msg_y + sp(18)),
                                 "识别到『打法参考A』→ 对齐成功", 13, TEXT_OK)
             else:
-                self._draw_text(draw, (left + 12, msg_y + 18),
+                self._draw_text(draw, (left + sp(12), msg_y + sp(18)),
                                 "没读到『打法参考A』：把面板框进绿框", 13,
                                 TEXT_WARN)
         else:
             color = TEXT_BAD if status == "error" else TEXT_DIM
-            self._draw_text(draw, (left + 12, text_y), result.get("msg", ""), 13,
-                            color)
+            self._draw_text(draw, (left + sp(12), text_y),
+                            result.get("msg", ""), 13, color)
 
     # ------------------------------------------------------------ 按键
     def _handle_keys(self) -> None:
@@ -1436,6 +1514,8 @@ def main() -> int:
         dpi_aware()
     except Exception:
         pass
+    # DPI 感知声明后再算 UI 缩放：4K/150% 下目标条/字号一起放大，不会缩成一条。
+    init_ui_scale()
     args = sys.argv[1:]
     selftest = "--selftest" in args
     ocr_enabled = "--no-ocr" not in args

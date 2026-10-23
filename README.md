@@ -307,6 +307,7 @@ python hsctl.py stop --after-game                      # 收工：打完本局�
 | 命令行 | `python calibrate_roi.py`   |
 
 **13 个可校准目标**（**Tab** 切换，或直接点目标条里的一行；**S** 保存、**Esc** 退出）。  
+目标条会按系统 DPI 放大（4K/150% 下卡片、字号、右侧 OCR 预览一起放大），长标签会自动省略、右侧尺寸列不会重叠。  
 前 9 个是**区域框**（写入 `ui_config.json` 的 ROI 键），后 4 个是**点击点**（框中心=点击点，  
 写入 `mode_click` 段）：
 

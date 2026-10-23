@@ -1192,6 +1192,38 @@ class CardButtonTests(unittest.TestCase):
             self.assertGreater(layer.getpixel(self._center(rect))[3], 0)
 
 
+class LayoutScaleTests(unittest.TestCase):
+    """高 DPI 下目标条按 UI_SCALE 放大，不再窄成一条。"""
+
+    def setUp(self):
+        self._saved_scale = calibrate_roi.UI_SCALE
+
+    def tearDown(self):
+        calibrate_roi.UI_SCALE = self._saved_scale
+
+    def test_card_is_wider_and_scaled_by_dpi(self):
+        calibrate_roi.UI_SCALE = 1.0
+        base = calibrate_roi.card_rect(3840, 2160)
+
+        calibrate_roi.UI_SCALE = 1.5
+        scaled = calibrate_roi.card_rect(3840, 2160)
+
+        self.assertEqual(calibrate_roi.sp(calibrate_roi.CARD_W),
+                         scaled[2] - scaled[0])
+        self.assertGreater(scaled[2] - scaled[0], base[2] - base[0])
+        self.assertAlmostEqual(3840 / 2, (scaled[0] + scaled[2]) / 2, delta=1)
+
+    def test_card_height_scales_with_dpi(self):
+        session = make_session()
+        calibrate_roi.UI_SCALE = 1.0
+        base = session._card_height()
+
+        calibrate_roi.UI_SCALE = 1.5
+        scaled = session._card_height()
+
+        self.assertGreater(scaled, base)
+
+
 class HintWrapTests(unittest.TestCase):
     """说明自动换行：每行都在卡片内宽之内，超出行数才截断加省略号。"""
 
@@ -1246,8 +1278,9 @@ class HintWrapTests(unittest.TestCase):
         session.active_index = 0
         self.assertEqual(calibrate_roi.CARD_H, session._card_height())
 
-        # 最后那个目标的说明最长（会换行），卡片相应加高一行。
-        session.active_index = len(session.targets) - 1
+        # 把当前目标的说明换成长文本，卡片要按换行行数加高。
+        session.targets[0]["hint"] = "很长的说明：" + "字" * 120
+        session._card_h_cache.clear()
         self.assertGreater(session._card_height(), calibrate_roi.CARD_H)
 
     def test_hint_parts_split_the_highlighted_head(self):
