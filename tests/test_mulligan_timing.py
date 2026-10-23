@@ -70,6 +70,7 @@ class MulliganTimingTests(unittest.TestCase):
             "recommendation_flow",
             "recommendation_config",
             "recommendation_capture",
+            "mulligan_capture",
             "recommendation_parser",
             "recommendation_reader",
             "mulligan_reader",
@@ -89,6 +90,16 @@ class MulliganTimingTests(unittest.TestCase):
             post_ocr = RecommendationConfig().mulligan_post_ocr_delay_seconds
             self.assertEqual(post_ocr, FSM_action.auto_mulligan_flow.first_delay)
             self.assertEqual(post_ocr, FSM_action.auto_mulligan_flow.retry_delay)
+            # 换牌 OCR 用独立的大 ROI，回合推荐仍用小 ROI。
+            self.assertEqual(
+                FSM_action.recommendation_config.recommendation_roi,
+                FSM_action.recommendation_capture.roi)
+            self.assertEqual(
+                FSM_action.recommendation_config.mulligan_recommendation_roi,
+                FSM_action.mulligan_capture.roi)
+            self.assertNotEqual(
+                FSM_action.recommendation_capture.roi,
+                FSM_action.mulligan_capture.roi)
         finally:
             for name, value in originals.items():
                 setattr(FSM_action, name, value)

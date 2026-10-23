@@ -78,6 +78,29 @@ class ScaledRoiFrameTests(unittest.TestCase):
         with mock.patch("display_mapping.display_mapping", return_value=None):
             self.assertTrue(capture._is_roi_frame(width, height))
 
+    def test_custom_roi_is_used_by_the_capture(self):
+        """换牌 OCR 用独立的大 ROI，不能悄悄回落到 recommendation_roi。"""
+        custom = (7, 200, 278, 970)
+        capture = DesktopCapture(self.config, roi=custom,
+                                 screen_grabber=lambda: None)
+
+        self.assertEqual(custom, capture.roi)
+        self.assertEqual((970 - 200, 278 - 7), capture._roi_size)
+        with mock.patch("display_mapping.display_mapping", return_value=None):
+            self.assertTrue(capture._is_roi_frame(278 - 7, 970 - 200))
+
+    def test_custom_roi_crop_uses_that_roi(self):
+        config = self.config
+        custom = (7, 200, 278, 970)
+        capture = DesktopCapture(config, roi=custom, screen_grabber=lambda: None)
+        pixels = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        pixels[200:970, 7:278] = 123
+
+        crop = capture._crop_array(pixels)
+
+        self.assertEqual((770, 271, 3), crop.shape)
+        self.assertTrue((crop == 123).all())
+
 
 if __name__ == "__main__":
     unittest.main()

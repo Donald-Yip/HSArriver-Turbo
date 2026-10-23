@@ -296,7 +296,7 @@ class CardDragTests(unittest.TestCase):
         self.assertEqual((base[0] - 400, base[1] + 120), moved[:2])
 
     def test_dragging_the_card_does_not_touch_any_region_box(self):
-        """拖卡片是纯界面行为：12 个 ROI 框一个都不许动。"""
+        """拖卡片是纯界面行为：13 个 ROI 框一个都不许动。"""
         before = [list(t["box"]) for t in self.session.targets]
         x, y = self._title_point()
         self.session._on_mouse_down(x, y, self.WIDTH, self.HEIGHT)
@@ -694,7 +694,11 @@ class ActiveTargetMappingTests(unittest.TestCase):
 
         kind, index = session._hit_test(cx, cy, *size)
         self.assertEqual("target", kind)
-        self.assertEqual(7, index)      # 正中央恰好压在第 7 行上
+        # 正中央落在哪一行由目标数量/布局决定，不写死序号。
+        expected = next(i for rect, i in session._chip_rects(*size)
+                        if rect[0] <= cx <= rect[2]
+                        and rect[1] <= cy <= rect[3])
+        self.assertEqual(expected, index)
 
     def test_no_mapping_draws_at_the_raw_box(self):
         """拿不到客户区几何时是恒等换算：框仍画在它的坐标上。"""

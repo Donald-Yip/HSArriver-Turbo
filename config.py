@@ -663,6 +663,8 @@ OCR_MODEL_ROOT = os.environ.get("HS_OCR_MODEL_ROOT") or os.path.normpath(
 # 一起加即可。
 _USER_BOX_KEYS = (
     "recommendation_roi",
+    # 换牌阶段专用：比回合推荐区域更大，能框住最多 4 条留牌建议。
+    "mulligan_recommendation_roi",
     "mulligan_confirm_roi",
     "ai_win_rate_roi",
     "ai_win_rate_wide_roi",
@@ -843,6 +845,12 @@ class RecommendationConfig:
     # 覆盖左侧“打法参考A”推荐面板：宽 271，高 938。
     # 可通过 ui_config.json 的 recommendation_roi 覆盖（校准工具写入）。
     recommendation_roi: tuple[int, int, int, int] = (7, 200, 202, 500)
+
+    # 换牌阶段专用的推荐面板区域：比回合推荐区域更大，兼容最多 4 张留牌的
+    # 建议（回合 OCR 仍用上面的小区域，避免放大截图拖慢每回合识别）。
+    # 可通过 ui_config.json 的 mulligan_recommendation_roi 覆盖（校准工具写入）。
+    # 默认按左侧整块面板给足：宽 271、高 770，可覆盖 4 条留牌。
+    mulligan_recommendation_roi: tuple[int, int, int, int] = (7, 200, 278, 970)
 
     # ------------------------------------------------------------------ 稳定帧
     # 读取面板需连续 stable_frames 帧识别出相同文本才算稳（防动画中间帧）。

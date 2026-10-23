@@ -55,7 +55,8 @@ class FsmWiringTests(unittest.TestCase):
     def test_production_flow_gets_the_configured_draw_delay(self):
         """initialize_recommendation_automation() 必须把配置传进流程。"""
         names = ("recommendation_flow", "recommendation_config",
-                 "recommendation_capture", "recommendation_parser",
+                 "recommendation_capture", "mulligan_capture",
+                 "recommendation_parser",
                  "recommendation_reader", "mulligan_reader",
                  "recommendation_validator")
         originals = {name: getattr(FSM_action, name) for name in names}

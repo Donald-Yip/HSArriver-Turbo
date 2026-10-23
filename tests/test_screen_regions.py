@@ -33,7 +33,8 @@ class RegionRegistryTests(unittest.TestCase):
 
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
-            ["recommendation", "mulligan_confirm", "win_rate", "win_rate_wide",
+            ["recommendation", "mulligan_recommendation", "mulligan_confirm",
+             "win_rate", "win_rate_wide",
              "post_game_start", "rank", "main_menu_battle", "deck_select_title",
              "deck_grid",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
@@ -43,7 +44,17 @@ class RegionRegistryTests(unittest.TestCase):
         boxes = {region["key"]: region["box"] for region in self.regions}
 
         self.assertEqual((7, 200, 202, 500), boxes["recommendation"])
+        self.assertEqual(screen_regions.MULLIGAN_RECOMMENDATION_REGION,
+                         boxes["mulligan_recommendation"])
         self.assertEqual((860, 810, 1060, 890), boxes["mulligan_confirm"])
+
+    def test_mulligan_recommendation_default_matches_config(self):
+        from config import RecommendationConfig
+
+        field = RecommendationConfig.__dataclass_fields__[
+            "mulligan_recommendation_roi"]
+        self.assertEqual(field.default,
+                         screen_regions.MULLIGAN_RECOMMENDATION_REGION)
 
     def test_boxes_are_well_formed_and_keys_unique(self):
         for region in self.regions:
@@ -99,14 +110,16 @@ class CalibrationTargetTests(unittest.TestCase):
     def test_lists_the_calibratable_targets(self):
         targets = screen_regions.calibration_targets(make_config())
 
-        self.assertEqual(["recommendation", "mulligan_confirm", "win_rate",
+        self.assertEqual(["recommendation", "mulligan_recommendation",
+                          "mulligan_confirm", "win_rate",
                           "post_game_start", "rank",
                           "main_menu_battle", "deck_select_title", "deck_grid",
                           "mode_menu_open", "mode_wild", "mode_standard",
                           "mode_casual"],
                          [target["key"] for target in targets])
         self.assertEqual(
-            ["recommendation_roi", "mulligan_confirm_roi", "ai_win_rate_roi",
+            ["recommendation_roi", "mulligan_recommendation_roi",
+             "mulligan_confirm_roi", "ai_win_rate_roi",
              "post_game_start_roi", "post_game_rank_roi",
              "main_menu_battle_roi", "deck_select_title_roi", "deck_grid_roi",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
@@ -189,6 +202,8 @@ class CalibrationTargetTests(unittest.TestCase):
                  for target in screen_regions.calibration_targets(make_config())}
 
         self.assertEqual((7, 200, 202, 500), boxes["recommendation"])
+        self.assertEqual(screen_regions.MULLIGAN_RECOMMENDATION_REGION,
+                         boxes["mulligan_recommendation"])
         self.assertEqual((860, 810, 1060, 890), boxes["mulligan_confirm"])
         self.assertEqual(screen_regions.AI_WIN_RATE_REGION, boxes["win_rate"])
 

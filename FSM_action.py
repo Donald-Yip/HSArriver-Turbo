@@ -58,6 +58,7 @@ auto_mulligan_flow = None
 recommendation_flow = None
 recommendation_config = None
 recommendation_capture = None
+mulligan_capture = None
 recommendation_parser = None
 recommendation_reader = None
 mulligan_reader = None
@@ -165,13 +166,19 @@ def initialize_recommendation_automation():
     paddle backend）仍只创建一次、跨对局复用。
     """
     global auto_mulligan_flow, recommendation_flow
-    global recommendation_config, recommendation_capture
+    global recommendation_config, recommendation_capture, mulligan_capture
     global recommendation_parser, recommendation_reader
     global mulligan_reader, recommendation_validator
 
     # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
     recommendation_config = RecommendationConfig()
     recommendation_capture = DesktopCapture(recommendation_config)
+    # 换牌推荐区域比回合推荐大（兼容 4 张留牌）：独立一个 capture，避免为了
+    # 换牌把每回合的 OCR 截图一起放大。
+    mulligan_capture = DesktopCapture(
+        recommendation_config,
+        roi=getattr(recommendation_config, "mulligan_recommendation_roi",
+                    recommendation_config.recommendation_roi))
 
     if recommendation_parser is None:
         recommendation_parser = RecommendationParser()
@@ -200,8 +207,8 @@ def initialize_recommendation_automation():
         # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
         # `替换N号位卡牌` 换牌句式（无"打法参考A"信标的专用 reader）。
         evidence = mulligan_reader.read(
-            lambda: recommendation_capture.capture(ocr_panel_ok=True),
-            recommendation_capture.crop_recommendation)
+            lambda: mulligan_capture.capture(ocr_panel_ok=True),
+            mulligan_capture.crop_recommendation)
         action = recommendation_parser.parse(
             evidence, log_state.game_num_turns_in_play, log_state.revision)
         if action.action != ActionKind.MULLIGAN:
