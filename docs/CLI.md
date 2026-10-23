@@ -255,7 +255,7 @@ python hsctl.py deck --clear           # 清掉本机旧的自动选卡组设置
 | `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
 | `surrender [show\|on\|off\|check\|set\|clear]` | **卡组识别投降**（只判对方）：认出对手是某套有特征牌的卡组就立刻投。`show`=看配置（条件译成中文）、`on/off`=总开关（保留卡组）、`check`=看这一局的实时判定（对方职业 / 每个条件是否满足）、`set --file rules.json`（`-` 读 stdin，`--rules '{…}'` 直接给 JSON，`--yes` 跳过「当场会命中」的二次确认）、`clear`=清空 |
 | `card <卡名或ID> [--show] [--limit N]` | **本地查卡**（`cards.json`，不联网、不需要控制台）：默认给中文候选（打错字也给最像的），`--show` 看单卡详情（自动纠错 + 同名多版本 id） |
-| `rank-stop [set …]` | 段位目标：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N`、`--action stop\|keep`（`stop`=达到后停止；`keep`=控分，名次数值比目标更靠前就开局投降） |
+| `rank-stop [set …]` | 段位目标：`--enabled/--no-enabled`、`--mode legend\|legend_number`、`--legend-number N`、`--action stop\|keep`（`stop`=达到后停止；`keep`=控分，名次数值比目标更靠前就进一局，**先完成换牌阶段再投降**） |
 | `config [set …]` | 账号与日志目录：`--name`（含 `#编号`）、`--log-root`。带 `hot` 时会立刻注入运行中的日志读取器（`log_state.MY_NAME`），后续昵称判定即用新值 |
 
 延时字段（`_USER_DELAY_KEYS`）与生效时机：

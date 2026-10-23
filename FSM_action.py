@@ -1098,6 +1098,10 @@ _KEEP_SCORE_ENTER_ATTEMPTS = 20
 _KEEP_SCORE_ENTER_WAIT = 2.0
 _KEEP_SCORE_BACK_ATTEMPTS = 20
 _KEEP_SCORE_BACK_WAIT = 2.0
+# 进局后等「换牌阶段结束」的轮询：换牌要等玩家/对手确认，90s 足够覆盖正常
+# 换牌超时；超时就不点认输（宁可这局不控分，也绝不能在换牌阶段投降）。
+_KEEP_SCORE_MULLIGAN_ATTEMPTS = 90
+_KEEP_SCORE_MULLIGAN_WAIT = 1.0
 _KEEP_SCORE_MAX_PER_RUN = 40
 # 段位区域「是否空白」判定：区域内足够亮的像素少于这么多，就当没有数字。
 # 未上传说时该处是纯背景，直接跳过 OCR（省一次推理，也避免空图被误识别成数字）。
@@ -1891,12 +1895,85 @@ def _at_deck_select() -> bool:
         return False
 
 
+def _game_ended() -> bool:
+    """对局是否已经结束（COMPLETE）。日志不可用/异常返回 False。"""
+    try:
+        return bool(update_log_state() and log_state.is_end)
+    except Exception:
+        return False
+
+
+def _mulligan_finished(baseline_generation=None) -> bool:
+    """换牌阶段是否已经结束（第一回合已开始）。
+
+    用 `game_num_turns_in_play > 0` 作为判据（与 `ChoosingCardAction` /
+    `wait_until_battle_starts` 同一口径）。`baseline_generation` 是点「开始匹配」
+    前的日志 generation：只有 generation 变了、并且回合数 > 0，才说明是**这一局**
+    的换牌真的结束了——否则上一局日志残留的回合数会让控分在换牌阶段就投降。
+    """
+    try:
+        if not update_log_state():
+            return False
+        if log_state.is_end:
+            return False
+        if (baseline_generation is not None
+                and log_state.game_generation == baseline_generation):
+            return False
+        return int(log_state.game_num_turns_in_play or 0) > 0
+    except Exception:
+        return False
+
+
+def _confirm_mulligan_if_ready() -> bool:
+    """换牌确认按钮在场时提交空换牌（不替换任何牌）。
+
+    控分局的目标是尽快输掉，没必要按留牌推荐换牌；但也不能在换牌界面
+    直接投降。先确认按钮在场再点，避免换牌还没画好就盲点。
+    """
+    try:
+        if not confirm_button_present():
+            return False
+        click.run_hearthstone_action(click.commit_choose_card)
+        info_print("[SYS] 控分：已提交换牌（不替换手牌），等待换牌阶段结束……")
+        return True
+    except Exception as exc:
+        warn_print(f"[SYS] 控分：提交换牌失败：{exc}")
+        return False
+
+
+def _wait_for_mulligan_end(baseline_generation=None) -> bool:
+    """等换牌阶段真正结束；期间尝试提交一次空换牌。
+
+    返回 True 才允许认输。收到停止请求、对局提前结束或超时都返回 False，
+    调用方据此放弃本次投降，绝不把「换牌中」当成「换牌结束」。
+    """
+    confirmed = False
+    total = max(1, int(_KEEP_SCORE_MULLIGAN_ATTEMPTS))
+    for attempt in range(1, total + 1):
+        if quitting_flag or stop_after_current_game:
+            warn_print("[SYS] 控分：收到停止请求，中止换牌等待，不点认输。")
+            return False
+        if _mulligan_finished(baseline_generation):
+            return True
+        if _game_ended():
+            warn_print("[SYS] 控分：对局在换牌阶段就结束了，不点认输。")
+            return False
+        if not confirmed:
+            confirmed = _confirm_mulligan_if_ready()
+        if attempt % 5 == 0:
+            info_print(
+                f"[SYS] 控分：等待换牌阶段结束……（{attempt}/{total}）")
+        time.sleep(_KEEP_SCORE_MULLIGAN_WAIT)
+    return False
+
+
 def _keep_score_once() -> bool:
     """控分：投一局把名次往后压。成功返回 True（已回到选卡组界面）。
 
-    流程（用户 2026-10-11 口径：开局直接投降）：
-      ① 点「开始匹配」进对局 → ② 等到真的进了局 → ③ 立刻认输 →
-      ④ 等回到选卡组界面。调用方随后会重新读名次，决定还要不要再投一局。
+    流程（用户 2026-10-23 口径）：
+      ① 点「开始匹配」进对局 → ② 等到真的进了局 → ③ **等换牌阶段结束**
+      （确认按钮在场时提交空换牌）→ ④ 才认输 → ⑤ 等回到选卡组界面。
+      换牌阶段内绝不点投降；等待失败/对局提前结束都不投降。
 
     **每次只投一局**，然后交还主循环：这样存活检测照常跑，也不会在这里长时间阻塞。
     任何一步超时都返回 False（不硬撑、不空转），由调用方决定后续。
@@ -1906,6 +1983,10 @@ def _keep_score_once() -> bool:
     manual_controller.output(
         f"[SYS] 控分：本局名次比目标更靠前，开始「开局即投降」"
         f"（本次运行第 {_keep_score_count} 局）。")
+    try:
+        baseline_generation = log_state.game_generation
+    except Exception:
+        baseline_generation = None
     # ① 点「开始匹配」（与正常开局同一个动作，保证语义一致）。
     try:
         click.run_hearthstone_action(click.match_opponent)
@@ -1920,8 +2001,16 @@ def _keep_score_once() -> bool:
     if not entered:
         warn_print("[SYS] 控分：等了很久也没进对局，放弃本次投降（下局再试）。")
         return False
-    # ③ 进局后立刻认输（给换牌界面一点时间，免得点空）。
-    time.sleep(1.5)
+    # ③ 等换牌阶段结束：这是用户明确要求的投降时机。
+    manual_controller.output(
+        "[SYS] 控分：已进入对局，等待换牌阶段结束（不替换手牌）……")
+    if not _wait_for_mulligan_end(baseline_generation):
+        warn_print("[SYS] 控分：换牌阶段未结束或对局已结束，本次不点认输（下局再试）。")
+        return False
+    if _game_ended():
+        warn_print("[SYS] 控分：对局已结束，跳过认输。")
+        return False
+    manual_controller.output("[SYS] 控分：换牌阶段已结束，开始认输。")
     try:
         click.run_hearthstone_action(_do_concede)
     except Exception as exc:

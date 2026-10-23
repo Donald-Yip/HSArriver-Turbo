@@ -686,7 +686,7 @@ class QuittingBattleTests(unittest.TestCase):
 
 
 class KeepScoreTests(unittest.TestCase):
-    """控分投降一局的流程：点开始 → 等进局 → 认输 → 等回选卡组。"""
+    """控分投降一局的流程：点开始 → 等进局 → 等换牌结束 → 认输 → 等回选卡组。"""
 
     def setUp(self):
         self._saved = FSM_action._keep_score_count
@@ -694,11 +694,13 @@ class KeepScoreTests(unittest.TestCase):
         self.actions = []
         self.conceded = []
         self.logs = []
+        self.mulligan_waits = []
 
     def tearDown(self):
         FSM_action._keep_score_count = self._saved
 
-    def _run(self, entered=True, deck_select=True, concede_ok=True):
+    def _run(self, entered=True, deck_select=True, concede_ok=True,
+             mulligan_ok=True):
         """按需桩掉各步骤；返回 _keep_score_once() 的结果。"""
         state = {"in_match": entered}
 
@@ -722,6 +724,10 @@ class KeepScoreTests(unittest.TestCase):
             self.actions.append(action)
             return action()
 
+        def fake_mulligan_wait(*_args, **_kwargs):
+            self.mulligan_waits.append(1)
+            return mulligan_ok
+
         with (
             patch.object(FSM_action, "print_out"),
             patch.object(FSM_action, "info_print",
@@ -735,6 +741,8 @@ class KeepScoreTests(unittest.TestCase):
             # 必须在**源头模块**上打桩，_wait_until 才能看到状态变化。
             patch.object(get_screen, "get_state", side_effect=fake_state),
             patch.object(FSM_action, "update_log_state", return_value=False),
+            patch.object(FSM_action, "_wait_for_mulligan_end",
+                         side_effect=fake_mulligan_wait),
             patch.object(FSM_action.click, "run_hearthstone_action",
                          side_effect=fake_run_action),
             patch.object(FSM_action, "_do_concede",
@@ -748,10 +756,20 @@ class KeepScoreTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(1, FSM_action._keep_score_count)
         self.assertEqual(1, len(self.conceded))
-        # 两个动作走同一条注入通道：先「开始匹配」，再认输。
+        # 顺序必须是：先点开始匹配 → 等换牌结束 → 再认输。
+        self.assertEqual(1, len(self.mulligan_waits))
         self.assertEqual(2, len(self.actions))
         self.assertIs(FSM_action.click.match_opponent, self.actions[0])
         self.assertTrue(callable(self.actions[1]))  # 第二步是认输动作
+
+    def test_never_concedes_when_mulligan_never_ends(self):
+        """换牌阶段没结束就绝不点认输（用户 2026-10-23 口径）。"""
+        result = self._run(mulligan_ok=False)
+
+        self.assertFalse(result)
+        self.assertEqual(1, len(self.mulligan_waits))
+        self.assertEqual([], self.conceded)
+        self.assertEqual(1, len(self.actions))  # 只点过「开始匹配」
 
     def test_never_concedes_when_the_match_never_starts(self):
         """点开始后一直没进局：不投降（避免在非对局界面乱点齿轮）。"""
@@ -761,6 +779,7 @@ class KeepScoreTests(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertEqual([], self.conceded)
+        self.assertEqual([], self.mulligan_waits)
         self.assertEqual(1, len(self.actions))  # 只点过「开始匹配」
 
     def test_reports_failure_when_returning_to_deck_select_times_out(self):
@@ -777,6 +796,59 @@ class KeepScoreTests(unittest.TestCase):
 
         self.assertFalse(result)
         self.assertEqual(1, len(self.conceded))
+
+
+class MulliganWaitTests(unittest.TestCase):
+    """换牌结束判定 / 空换牌提交的纯逻辑。"""
+
+    def test_mulligan_is_not_finished_until_a_new_game_has_a_turn(self):
+        fake_log = SimpleNamespace(
+            game_generation=2, is_end=False, game_num_turns_in_play=0)
+        with (
+            patch.object(FSM_action, "update_log_state", return_value=True),
+            patch.object(FSM_action, "log_state", fake_log),
+        ):
+            # 同一局、回合数 0：还在换牌。
+            self.assertFalse(FSM_action._mulligan_finished(2))
+            # 回合数 > 0 但 generation 没变：可能是上一局残留，不算。
+            fake_log.game_num_turns_in_play = 1
+            self.assertFalse(FSM_action._mulligan_finished(2))
+            # generation 变了且回合数 > 0：这一局换牌结束。
+            self.assertTrue(FSM_action._mulligan_finished(1))
+            # 对局已经结束：不算“换牌结束”，也不该投降。
+            fake_log.is_end = True
+            self.assertFalse(FSM_action._mulligan_finished(1))
+
+    def test_confirm_mulligan_only_commits(self):
+        actions = []
+        with (
+            patch.object(FSM_action, "confirm_button_present", return_value=True),
+            patch.object(FSM_action, "info_print"),
+            patch.object(
+                FSM_action.click,
+                "run_hearthstone_action",
+                side_effect=lambda action: actions.append(action),
+            ),
+            patch.object(FSM_action.click, "replace_starting_card") as replace,
+        ):
+            self.assertTrue(FSM_action._confirm_mulligan_if_ready())
+
+        self.assertEqual([FSM_action.click.commit_choose_card], actions)
+        replace.assert_not_called()
+
+    def test_wait_fails_without_conceding_when_mulligan_never_finishes(self):
+        with (
+            patch.object(FSM_action, "_mulligan_finished", return_value=False),
+            patch.object(FSM_action, "_game_ended", return_value=False),
+            patch.object(FSM_action, "_confirm_mulligan_if_ready",
+                         return_value=False),
+            patch.object(FSM_action, "_KEEP_SCORE_MULLIGAN_ATTEMPTS", 2),
+            patch.object(FSM_action, "_KEEP_SCORE_MULLIGAN_WAIT", 0),
+            patch.object(FSM_action, "info_print"),
+            patch.object(FSM_action, "warn_print"),
+            patch.object(FSM_action.time, "sleep"),
+        ):
+            self.assertFalse(FSM_action._wait_for_mulligan_end(1))
 
 
 class ChoosingHeroRankGateTests(unittest.TestCase):
