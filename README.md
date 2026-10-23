@@ -28,6 +28,8 @@
 > 🗂️ **功能目录**：[docs/FEATURES.md](docs/FEATURES.md)（按功能分组，每条标了网页/CLI 入口）。
 >
 > 📘 **安装与使用说明书**：[docs/guide.html](docs/guide.html)（网页版，带目录，离线可开）。
+>
+> 🧾 **Git 工作流**：[docs/GIT.md](docs/GIT.md)（一个功能一个提交、提交前检查、哪些文件不能入库）。
 
 ---
 
