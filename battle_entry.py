@@ -585,6 +585,13 @@ def default_launcher(*, logger: Optional[Callable[[str], None]] = None) -> dict:
         except Exception:
             return False
 
+    def _focus_hearthstone():
+        try:
+            from get_screen import focus_hearthstone_if_present
+            return focus_hearthstone_if_present()
+        except Exception:
+            return False
+
     def _via_battlenet():
         try:
             import pythoncom
@@ -597,7 +604,7 @@ def default_launcher(*, logger: Optional[Callable[[str], None]] = None) -> dict:
     return hs_restart.launch_hearthstone(
         info.get("exe"), battlenet_exe=info.get("battlenet_exe"),
         launcher=_via_battlenet, battlenet_ready=_battlenet_ready,
-        window_ready=_window_ready, logger=log)
+        window_ready=_window_ready, foreground=_focus_hearthstone, logger=log)
 
 
 # ================================================================ 等界面
@@ -621,13 +628,17 @@ def _identify_now(capture, config):
 
 
 def _wait_for_state(kind: str, *, timeout, interval, capture, click_at_fn, sleep,
-                    clock, should_abort, logger, config) -> dict:
+                    clock, should_abort, logger, config,
+                    foreground: Optional[Callable] = None) -> dict:
     """等某个界面出现：每 `interval` 秒识别一次；没认出且距上次点中心 ≥
     CENTER_CLICK_INTERVAL_SECONDS 时，才点一次画面中心（关掉挡字的弹窗/公告）。
 
     **安全性质**：只有识别到才返回成功；到超时就退出并说明原因 —— 全程不会
     盲点「传统对战」或卡组格；点中心也保持「最多每 3 秒一下」的原有节奏，
     不会因为轮询变快而连点。
+
+    `foreground`：可选的置前回调，约每 2 秒调用一次（炉石窗口出现后才有效）。
+    重启/拉起炉石后游戏可能停在别的窗口底层，不置前就会「点不着」。
     """
     label = ("主界面（传统对战）" if kind == "main_menu"
              else "选择套牌界面（选择套牌标题）")
@@ -640,6 +651,11 @@ def _wait_for_state(kind: str, *, timeout, interval, capture, click_at_fn, sleep
         if should_abort():
             return {"ok": False, "reason": "aborted", "polls": polls, "ui": last,
                     "message": f"等待{label}时收到停止请求"}
+        if foreground is not None and polls % 4 == 0:
+            try:
+                foreground()
+            except Exception:
+                pass
         ui = None
         frame = _capture_frame(capture, config)
         if frame is not None:
@@ -678,6 +694,7 @@ def wait_for_main_menu(*, timeout: float = MAIN_MENU_TIMEOUT_SECONDS,
                        clock: Optional[Callable] = None,
                        should_abort: Optional[Callable] = None,
                        logger: Optional[Callable] = None,
+                       foreground: Optional[Callable] = None,
                        config=None) -> dict:
     """等到主界面（认出「传统对战」）为止；不是就点一次画面中心。
 
@@ -689,7 +706,8 @@ def wait_for_main_menu(*, timeout: float = MAIN_MENU_TIMEOUT_SECONDS,
         capture=capture or capture_client_frame, click_at_fn=click_at_fn or click_at,
         sleep=sleep or time.sleep, clock=clock or time.monotonic,
         should_abort=should_abort or is_cancelled,
-        logger=logger or (lambda text: None), config=config)
+        logger=logger or (lambda text: None), config=config,
+        foreground=foreground)
 
 
 def wait_for_deck_select(*, timeout: float = DECK_SELECT_TIMEOUT_SECONDS,
@@ -700,6 +718,7 @@ def wait_for_deck_select(*, timeout: float = DECK_SELECT_TIMEOUT_SECONDS,
                          clock: Optional[Callable] = None,
                          should_abort: Optional[Callable] = None,
                          logger: Optional[Callable] = None,
+                         foreground: Optional[Callable] = None,
                          config=None) -> dict:
     """等到选择套牌界面（认出「选择套牌」标题）为止。"""
     return _wait_for_state(
@@ -707,7 +726,8 @@ def wait_for_deck_select(*, timeout: float = DECK_SELECT_TIMEOUT_SECONDS,
         capture=capture or capture_client_frame, click_at_fn=click_at_fn or click_at,
         sleep=sleep or time.sleep, clock=clock or time.monotonic,
         should_abort=should_abort or is_cancelled,
-        logger=logger or (lambda text: None), config=config)
+        logger=logger or (lambda text: None), config=config,
+        foreground=foreground)
 
 
 # ================================================================ 选卡组
@@ -790,6 +810,7 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
                  logger: Optional[Callable] = None,
                  launcher: Optional[Callable] = None,
                  window_present: Optional[Callable] = None,
+                 foreground: Optional[Callable] = None,
                  config=None) -> dict:
     """从"炉石没开 / 停在一个不确定的界面"一路走到**选择套牌界面**（可顺带点「开始」）。
 
@@ -859,7 +880,8 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
         waited = wait_for_main_menu(timeout=main_menu_timeout, interval=interval,
                                     capture=capture, click_at_fn=click_at_fn,
                                     sleep=sleep, clock=clock,
-                                    should_abort=abort, logger=log, config=config)
+                                    should_abort=abort, logger=log, config=config,
+                                    foreground=foreground)
         if not waited["ok"]:
             record("wait_main_menu", None, waited["message"])
             stage = ("aborted" if waited["reason"] == "aborted"
@@ -881,7 +903,7 @@ def enter_battle(*, deck_index=None, click_start: bool = False,
                                       capture=capture, click_at_fn=click_at_fn,
                                       sleep=sleep, clock=clock,
                                       should_abort=abort, logger=log,
-                                      config=config)
+                                      config=config, foreground=foreground)
         if not waited["ok"]:
             record("wait_deck_select", None, waited["message"])
             stage = ("aborted" if waited["reason"] == "aborted"

@@ -124,6 +124,20 @@ def move_window_foreground(hwnd, name=""):
     return win32gui.GetForegroundWindow() == hwnd
 
 
+def focus_hearthstone_if_present() -> bool:
+    """炉石窗口已出现时把它切到前台（没出现就什么都不做）。
+
+    重启/拉起炉石后，游戏窗口常常在战网或其它窗口**底层**；此时脚本的点击
+    会落到别的窗口上（表现就是「点不着」）。这个函数只聚焦，不点战网、
+    不启动进程，适合在等待窗口/主界面的轮询里反复调用。
+    """
+    hwnd = get_HS_hwnd()
+    if not hwnd:
+        return False
+    move_window_foreground(hwnd, "炉石传说")
+    return True
+
+
 def max_diff(img, pixel_list):
     ans = 0
     for pair in pixel_list:

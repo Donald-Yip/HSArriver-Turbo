@@ -1882,6 +1882,20 @@ def _bring_hearthstone_foreground():
         _log("WARN", f"切换到炉石前台失败：{exc}")
 
 
+def _focus_hearthstone_if_present() -> bool:
+    """炉石窗口已出现时把它切回前台（只聚焦，不点战网/不启动进程）。
+
+    用于重启炉石后的等待循环：战网点完「开始游戏」后，游戏窗口可能停在
+    战网或其它窗口底层，后续点击会点空。等待窗口/主界面期间反复调用这个。
+    """
+    try:
+        import get_screen
+
+        return bool(get_screen.focus_hearthstone_if_present())
+    except Exception:
+        return False
+
+
 def api_prepare(body=None):
     """「开始运行」第一步：开日志浮窗 + 把炉石切到前台，但【不】开始自动对战。
 
@@ -2812,7 +2826,9 @@ def _restart_hearthstone_worker(resume=False, source="manual"):
     _log("SYS", "重启完成，开始自动恢复：等待主界面 → 进入对战 → 重新开始……")
     try:
         result = battle_entry.enter_battle(
-            deck_index=None, click_start=False, logger=lambda text: _log("SYS", text)
+            deck_index=None, click_start=False,
+            foreground=_focus_hearthstone_if_present,
+            logger=lambda text: _log("SYS", text)
         )
     except Exception as exc:
         _log("ERROR", f"自动进入对战失败：{exc}；请手动「进入传统对战」后再点开始。")
@@ -2863,6 +2879,7 @@ def _restart_wait_main_menu() -> bool:
         result = battle_entry.wait_for_main_menu(
             timeout=RESTART_MAIN_MENU_TIMEOUT_SECONDS,
             logger=lambda text: _log("SYS", text),
+            foreground=_focus_hearthstone_if_present,
         )
     except Exception as exc:
         _log("ERROR", f"等待主界面出错：{exc}")
@@ -2963,6 +2980,7 @@ def _restart_hearthstone_steps() -> bool:
         launcher=_launch_hearthstone_via_battlenet,
         battlenet_ready=_battlenet_window_ready,
         window_ready=_hearthstone_window_ready,
+        foreground=_focus_hearthstone_if_present,
         logger=lambda text: _log("SYS", text),
     )
     if not launched.get("ok"):
@@ -2972,6 +2990,9 @@ def _restart_hearthstone_steps() -> bool:
             "请手动打开战网/炉石后再点「开始对战」。",
         )
         return False
+    # 启动成功后再置前一次（等待期间已经每约 2 秒置前，这里收个尾）。
+    if _focus_hearthstone_if_present():
+        _log("SYS", "已把炉石窗口切回前台。")
     _log("SYS", f"炉石已重新启动：{launched.get('message')}")
     return True
 
@@ -3360,6 +3381,7 @@ def api_enter_battle(body=None) -> dict:
                 click_start=click_start,
                 interval=interval,
                 main_menu_timeout=timeout,
+                foreground=_focus_hearthstone_if_present,
                 logger=lambda text: _log("SYS", text),
             )
             for step in result.get("steps") or []:

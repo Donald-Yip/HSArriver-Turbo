@@ -241,7 +241,8 @@ def _alive_for(probe, sleeper, seconds) -> bool:
 def _wait_until_ready(probe, window_ready, sleeper, timeout, settle,
                       retry: Optional[Callable] = None,
                       retry_after: float = LAUNCH_RETRY_AFTER,
-                      announce_retry: Optional[Callable[[int, float], None]] = None
+                      announce_retry: Optional[Callable[[int, float], None]] = None,
+                      foreground: Optional[Callable] = None
                       ) -> tuple[bool, str]:
     """等炉石真的起来，返回 (是否成功, 失败原因)。
 
@@ -252,19 +253,33 @@ def _wait_until_ready(probe, window_ready, sleeper, timeout, settle,
 
     ``retry`` 是等待期间定期重试的动作（例如再点一次战网的「开始游戏」）；
     ``announce_retry`` 用来在浮窗里播报“还差多久重试”（进度条 + 文字）。
+    ``foreground`` 是等待期间反复执行的置前动作：游戏窗口一出现就把它切回
+    前台，避免它停在战网/其它窗口底层导致后续点击点不着。
     """
     deadline = time.monotonic() + max(0.0, float(timeout))
     appeared = False
     interval = max(1.0, float(retry_after))
     retry_count = 0
     next_retry = time.monotonic() + interval
+    poll_count = 0
     if retry is not None and announce_retry is not None:
         # 点完第一下就先说清楚“多久没反应会再点一次”。
         announce_retry(retry_count + 1, interval)
     while time.monotonic() < deadline:
+        # 约每 2 秒（4 × 0.5s）把已出现的炉石切前台；窗口没出现时是空操作。
+        if foreground is not None and poll_count % 4 == 0:
+            try:
+                foreground()
+            except Exception:
+                pass
         if window_ready is not None:
             try:
                 if window_ready():
+                    if foreground is not None:
+                        try:
+                            foreground()
+                        except Exception:
+                            pass
                     return True, ""
             except Exception:
                 pass
@@ -272,6 +287,11 @@ def _wait_until_ready(probe, window_ready, sleeper, timeout, settle,
         if state is True:
             appeared = True
             if window_ready is None and _alive_for(probe, sleeper, settle):
+                if foreground is not None:
+                    try:
+                        foreground()
+                    except Exception:
+                        pass
                 return True, ""
         elif state is False and appeared:
             return False, "进程起来后马上又退出了（炉石没能被正常拉起）"
@@ -288,6 +308,7 @@ def _wait_until_ready(probe, window_ready, sleeper, timeout, settle,
             if (announce_retry is not None
                     and time.monotonic() + interval < deadline):
                 announce_retry(retry_count + 1, interval)
+        poll_count += 1
         sleeper(POLL_INTERVAL)
     if appeared:
         return False, f"{float(timeout):.0f}s 内没等到炉石游戏窗口"
@@ -313,6 +334,7 @@ def launch_hearthstone(exe=None, battlenet_exe=None,
                        opener: Optional[Callable] = None,
                        process_running: Optional[Callable] = None,
                        window_ready: Optional[Callable] = None,
+                       foreground: Optional[Callable] = None,
                        sleeper: Callable[[float], None] = time.sleep,
                        timeout: float = LAUNCH_TIMEOUT,
                        battlenet_timeout: float = BATTLENET_TIMEOUT,
@@ -329,6 +351,10 @@ def launch_hearthstone(exe=None, battlenet_exe=None,
     调 ``launcher``（click.enter_HS，点「开始游戏」）→ 等 ``window_ready``
     （游戏窗口出现），等窗口期间每 ``LAUNCH_RETRY_AFTER`` 秒重试点一次，
     每次重试前也会播报倒计时。
+
+    ``foreground``：按下战网「开始游戏」后，等窗口期间反复调用的置前回调
+    （约每 2 秒一次），把已经出现的炉石窗口切回前台——否则游戏可能在战网
+    底层，后续点击点不着。成功返回前还会再置前一次。
 
     ``window_ready`` 才是启动成功的判据，光有进程不算：直启 Hearthstone.exe 时
     进程会瞬间出现又退出，只看进程就会报“已启动”，用户看到的是“重启一半又关了”。
@@ -411,6 +437,13 @@ def launch_hearthstone(exe=None, battlenet_exe=None,
             return {"ok": True, "started": kind, "running": None,
                     "message": f"已通过{label}发出启动命令"}
 
+        # 刚点完「开始游戏」：游戏窗口可能已经在底层，先尝试置前一次。
+        if foreground is not None:
+            try:
+                foreground()
+            except Exception:
+                pass
+
         if kind == "launcher":
             note(f"等待炉石游戏窗口出现：最多 {float(timeout):.0f}s，"
                  f"每 {float(retry_after):.0f}s 重试点一次「开始游戏」")
@@ -423,11 +456,12 @@ def launch_hearthstone(exe=None, battlenet_exe=None,
             ok, reason = _wait_until_ready(probe, window_ready, sleeper, timeout,
                                            settle, retry=retry,
                                            retry_after=retry_after,
-                                           announce_retry=announce_retry)
+                                           announce_retry=announce_retry,
+                                           foreground=foreground)
             note("延时结束")        # 收掉可能还在跑的倒计时进度条
         else:
             ok, reason = _wait_until_ready(probe, window_ready, sleeper, timeout,
-                                           settle)
+                                           settle, foreground=foreground)
         if ok:
             return {"ok": True, "started": kind, "running": True,
                     "message": f"炉石已启动（{label}）"}

@@ -368,6 +368,33 @@ class DeckSlotGuardTests(unittest.TestCase):
 
 
 # ================================================================ ⑥ 流程不乱点
+class ForegroundDuringWaitTests(unittest.TestCase):
+    def test_wait_for_main_menu_reapplies_foreground(self):
+        """等待主界面时反复置前，避免游戏停在底层导致后续点击点不着。"""
+        config = make_config()
+        calls = []
+        clock = FakeClock()
+
+        result = be.wait_for_main_menu(
+            timeout=3.0,
+            interval=0.5,
+            capture=sequence_capture([
+                blank_frame(),
+                blank_frame(),
+                main_menu_frame(config),
+            ]),
+            click_at_fn=Recorder(),
+            sleep=clock.sleep,
+            clock=clock,
+            should_abort=lambda: False,
+            foreground=lambda: calls.append(1),
+            config=config,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(len(calls), 1)
+
+
 class FlowSafetyTests(unittest.TestCase):
     def test_timeout_clicks_only_the_safe_center_point(self):
         """认不出界面时只能点"安全中心点"，超时就退出 —— 绝不盲点「传统对战」。"""

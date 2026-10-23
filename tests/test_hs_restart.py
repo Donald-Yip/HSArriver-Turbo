@@ -338,6 +338,25 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(["launcher"], self.launcher_calls)
 
+    def test_foreground_is_reapplied_while_waiting(self):
+        """战网点开始后要反复把已出现的炉石窗口切前台，否则点击会落在底层。"""
+        calls = []
+        checks = {"count": 0}
+
+        def window_ready():
+            checks["count"] += 1
+            return checks["count"] >= 3
+
+        result = self._launch(
+            process_running=_Probe(True),
+            window_ready=window_ready,
+            foreground=lambda: calls.append(1),
+            timeout=5.0,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(len(calls), 2)
+
 
 class OverlayDelayDisplayTests(unittest.TestCase):
     """延时与重试时间必须能在浮窗里看见。

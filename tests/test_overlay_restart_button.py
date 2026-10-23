@@ -109,7 +109,7 @@ class RestartWorkerTests(unittest.TestCase):
                     "failed": [], "errors": []}),
             launch_hearthstone=launch or (
                 lambda exe, **kwargs:
-                calls.append(("launch", exe)) or {
+                calls.append(("launch", exe, kwargs)) or {
                     "ok": True, "started": "launcher", "running": True,
                     "message": "炉石已启动（战网「开始游戏」）"}),
         )
@@ -120,7 +120,7 @@ class RestartWorkerTests(unittest.TestCase):
         calls = self.calls
         return SimpleNamespace(
             wait_for_main_menu=lambda **kwargs:
-            calls.append(("wait_main_menu",)) or (
+            calls.append(("wait_main_menu", kwargs)) or (
                 result if result is not None
                 else {"ok": True, "state": "main_menu", "message": "已到主界面"}))
 
@@ -132,6 +132,8 @@ class RestartWorkerTests(unittest.TestCase):
             patch.object(web_ui, "load_config",
                          return_value=config if config is not None
                          else {"log_root": "C:/Logs"}),
+            patch.object(web_ui, "_focus_hearthstone_if_present",
+                         return_value=False),
             patch.object(web_ui, "_log") as logger,
         ):
             web_ui._restart_hearthstone_worker()
@@ -150,6 +152,9 @@ class RestartWorkerTests(unittest.TestCase):
                          [call[0] for call in self.calls])
         self.assertEqual("C:/Logs", self.calls[0][1])
         self.assertEqual(Path("C:/Hearthstone.exe"), self.calls[4][1])
+        # 启动与等主界面都要带置前回调，否则游戏在底层点不着。
+        self.assertIn("foreground", self.calls[4][2])
+        self.assertIn("foreground", self.calls[5][1])
         self.assertTrue(any("炉石已重新启动" in msg for msg in self._messages(logger)))
         self.assertTrue(any("主界面" in msg for msg in self._messages(logger)))
 
