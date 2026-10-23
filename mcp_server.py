@@ -220,7 +220,7 @@ def mode(mode: str) -> str:
 
 
 @server.tool(
-    description="自动选择的卡组序号：index=1-9（0=关掉）；clear=true 关掉自动选卡组。都不给则显示当前设置。"
+    description="已停用：自动化不再每局自动选卡组。index 会被拒绝；请用 enter_battle(deck=N) 显式选，或 CLI deck-click N。"
 )
 def deck(index: int | None = None, clear: bool = False) -> str:
     args = ["deck"]

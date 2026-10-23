@@ -1375,16 +1375,20 @@ def cmd_ui(args, ctx: Ctx) -> int:
     if ui.get("note"):
         print(f"  注：{ui['note']}")
     index = payload.get("deck_index")
-    print(f"  自动选卡组：{'第 %s 个' % index if index else '关（保持你手选的卡组）'}")
+    if index:
+        print(f"  自动选卡组：已停用（保存值 {index} 已忽略；要选用 deck-click N）")
+    else:
+        print("  自动选卡组：已停用（要选用 deck-click N / enter-battle --deck N）")
     if payload.get("frame_path"):
         print(f"  这一帧已存：{payload['frame_path']}（可以直接读这张图核对）")
     return EXIT_OK
 
 
 def cmd_deck(args, ctx: Ctx) -> int:
-    """看/设「自动选择的卡组序号」（1-9；`--clear` 或 0 = 关掉）。
+    """查看/清理旧的「自动选卡组」设置（自动化已停用自动点卡组）。
 
-    每次开局前都会重新读盘，所以改完下一局就生效。
+    `deck --clear` 清掉本机旧值；`deck N` 会被 API 拒绝并提示改用
+    `deck-click N`（立即选）或 `enter-battle --deck N`（进对战时选）。
     """
     index = getattr(args, "index", None)
     if getattr(args, "clear", False) or (index is not None and int(index) <= 0):
@@ -1393,9 +1397,8 @@ def cmd_deck(args, ctx: Ctx) -> int:
         payload = ctx.get("/api/ui_state")
         current = payload.get("deck_index")
         message = (
-            f"自动选卡组：第 {current} 个"
-            if current
-            else "自动选卡组：关（保持你手选的卡组）"
+            "自动选卡组：已停用（不会再每局自动点卡组）"
+            + (f"；保存值 {current} 已忽略，可用 deck --clear 清掉" if current else "")
         )
         if ctx.json:
             print(
@@ -1407,13 +1410,18 @@ def cmd_deck(args, ctx: Ctx) -> int:
         else:
             print(message)
             print(
-                "  设一个：python hsctl.py deck 8     关掉：python hsctl.py deck --clear"
+                "  要现在选：python hsctl.py deck-click 8    "
+                "进对战时选：python hsctl.py enter-battle --deck 8"
             )
         return EXIT_OK
     if not 1 <= int(index) <= 9:
         print(f"卡组序号必须是 1-9（当前页只有 9 格），收到 {index}", file=sys.stderr)
         return EXIT_USAGE
-    return _ok_message(ctx, ctx.post("/api/deck", {"index": int(index)}))
+    payload = ctx.post("/api/deck", {"index": int(index)})
+    if not payload.get("ok"):
+        print(f"[失败] {payload.get('error') or '自动选卡组已停用'}", file=sys.stderr)
+        return EXIT_API
+    return _ok_message(ctx, payload)
 
 
 def cmd_deck_click(args, ctx: Ctx) -> int:
@@ -1526,11 +1534,11 @@ def cmd_queue(args, ctx: Ctx) -> int:
     """待做命令队列：一次性提交多条命令，控制台按顺序执行（断线不影响）。
 
     用法：
-      hsctl queue run "stop mode=after_game" "wait-stopped" "deck 1" "start"
+      hsctl queue run "stop mode=after_game" "wait-stopped" "deck-click 1" "start"
       hsctl queue status
       hsctl queue cancel
     支持：stop [mode=after_game|now] / wait-stopped [timeout=秒] /
-          deck 序号 | deck-click 序号 / mode wild|standard|casual /
+          deck 序号（已停用，会被拒绝）| deck-click 序号 / mode wild|standard|casual /
           prepare / start [keep_score=1] / delay 秒
     某一步失败即停，剩余标记 skipped；提交前会整体校验语法，写错一条都不收。
     """
@@ -1559,7 +1567,7 @@ def cmd_queue(args, ctx: Ctx) -> int:
     steps = list(getattr(args, "steps", []) or [])
     if not steps:
         print(
-            '用法：hsctl queue run "stop mode=after_game" "wait-stopped" "deck 1" "start"',
+            '用法：hsctl queue run "stop mode=after_game" "wait-stopped" "deck-click 1" "start"',
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -3394,7 +3402,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(handler=cmd_ui)
 
-    p = sub.add_parser("deck", parents=[common], help="自动选择的卡组序号（1-9）")
+    p = sub.add_parser("deck", parents=[common], help="旧的自动选卡组设置（已停用；用 deck-click 选）")
     p.add_argument(
         "index",
         nargs="?",
@@ -3503,7 +3511,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "steps",
         nargs="*",
-        help='run 时：一条条命令字符串，如 "stop mode=after_game" "wait-stopped" "deck 1" "start"',
+        help='run 时：一条条命令字符串，如 "stop mode=after_game" "wait-stopped" "deck-click 1" "start"',
     )
     p.add_argument("--no-wait", action="store_true", help="run 时只提交，不等队列跑完")
     p.set_defaults(handler=cmd_queue)

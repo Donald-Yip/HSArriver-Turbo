@@ -750,7 +750,11 @@ def select_deck_if_configured(*, settings: Optional[dict] = None,
                               attempts: int = 3, wait: float = 0.3,
                               sleep: Optional[Callable] = None,
                               **kwargs) -> dict:
-    """按 ui_config.json 的 `battle_entry.deck_index` 选卡组；没配置就跳过。
+    """按显式传入的 `deck_index` 选卡组（**自动化已不再调用**）。
+
+    用户 2026-10-23 口径：自动化不再每局自动点卡组，避免覆盖手选；
+    选卡组只走遥控显式命令 `hsctl deck-click N` / `enter-battle --deck N`。
+    本函数保留给显式调用者/单测使用。
 
     名牌还没画出来时（`skipped`）短重试几次：调用方原来靠「进界面后先等 2 秒」
     兜住动画，现在那 2 秒去掉了，这里用 3 × 0.3s 重抓代替。重试只重新抓图

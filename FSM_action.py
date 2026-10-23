@@ -635,20 +635,12 @@ def ChoosingHeroAction():
             _keep_score_once()
             return FSM_CHOOSING_HERO
 
-    # 上分闸门之后、点「开始」之前：按 ui_config.json 的 battle_entry.deck_index
-    # 选卡组（没配置就跳过，保持"你手选哪副就用哪副"的历史行为）。放在这里的三个
-    # 原因：① 主界面路径与"打完一局回来"都会经过这里；② 闸门命中时上面已经 return，
-    # 不会白选；③ 点「开始」的时机/语义完全没变。选之前会验"这一格确实像卡组"，
-    # 不像就一格都不点（避免在别的界面上乱点）。
-    try:
-        import battle_entry
-        picked = battle_entry.select_deck_if_configured(
-            logger=lambda text: info_print(f"[SYS] {text}"))
-        if not picked.get("ok") and not picked.get("skipped"):
-            warn_print(f"自动选卡组未完成：{picked.get('error')}")
-    except Exception as exc:
-        warn_print(f"自动选卡组失败（忽略，继续匹配）：{exc}")
-
+    # 选卡组：**不在自动化里自动点**（用户 2026-10-23 口径）。
+    # 旧行为是每局按 ui_config.json 的 battle_entry.deck_index 点第 N 格，
+    # 会覆盖玩家手选的卡组；现在只保留遥控显式命令：
+    #   * hsctl deck-click N       —— 自动化未运行时立即点第 N 格；
+    #   * hsctl enter-battle --deck N —— 进入对战时顺带选第 N 格。
+    # 需要换卡组时先停自动化再执行上述命令，不要在这里恢复自动点击。
     click.run_hearthstone_action(click.match_opponent)
     _start_milestone("已点「开始匹配」")
     time.sleep(1)

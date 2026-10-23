@@ -192,7 +192,7 @@ python hsctl.py --json ui             # 机器可读
 
 ```powershell
 python hsctl.py enter-battle                    # 拉起炉石 → 点「传统对战」→ 停在选套牌界面
-python hsctl.py enter-battle --deck 8           # 顺带自动选第 8 个卡组
+python hsctl.py enter-battle --deck 8           # 顺带选第 8 个卡组
 python hsctl.py enter-battle --deck 8 --start   # 再点「开始」（等于开始排队）
 python hsctl.py enter-battle --no-wait          # 只下发，不等它跑完
 python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每 3s 看一眼
@@ -214,20 +214,22 @@ python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每
 
 自动化正在跑时这个命令会**被拒绝**（鼠标归 FSM 管，两边同时点会互相打断）。
 
-### 4.1.4 自动选卡组 `deck`
+### 4.1.4 选卡组（自动选卡组已停用）
 
 ```powershell
-python hsctl.py deck           # 看当前设置
-python hsctl.py deck 8         # 每局自动选第 8 个卡组（按当前页 3×3 的第 8 格）
-python hsctl.py deck --clear   # 关掉（保持你手选的卡组）
+python hsctl.py deck-click 8           # 立即点第 8 格（自动化未运行时）
+python hsctl.py enter-battle --deck 8  # 进入对战时顺带选第 8 格
+python hsctl.py deck --clear           # 清掉本机旧的自动选卡组设置
 ```
 
-写入 `ui_config.json` 的 `battle_entry.deck_index`，**每局开始前重新读盘**，所以改完下一局就生效。
+**自动化不再每局自动点卡组**（用户 2026-10-23 口径）：旧版会按 `ui_config.json` 的
+`battle_entry.deck_index` 每局点一次，覆盖玩家手选的卡组。现在 `deck` 命令只用于查看/清理
+旧值；`deck N` 会被拒绝并提示改用 `deck-click N` / `enter-battle --deck N`。
 
-- 默认是**关**的：脚本只按名牌文字判断，认不出「卡牌不足」的卡组，所以不替你选；
-  要用时自己指定一个可用格子。
-- 只寻址**当前页可见的 9 格**；卡组多到分页时第 10 副起不可寻址。
-- 点之前会验"这一格确实像卡组"（名牌上有白字），不像就一格都不点。
+- `deck-click N` 只寻址**当前页可见的 9 格**，且会先验“这一格确实像卡组”（名牌上有白字），
+  不像就一格都不点。
+- 自动化运行中不能换卡组；先停自动化，再用 `deck-click` 或 `enter-battle --deck`。
+- 卡组多到分页时第 10 副起不可寻址。
 
 
 ### 4.2 对战控制

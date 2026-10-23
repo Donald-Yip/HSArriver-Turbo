@@ -188,8 +188,7 @@ python hsctl.py log -f              # 实时跟随日志（Ctrl+C 退出）
 python hsctl.py screenshot          # 抓一帧画面存成 PNG，返回路径（agent 看画面用）
 python hsctl.py ui                  # 现在在哪个界面（主界面 / 选择套牌）+ 匹配分
 python hsctl.py mode wild           # 手动切换对战模式：点右上角模式按钮 → 点狂野盾牌
-python hsctl.py deck 6              # 每局自动选第 6 副卡组（1-9；deck 0 关掉）
-python hsctl.py deck-click 6        # 秒级快选：直接点选择套牌界面第 6 格（不走状态机）
+python hsctl.py deck-click 6        # 速选：直接点选择套牌界面第 6 格（自动化未运行；自动选卡组已停用）
 python hsctl.py enter-battle        # 一键进入对战：拉起炉石 → 点传统对战 → 停在选择套牌界面
 python hsctl.py enter-battle --deck 6 --start   # 顺带选第 6 副，并点「开始」排队
 python hsctl.py start               # 开始对战
@@ -284,7 +283,7 @@ python hsctl.py serve start --via-task                 # 没在跑就拉起来�
 python hsctl.py --json status                          # 看 is_admin / name_match / 阶段
 python hsctl.py prepare                                # 开浮窗 + 切炉石前台（不开打）
 python hsctl.py mode wild                              # 需要时切模式
-python hsctl.py deck 6                                 # 需要时设自动选第 6 副
+python hsctl.py deck-click 6                           # 需要时立即选第 6 副（自动选卡组已停用）
 python hsctl.py start                                  # 开打
 python hsctl.py log -f                                 # 跟随日志观察（或 --json status --watch 2）
 python hsctl.py concede now                            # 打不过：手动投降（运行中可用）
@@ -292,7 +291,7 @@ python hsctl.py stop --after-game                      # 收工：打完本局�
 ```
 
 > 想让 agent 一次提交**多条**动作、断线也不影响？用待做命令队列：  
-> `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "deck 6" "start"`。  
+> `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "deck-click 6" "start"`。  
 > 写法与支持的动作见 [`docs/CLI.md`](docs/CLI.md) 与 [`SKILL.md`](SKILL.md) §4。
 
 ---

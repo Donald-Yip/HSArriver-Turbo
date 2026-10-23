@@ -3262,32 +3262,37 @@ def api_ui_learn(body=None) -> dict:
 
 
 def api_save_deck(body) -> dict:
-    """设置"自动选择的卡组序号"（ui_config.json 的 `battle_entry.deck_index`）。
+    """查看/清理旧的「自动选卡组」设置（`battle_entry.deck_index`）。
 
-    每次开局前都会重新读盘，所以改完下一局就生效，不用重启脚本。
-    `{"clear": true}` = 关掉自动选卡组（保持你手选的卡组）。
+    用户 2026-10-23 口径：**自动化不再每局自动点卡组**（会覆盖手选）。
+    选卡组只走显式遥控：
+      * `deck-click N`：现在立即点第 N 格（自动化未运行时）；
+      * `enter-battle --deck N`：进入对战时顺带选第 N 格。
+    本接口只保留 `{"clear": true}` 用来清掉本机旧值；带 index 的保存请求
+    一律拒绝并提示改用上面的命令。
     """
     body = body or {}
+    if not body.get("clear"):
+        return {
+            "ok": False,
+            "error": (
+                "自动选卡组已停用（不会再每局自动点卡组）。"
+                "要现在选：deck-click N；进入对战时选：enter-battle --deck N。"
+            ),
+        }
     from config import save_battle_entry_setting
 
-    index = None if body.get("clear") else body.get("index")
     try:
-        saved = save_battle_entry_setting("deck_index", index)
+        saved = save_battle_entry_setting("deck_index", None)
     except (KeyError, ValueError) as exc:
         return {"ok": False, "error": str(exc)}
     except Exception as exc:
-        return {"ok": False, "error": f"保存卡组序号失败：{exc}"}
+        return {"ok": False, "error": f"清空旧卡组设置失败：{exc}"}
     value = saved.get("deck_index")
-    if value is None:
-        message = "已关闭自动选卡组（保持你手选的卡组）"
-    else:
-        import battle_entry
-
-        x, y = battle_entry.deck_slot_point(int(value))
-        message = (
-            f"已设置：每局自动选第 {value} 个卡组"
-            f"（点击点 {x},{y}；只按当前页的 9 格算）"
-        )
+    message = (
+        "已清空旧的自动选卡组设置（自动化本来就不再自动点卡组）。"
+        "要选卡组请用 deck-click N / enter-battle --deck N。"
+    )
     _log("SYS", message)
     return {"ok": True, "deck_index": value, "message": message}
 

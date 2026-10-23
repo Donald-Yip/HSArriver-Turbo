@@ -195,16 +195,15 @@ python hsctl.py ui --learn              # 站到对应界面时重裁识别模�
 python hsctl.py enter-battle --deck 8   # 默认停在选择套牌界面（不点「开始」）
 python hsctl.py enter-battle --deck 8 --start   # 连「开始」一起点（等于开始排队）
 python hsctl.py deck-click 8            # 快速选卡组：直接点第 8 格（秒级，不走状态机）
-                                        # 前提：当前已在选牌界面；那一格不像卡组就不点
-python hsctl.py deck                    # 看自动选择的卡组序号
-python hsctl.py deck 8                  # 每局自动选第 8 副；hsctl deck --clear 关掉
+                                        # 前提：当前已在选牌界面、自动化未运行；那一格不像卡组就不点
+python hsctl.py deck --clear            # 清掉旧的「自动选卡组」设置（自动选卡组已停用）
 
 # 切换对战模式（手动、同步约 2-3 秒：点右上角开模式菜单 → 点对应模式）
 python hsctl.py mode wild               # wild | standard | casual（或 狂野/标准/休闲）
                                         # 前提：停在选择套牌界面、自动化未运行（详见下文）
 
 # 待做命令队列：一次提交多条，控制台后台按顺序执行（断线不影响，可查可取消）
-python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 1" "start"
+python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck-click 1" "start"
 python hsctl.py queue status            # 看每步进度（pending/running/ok/failed/skipped）
 python hsctl.py queue cancel            # 取消（当前步跑完后停止）
 #   支持的动作：stop [mode=after_game] / wait-stopped [timeout=秒] / deck 序号 /
@@ -289,7 +288,7 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
   按 S 保存 —— **ROI 不是热开关**：保存后要在下次「开始对战」时读取一次才生效
   （`fsm.init()` 重建 `RecommendationConfig`），不用重启脚本进程。
 - 典型场景：上传说后换模式继续——
-  `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck 2" "start"`。
+  `python hsctl.py queue run "stop mode=after_game" "wait-stopped" "mode wild" "deck-click 2" "start"`。
 
 ### 4.3 卡组识别投降规则（`surrender`）
 
@@ -329,7 +328,8 @@ python hsctl.py serve stop --hard                # 跳过自停，直接结束�
 `hsctl delays set` 的回话里有 `effects` 字段直接告诉你每项的实际时机 —— **以此为准**，
 不要凭本表猜。活人感 / 存活检测 / 中断重启 / 自动投降 / 段位目标是每次读盘，改完立即生效。
 
-**卡组序号**（`hsctl deck 8`）也是每次开局前重读 —— 改完**下一局**生效，不用重启脚本。
+**自动选卡组已停用**：自动化不再每局按 `hsctl deck 8` 点卡组（会覆盖手选）。
+选卡组只用 `deck-click N`（自动化未运行时立即点）或 `enter-battle --deck N`（进对战时选）。
 
 ## 6. 常见拒绝与处理
 

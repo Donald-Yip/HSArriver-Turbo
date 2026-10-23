@@ -477,9 +477,9 @@ def save_feedback_setting(key: str, value) -> dict:
 
 # ---------------------------------------------------------------- 进入对战
 # ui_config.json 的 battle_entry 段（「一键进入对战」的行为参数）。
-#   deck_index: 自动选择的卡组序号 1-9（None = 不自动选，保持历史行为）。
-#               不默认开的原因：只按名牌文字判断，认不出「卡牌不足」的卡组，
-#               选错卡组会直接开始一局错的。要用时自己指定一个可用格子。
+#   deck_index: **已停用的旧设置**（用户 2026-10-23 口径：自动化不再每局自动点
+#               卡组，避免覆盖手选）。保留读写只为兼容旧配置与 `deck --clear`；
+#               选卡组请用 `deck-click N` / `enter-battle --deck N`。
 #   check_interval_seconds: 等界面时"识别一次 / 点一次中心"的间隔。
 #   *_timeout_seconds: 等主界面 / 等选择套牌界面的超时，超时就退出（绝不盲点）。
 DEFAULT_BATTLE_ENTRY = {
@@ -498,7 +498,8 @@ _BATTLE_ENTRY_FLOAT_KEYS = (
 def battle_entry_settings() -> dict:
     """读取 ui_config.json 的 battle_entry 段（缺字段/写坏时回退默认值）。
 
-    每次调用都重新读盘：这样 `hsctl deck 8` 改完，下一局就生效，不用重启脚本。
+    `deck_index` 已是**停用的旧设置**：只用于状态显示/兼容旧配置，
+    自动化不再按它点卡组。
     """
     cfg = dict(DEFAULT_BATTLE_ENTRY)
     data = _load_ui_config().get("battle_entry")
@@ -528,7 +529,7 @@ def battle_entry_settings() -> dict:
 def save_battle_entry_setting(key: str, value) -> dict:
     """把 battle_entry 段里的某一项写进 ui_config.json（只改这一段）。
 
-    `deck_index=None` 表示"不自动选卡组"（写回 null）。
+    `deck_index=None` 只用于清掉停用的旧自动选卡组设置；自动化已不读取它。
     非法值抛 ValueError，让接口层把话说清楚，而不是悄悄写成默认值。
     """
     if key not in DEFAULT_BATTLE_ENTRY:
