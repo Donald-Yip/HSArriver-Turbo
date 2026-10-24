@@ -125,8 +125,18 @@ class RecommendationFlow:
             stable_frame = observed["frame"]
             if self.waiting_instruction is not None:
                 self._clear_waiting()
-            proposed = self.parser.parse(
-                evidence, state.game_num_turns_in_play, revision)
+            try:
+                proposed = self.parser.parse(
+                    evidence, state.game_num_turns_in_play, revision)
+            except Exception:
+                # 解析失败也把 OCR 原文留痕：反馈包里的 raw 常常是空的，
+                # 没有原文只能靠猜。2026-10-24「目标是已方2号位」被 OCR 把
+                # 「己」认成「已」、连续重试 70+ 次，就是靠这条日志定位的。
+                for line in str(
+                        getattr(evidence, "normalized_text", "") or "").splitlines():
+                    if line.strip():
+                        print(f"[推荐] OCR原文：{line.strip()}")
+                raise
             # 先留痕再适配：适配抛错时也要能看到"盒子到底写了什么"。线上出现过
             # 连续 3090 次 choose_one_name_not_unique 却一条原文都没留下的情况，
             # 就是因为这行原来打在适配之后。
