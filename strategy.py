@@ -29,6 +29,10 @@ class StrategyState:
         self.oppo_weapon = None
         self.oppo_hand_card_num = 0
         self.discover_choice_count = log_state.discover_choice_count
+        # 选择面板正在弹出但还没 ready（见 LogState.general_choice_pending）：
+        # 适配层用它避免把「选择我方N号位卡牌」误判成选自己的随从。
+        self.discover_choice_pending = bool(
+            getattr(log_state, "general_choice_pending", False))
         # 选择项下标 -> 卡牌 ID：复制一份，执行阶段要用它认回溯/维持
         # （日志状态在选择结束后会清空，快照得留着自己的）。
         self.general_choice_cards = dict(

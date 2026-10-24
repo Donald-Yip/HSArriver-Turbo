@@ -176,6 +176,18 @@ class DiscoverChoiceAction:
 
 
 @dataclass(frozen=True)
+class SelectTargetAction:
+    """只点一个场上目标（选项/发现结算后的“选择随从/英雄”）。
+
+    与 `DiscoverChoiceAction.target` 的区别：这里**没有**选项可点，游戏当前
+    就停在“请选择目标”状态，盒子打印的是「选择对方N号位卡牌」。只左键点目标，
+    不右键取消（取消会把这个目标选择撤销）。
+    """
+    target: Target
+    turn_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class UseLocationAction:
     location_index: int
     card_id: str
@@ -233,6 +245,7 @@ ManualAction = Union[
     TradeCardAction,
     HeroPowerAction,
     DiscoverChoiceAction,
+    SelectTargetAction,
     UseLocationAction,
     AttackAction,
     LaunchStarshipAction,
@@ -482,6 +495,26 @@ class ClickExecutor:
             self.sleep(delay)
         self._click_target(target, my_count, oppo_count)
         self.click.cancel_click()
+
+    def select_target(self, target, my_count=0, oppo_count=0, hand_count=0):
+        """只点一个目标（选项/发现结算后的「选择对方N号位卡牌」）。
+
+        与 `choose_discover_card` 带 target 的路径不同：这里没有选项要再点，
+        游戏已经停在“请选择目标”，所以只左键点目标、**不右键取消**（右键会把
+        这次目标选择撤销，等于白点）。手牌目标从手牌扇形区点。
+        """
+        return self._safe_action(
+            lambda: self._select_target(target, my_count, oppo_count, hand_count))
+
+    def _select_target(self, target, my_count, oppo_count, hand_count):
+        if target.kind == "hand":
+            if target.index is None or not 0 <= target.index < hand_count:
+                raise ValueError("hand_target_out_of_range")
+            # 手牌区域的牌比场上目标晚一点出现，给 UI 一点收起时间。
+            self.sleep(0.3)
+            self.click.choose_card(target.index, hand_count)
+            return
+        self._click_target(target, my_count, oppo_count)
 
     def attack(self, attacker, target, my_count, oppo_count):
         return self._safe_action(
@@ -1054,6 +1087,19 @@ class ManualController:
                 action.choice_index, action.choice_count)
             return ActionExecutionResult(
                 True, f"已选择发现选项：{action.choice_index + 1}号位")
+
+        if isinstance(action, SelectTargetAction):
+            if action.target is None or not self._target_exists(action.target, state):
+                # 目标已经没了/换了人：一下都不点，交给外层重新读推荐。
+                return self._reject("目标已经不存在，未执行选择。")
+            label = self._target_label(action.target)
+            self.executor.select_target(
+                self._target_for_click(action.target, state),
+                self._board_slot_count(state, "friendly"),
+                self._board_slot_count(state, "enemy"),
+                len(state.my_hand_cards),
+            )
+            return ActionExecutionResult(True, f"已选择目标：{label}")
 
         if isinstance(action, UseLocationAction):
             locations = getattr(state, "my_locations", [])

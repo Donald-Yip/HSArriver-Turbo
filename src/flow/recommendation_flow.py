@@ -359,6 +359,10 @@ class RecommendationFlow:
             return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.CHOOSE_DISCOVER:
             return ResultStatus.WAITING_RECOMMENDATION
+        if proposed.action == ActionKind.SELECT_TARGET:
+            # 选项结算后的“点目标”：点一下游戏就会继续结算，面板文本可能
+            # 稍后才更新。和发现一样先 WAITING，避免同一目标被连续重点。
+            return ResultStatus.WAITING_RECOMMENDATION
         if log_changed:
             return ResultStatus.WAITING_RECOMMENDATION
         return ResultStatus.RETRY

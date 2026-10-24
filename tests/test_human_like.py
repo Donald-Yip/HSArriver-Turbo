@@ -338,6 +338,13 @@ class PostActionPauseHookTests(unittest.TestCase):
         self.assertFalse(handled)
         self.assertEqual([], self.areas)
 
+    def test_select_target_skips_the_pause(self):
+        """选项结算后的“点目标”是同一次出牌的收尾，不再额外看手牌。"""
+        handled = self._pause(ActionKind.SELECT_TARGET)
+
+        self.assertFalse(handled)
+        self.assertEqual([], self.areas)
+
     def test_non_attack_actions_still_look_at_the_hand(self):
         for kind in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
                      ActionKind.TRADE_CARD, ActionKind.USE_LOCATION,

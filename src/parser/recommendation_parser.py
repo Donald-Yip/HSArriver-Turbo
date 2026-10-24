@@ -31,6 +31,17 @@ class RecommendationParser:
     _starship = re.compile(r"^(?:发射|操作)(?:我方)?([1-9]\d*)号位星舰$")
     _discover = re.compile(
         r"^(?:选择我方([1-4])号位卡牌|选(?:择)?第([1-4])个选项)$")
+    # 选项/发现结算后，游戏还要你再点一个目标时盒子的写法（真实面板实测）：
+    #   「选择对方2号位卡牌」+ 下一行目标卡名（克苏恩「凝视」、鲍勃「招募随从」）。
+    # 与发现面板的「选择我方N号位卡牌」区别：带「对方/敌方」的只能是场面目标；
+    # 「选择我方N号位随从」用「随从」二字，也不会和面板的「卡牌」混淆。
+    # 「选择我方N号位卡牌」仍按发现选项解析，没有选项面板时才由适配层按卡名
+    # 判定它其实是“选自己的随从/手牌”（见 recommendation_adapter）。
+    _select_target = re.compile(
+        r"^(?:选择(对方|敌方)([1-9]\d*)号位(?:卡牌|随从)"
+        r"|选择(我方)([1-9]\d*)号位随从"
+        r"|选择(对方|敌方|我方)英雄)$")
+    _select_target_sides = {"我方": "friendly", "对方": "enemy", "敌方": "enemy"}
     # HSAng 时间线提示字：按钮文案可能是纯「回溯/维持」，也可能是带标题的
     # 「回溯时间线/维持时间线」（OCR 也可能把两者读成「回溯」+「时间线」两行，
     # 其中「时间线」非动作行会被过滤，只剩「回溯」）。
@@ -49,6 +60,7 @@ class RecommendationParser:
                     or parser._target.fullmatch(line)
                     or parser._friendly_hand_target.fullmatch(line)
                     or line in parser._enemy_hero_targets
+                    or parser._select_target.fullmatch(line)
                     or "目标" in line
                     or line == "选择卡牌"
                     or (index > 0 and lines[index - 1] == "选择卡牌")):
@@ -61,6 +73,27 @@ class RecommendationParser:
         if not lines:
             raise RecommendationParseError("empty_recommendation")
         action_lines = [line for line in lines if self._is_action_line(line)]
+        # 「选择对方N号位卡牌」有两种用法：
+        #   * 面板上只有它 → 它本身就是一条动作（SELECT_TARGET）；
+        #   * 和别的动作同屏 → 它只是那个动作的目标，改写成现成的
+        #     「目标是对方N号位」，让打出/攻击/发现/地标/技能等原有分支直接复用。
+        select_lines = [line for line in lines
+                        if self._select_target.fullmatch(line)]
+        if select_lines:
+            if len(select_lines) > 1:
+                raise RecommendationParseError("ambiguous_target")
+            select_line = select_lines[0]
+            select_match = self._select_target.fullmatch(select_line)
+            if not action_lines:
+                return self._build(
+                    ocr, turn_number, log_revision, ActionKind.SELECT_TARGET,
+                    target=self._select_target_ref(select_match),
+                    target_name=self._line_after(
+                        self._reference_a_lines(ocr.normalized_text),
+                        select_line))
+            target_line = self._as_target_line(select_match)
+            lines = [target_line if line == select_line else line
+                     for line in lines]
         if self._keep_all in action_lines:
             if len(action_lines) != 1:
                 raise RecommendationParseError("ambiguous_actions")
@@ -189,7 +222,11 @@ class RecommendationParser:
                 ocr, turn_number, log_revision, ActionKind.CHOOSE_DISCOVER,
                 source=SlotRef("discover_slot", "friendly",
                                int(discover.group(1) or discover.group(2))),
-                target=target)
+                target=target,
+                # 下一行卡名：没有选项面板时，适配层用它判断「选择我方N号位
+                # 卡牌」到底指自己的哪个随从/哪张手牌（两边都能对上就拒绝）。
+                target_name=self._line_after(
+                    self._reference_a_lines(ocr.normalized_text), primary))
 
         attack = self._minion_attack.fullmatch(primary)
         hero_attack = self._hero_attack.fullmatch(primary)
@@ -293,6 +330,50 @@ class RecommendationParser:
             if (not candidate or "目标" in candidate
                     or candidate.startswith("放置于")
                     or parser._is_action_line(candidate)
+                    or parser._select_target.fullmatch(candidate)
+                    or candidate in parser._reference_a_headers
+                    or candidate in parser._reference_b_headers
+                    or "记牌器" in candidate):
+                return None
+            return candidate
+        return None
+
+    @classmethod
+    def _select_target_ref(cls, match):
+        """把「选择对方N号位卡牌/我方N号位随从/对方英雄」变成 SlotRef。"""
+        if match is None:
+            return None
+        side = match.group(1) or match.group(3) or match.group(5)
+        index = match.group(2) or match.group(4)
+        owner = cls._select_target_sides[side]
+        if index:
+            return SlotRef("board_slot", owner, int(index))
+        return SlotRef("hero", owner)
+
+    @classmethod
+    def _as_target_line(cls, match):
+        """把目标选择行改写成既有目标句式（复用打出/攻击/发现等目标逻辑）。"""
+        ref = cls._select_target_ref(match)
+        if ref.kind == "hero":
+            return "目标是对方英雄" if ref.owner == "enemy" else "目标是我方英雄"
+        if ref.owner == "enemy":
+            return f"目标是对方{ref.index}号位"
+        return f"目标是我方{ref.index}号位"
+
+    @staticmethod
+    def _line_after(raw_lines, anchor):
+        """取 anchor 后面那一行卡名（过滤动作/目标/标题等）；没有则 None。"""
+        if not anchor:
+            return None
+        parser = RecommendationParser()
+        for index, line in enumerate(raw_lines):
+            if line != anchor or index + 1 >= len(raw_lines):
+                continue
+            candidate = raw_lines[index + 1]
+            if (not candidate or "目标" in candidate
+                    or candidate.startswith("放置于")
+                    or parser._is_action_line(candidate)
+                    or parser._select_target.fullmatch(candidate)
                     or candidate in parser._reference_a_headers
                     or candidate in parser._reference_b_headers
                     or "记牌器" in candidate):

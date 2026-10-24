@@ -14,6 +14,10 @@ class ActionKind(str, Enum):
     USE_LOCATION = "use_location"
     LAUNCH_STARSHIP = "launch_starship"
     CHOOSE_DISCOVER = "choose_discover"
+    # 四选一/发现选完选项后，游戏还要你再点一个目标（克苏恩「凝视」、鲍勃
+    # 「招募随从」）。盒子会打成「选择对方N号位卡牌」，与选项面板的「选择我方
+    # N号位卡牌」不是一回事：这个动作不点选项，只点场上目标。
+    SELECT_TARGET = "select_target"
     END_TURN = "end_turn"
     TIMELINE_UNDO = "timeline_undo"
     TIMELINE_KEEP = "timeline_keep"

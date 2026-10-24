@@ -176,6 +176,19 @@ class LogState:
         count = len(self.general_choice_indexes)
         return count if 1 <= count <= 4 else None
 
+    @property
+    def general_choice_pending(self):
+        """选择面板刚出现、日志还没写 BEGIN（ready）的那一小段。
+
+        发现/选项面板的选项行先到、`ChoiceCardMgr... BEGIN` 后到；这期间
+        `discover_choice_count` 还是 None。适配层要能区分“面板正在弹出”和
+        “选项已结算、现在要选目标”，否则会把「选择我方N号位卡牌」误判成
+        选自己的随从。
+        """
+        return (self.general_choice_id is not None
+                and self.general_choice_player in (None, self.my_player_id)
+                and not self.general_choice_ready)
+
     def clear_general_choice(self):
         self.general_choice_id = None
         self.general_choice_player = None

@@ -271,8 +271,9 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
             return False
         # ActionKind 是 str 枚举，所以字符串 "attack" 也能匹配上。
         # MULLIGAN 是防御性兜底：换牌流程本来就不挂这个挂点。
+        # SELECT_TARGET 是同一次出牌的收尾（选项结算后点目标），不额外看手牌。
         if action_kind in (ActionKind.ATTACK, ActionKind.LAUNCH_STARSHIP,
-                           ActionKind.MULLIGAN):
+                           ActionKind.MULLIGAN, ActionKind.SELECT_TARGET):
             return False
         click.human_like_pause()
         return True

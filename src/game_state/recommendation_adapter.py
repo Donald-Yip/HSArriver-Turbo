@@ -5,8 +5,8 @@ import re
 
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
-    LaunchStarshipAction, PlayCardAction, Target, TimelineAction,
-    TradeCardAction, UseLocationAction,
+    LaunchStarshipAction, PlayCardAction, SelectTargetAction, Target,
+    TimelineAction, TradeCardAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import (
@@ -139,10 +139,15 @@ def adapt_action(proposed, state):
             getattr(location, "entity_id", None), target=target)
         return AdaptedAction(manual, getattr(location, "entity_id", None),
                              target_id, "location_changed")
+    if proposed.action == ActionKind.SELECT_TARGET:
+        return _adapt_select_target(proposed, state)
     if proposed.action == ActionKind.CHOOSE_DISCOVER:
         choice_count = getattr(state, "discover_choice_count", None)
         if choice_count not in (1, 2, 3, 4):
-            raise RecommendationStateError("discover_choice_count_unavailable")
+            # 没有选项面板时，盒子的「选择我方N号位卡牌」其实是选项结算后
+            # 让你选自己的随从/手牌（对方版本由 SELECT_TARGET 处理）。只有能
+            # 靠卡名唯一确认才点，判不出就明确报错重试，绝不乱点一个随从。
+            return _adapt_choice_target_only(proposed, state)
         if (proposed.source is None
                 or proposed.source.kind != "discover_slot"
                 or proposed.source.owner != "friendly"
@@ -185,6 +190,104 @@ def adapt_action(proposed, state):
         return AdaptedAction(
             TimelineAction("keep"), None, None, "timeline_clicked")
     raise RecommendationStateError("unsupported_action")
+
+
+def _adapt_select_target(proposed, state):
+    """选项结算后的「选择对方N号位卡牌/对方英雄」：只点场上目标。
+
+    与 `_discover_target`（选项还没点时一起给出的目标）不同：这时选项面板
+    已经关掉，游戏就停在“请选择目标”，点一下目标即可，不需要再点选项、
+    也不右键取消。
+    """
+    target = proposed.target
+    if target is None:
+        raise RecommendationStateError("select_target_missing")
+    side = target.owner
+    if side not in {"friendly", "enemy"}:
+        raise RecommendationStateError("select_target_unsupported")
+    if target.kind == "hero":
+        hero = (getattr(state, "my_hero", None) if side == "friendly"
+                else getattr(state, "oppo_hero", None))
+        if hero is None:
+            raise RecommendationStateError("select_target_missing")
+        entity_id = getattr(hero, "entity_id", None)
+        return AdaptedAction(
+            SelectTargetAction(Target(side, "hero", None, entity_id)),
+            None, entity_id, "target_selected")
+    if target.kind != "board_slot":
+        raise RecommendationStateError("select_target_unsupported")
+    if side == "friendly" and _choice_panel_in_play(state):
+        # 「选择我方N号位随从」原则上只出现在目标阶段；万一选项面板还开着，
+        # 宁可不点——面板选项号位与场面号位是两套编号，点错代价更大。
+        raise RecommendationStateError("select_target_while_choice_open")
+    try:
+        entry = board_slot(state, side, target.index)
+    except RecommendationStateError as exc:
+        raise RecommendationStateError("select_target_out_of_range") from exc
+    if entry.kind != "minion":
+        raise RecommendationStateError("target_not_minion")
+    entity_id = getattr(entry.entity, "entity_id", None)
+    return AdaptedAction(
+        SelectTargetAction(
+            Target(side, "minion", entry.collection_index, entity_id)),
+        None, entity_id, "target_selected")
+
+
+def _choice_panel_in_play(state):
+    """发现/选项面板是否还开着（或正在弹出但日志还没 ready）。"""
+    if getattr(state, "discover_choice_count", None) in (1, 2, 3, 4):
+        return True
+    return bool(getattr(state, "discover_choice_pending", False))
+
+
+def _adapt_choice_target_only(proposed, state):
+    """没有选项面板时，把「选择我方N号位卡牌」解释成选自己的随从/手牌。
+
+    盒子在选项结算后打印「选择我方N号位卡牌」，没有“随从”二字，无法只靠
+    文字判断是场面还是手牌。这里用面板下一行的目标卡名去两边比对：唯一命中
+    才点；两边都命中或都不命中一律拒绝（`choice_target_ambiguous` /
+    `choice_target_unknown`），宁可重试也不随机点一个随从。
+    """
+    source = proposed.source
+    if (source is None or source.kind != "discover_slot"
+            or source.owner != "friendly" or not source.index):
+        raise RecommendationStateError("discover_choice_count_unavailable")
+    if _choice_panel_in_play(state):
+        raise RecommendationStateError("choice_panel_pending")
+    name = getattr(proposed, "target_name", None)
+    if not name:
+        raise RecommendationStateError("choice_target_unknown")
+    index = source.index
+    board_entry = None
+    try:
+        candidate = board_slot(state, "friendly", index)
+    except RecommendationStateError:
+        candidate = None
+    if (candidate is not None and candidate.kind == "minion"
+            and _name_matches(name, getattr(candidate.entity, "name", None))):
+        board_entry = candidate
+    hand_card = None
+    hand_index = index - 1
+    if 0 <= hand_index < len(getattr(state, "my_hand_cards", [])):
+        card = state.my_hand_cards[hand_index]
+        if _name_matches(name, getattr(card, "name", None)):
+            hand_card = card
+    if board_entry is not None and hand_card is not None:
+        raise RecommendationStateError("choice_target_ambiguous")
+    if board_entry is not None:
+        entity_id = getattr(board_entry.entity, "entity_id", None)
+        return AdaptedAction(
+            SelectTargetAction(
+                Target("friendly", "minion", board_entry.collection_index,
+                       entity_id)),
+            None, entity_id, "target_selected")
+    if hand_card is not None:
+        entity_id = getattr(hand_card, "entity_id", None)
+        return AdaptedAction(
+            SelectTargetAction(
+                Target("friendly", "hand", hand_index, entity_id)),
+            None, entity_id, "target_selected")
+    raise RecommendationStateError("choice_target_unknown")
 
 
 def _discover_target(proposed, state):
