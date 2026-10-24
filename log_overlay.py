@@ -21,6 +21,7 @@ Buttons:
   * 重启炉石              — confirm, then kill Hearthstone + wipe logs + relaunch
   * 退出浮窗              — close only this window (script keeps running)
   * 退出脚本              — stop automation and exit the whole process
+  * 装好没反应？           — open a self-check dialog (version / selfcheck / calibration)
   * 最小化 / 展开          — collapse to a title bar / restore (标题行右侧)
 Button labels are **plain text on purpose**: the old ▶/⏹/⏸/💾/♻/🚪/📊 glyphs
 have no glyphs in Microsoft YaHei / Segoe UI and rendered as tofu boxes.
@@ -121,9 +122,10 @@ BTN_LAYOUT = {
     "restart": (5, 0),
     "exit_overlay": (5, 1),
     "exit": (6, 0),
+    "self_check": (7, 0),
 }
 # 需要横跨整行的按钮（单独一行）。
-BTN_SPAN = {"stop_after": 2, "exit": 2, "export_feedback": 2}
+BTN_SPAN = {"stop_after": 2, "exit": 2, "export_feedback": 2, "self_check": 2}
 
 # 浮窗尺寸：宽度按最长的一行文字/按钮定，高度 = 品牌行 + 状态面板（4 行）
 # + 五行按钮（开始/中止、本局结束后停止、校准/保存日志、重启炉石/退出浮窗、
@@ -134,9 +136,8 @@ WINDOW_WIDTH = 263
 # 654 - 17（删掉副标题）→ 637；再 +56 给新增的「日志」状态行与「打开日志 /
 # 清理日志」按钮行；+30 给新增的「导出本次出错截屏与日志」按钮行，日志正文保持 9 行左右。
 # 再 +49 给新增的「炉石窗口宽度」滑条行（标题/数值 + 横向 Scale）。
-# 再 +108 给顶部的红色「装好没反应？按顺序自查」提示（11pt 加粗 + 换行 + 内边距），
-# 否则会把下面的日志区挤没。
-WINDOW_HEIGHT = 880
+# 再 +30 给「装好没反应？」按钮行（点开是自查弹窗；不再占顶部红字的位置）。
+WINDOW_HEIGHT = 802
 # 炉石窗口宽度滑条（保持 16:9）。范围/步进的「真值」在 hs_window；这里的默认值
 # 只是它不可用时的兜底（见 `_run` 里的滑条构建）。
 SIZE_SLIDER_MIN = 960
@@ -227,12 +228,10 @@ BRAND_NAME = version.NAME
 # 品牌行右侧的版本小字：v2026.10.17（版本号 = 发布日期，不带 git 短哈希）。
 VERSION_TEXT = version.version_label()
 VERSION_FONT = ("Consolas", 8)
-# 顶部红色自查提示：回应「装好却不动」的用户，按顺序 ① 群里是否最新
-# （本机/最新版本号）② 自检是否全部通过 ③ 是否校准过。字号比正文大、
-# 用醒目红色；换行由 wraplength 控制（263px 设计宽）。
-SELF_CHECK_HINT_FONT = ("Microsoft YaHei", 11, "bold")
-SELF_CHECK_HINT_COLOR = "#ff4d4f"
-SELF_CHECK_HINT_WRAP = WINDOW_WIDTH - 20
+# 「装好没反应？」按钮 + 自查弹窗：回应装好却不动的新用户，按顺序
+# ① 群里是否最新（本机/最新版本号）② 自检是否全部通过 ③ 是否校准过。
+SELF_CHECK_BUTTON_TEXT = "装好没反应？"
+SELF_CHECK_TITLE = "装好没反应？按顺序自查"
 # 状态圆点：功能开着 = 绿，关着 = 红，状态未知 = 灰。
 MARKER_ON = GREEN
 MARKER_OFF = DANGER
@@ -335,8 +334,8 @@ def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
     return f"{kept}{ellipsis}" if kept else ellipsis
 
 
-def self_check_hint(info=None) -> str:
-    """浮窗顶部红色自查提示（纯文本，方便单测）。
+def self_check_text(info=None) -> str:
+    """「装好没反应？」弹窗里的自查步骤（纯文本，方便单测）。
 
     info 来自 web_ui 的 version_callback（update_check.status() 的快照）：
         state: latest / update_available / local_newer / remote_missing /
@@ -349,22 +348,23 @@ def self_check_hint(info=None) -> str:
     latest = info.get("latest_label")
     state = str(info.get("state") or "unknown")
     if state == "update_available" and latest:
-        first = f"① 群里不是最新：{local} → {latest}"
+        first = f"① 群里文件不是最新：本机 {local} → 最新 {latest}。去群里换最新压缩包。"
     elif state == "latest":
-        first = f"① 群里已是最新：{local}"
+        first = f"① 群里文件已是最新：{local}。"
     elif state == "local_newer" and latest:
-        first = f"① 本机 {local}（线上 {latest}）"
+        first = f"① 本机 {local}（线上还是 {latest}）—— 本地比线上新，确认群里发的是哪版。"
     elif state == "remote_missing":
-        first = f"① 群里是否最新：{local}（线上未发布）"
+        first = f"① 群里文件是否最新：本机 {local}（线上还没发布版本号）。"
     elif info.get("checking"):
-        first = f"① 群里是否最新：{local}（获取中…）"
+        first = f"① 正在获取线上最新版本…（本机 {local}）"
     else:
-        first = f"① 群里是否最新：{local}（获取失败）"
+        first = f"① 群里文件是否最新：本机 {local}（最新版本获取失败，可先按版本号对一下群文件）。"
     return "\n".join((
-        "装好没反应？按顺序自查",
         first,
-        "② 自检是否全过（网页）",
-        "③ 是否校准过（浮窗）",
+        "② 网页控制台「环境自检」是否全部通过；未通过按提示修。",
+        "③ 是否点过浮窗「校准」并保存（拖好框按 S）。",
+        "",
+        "三项都过了还不动：浮窗「导出本次出错截屏与日志」，把 zip 发出来。",
     ))
 
 
@@ -619,8 +619,8 @@ _IS_STARTING = None
 _SCORE = None
 _ON_EXIT = None
 _HUMAN_LIKE = None
-# 顶部红色自查提示的版本数据回调（web_ui 传入 update_check.status 的快照；
-# 只读缓存，绝不在这里联网，浮窗刷新是 350ms 一次）。
+# 「装好没反应？」弹窗的版本数据回调（web_ui 传入 update_check.status 的快照；
+# 只读缓存，绝不在这里联网，点按钮时才取一次）。
 _VERSION_INFO = None
 _CONCEDE_DETECT = None
 _LIVENESS = None
@@ -1341,6 +1341,88 @@ def _confirm_dialog(
     return bool(outcome["ok"])
 
 
+def _info_dialog(root, title: str, detail: str, height=None) -> None:
+    """浮窗样式的信息小窗（只有一个「知道了」）。
+
+    和 `_confirm_dialog` 同一套 topmost + overrideredirect 机制：炉石全屏时
+    系统 messagebox 可能被游戏压在后面，这个一定看得见。
+    """
+    try:
+        import tkinter as tk
+    except Exception:
+        return
+    try:
+        dialog = tk.Toplevel(root)
+    except Exception:
+        return
+    try:
+        width, height = px(360), px(height or 300)
+        dialog.overrideredirect(True)
+        dialog.attributes("-topmost", True)
+        dialog.configure(bg=BG)
+        root.update_idletasks()
+        x = root.winfo_x() + (root.winfo_width() - width) // 2
+        y = root.winfo_y() + (root.winfo_height() - height) // 2
+        x = max(px(8), min(x, root.winfo_screenwidth() - width - px(8)))
+        y = max(px(8), min(y, root.winfo_screenheight() - height - px(8)))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+
+        tk.Frame(dialog, bg=ACCENT, height=px(3)).pack(fill="x")
+        tk.Label(
+            dialog,
+            text=title,
+            bg=BG,
+            fg=ACCENT,
+            font=("Microsoft YaHei", 11, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=px(12), pady=(px(10), px(4)))
+        tk.Label(
+            dialog,
+            text=detail,
+            bg=BG,
+            fg=TEXT,
+            justify="left",
+            font=("Microsoft YaHei", 9),
+            wraplength=width - px(28),
+        ).pack(fill="x", padx=px(12))
+
+        def _close(_event=None):
+            try:
+                dialog.grab_release()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        row = tk.Frame(dialog, bg=BG)
+        row.pack(fill="x", padx=px(12), pady=(px(12), px(12)), side="bottom")
+        tk.Button(
+            row,
+            text="知道了",
+            bg=ACCENT,
+            fg="#ffffff",
+            activebackground=ACCENT,
+            activeforeground="#ffffff",
+            bd=0,
+            font=("Microsoft YaHei", 10, "bold"),
+            cursor="hand2",
+            command=_close,
+        ).pack(fill="x", ipady=px(6))
+        dialog.bind("<Escape>", _close)
+        dialog.bind("<Return>", _close)
+
+        dialog.grab_set()
+        dialog.focus_force()
+        dialog.wait_window()
+    except Exception:
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+
 def _confirm_restart(root) -> bool:
     """「重启炉石」的确认小窗：确认返回 True。"""
     return _confirm_dialog(
@@ -1533,24 +1615,6 @@ def _run() -> None:
             side="right", padx=(0, px(10))
         )
         tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=px(10))
-        tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
-
-        # ---- 红色自查提示：装好没反应时按顺序排查 ----------------------
-        # 用户要求「浮窗上面找个合适的位置写红色大字」：放在品牌行金线之下、
-        # 自动化日志标题之前，进游戏/没进游戏都一眼能看到；折叠成标题条时
-        # 只剩品牌+版本，不占地方。文案由 self_check_hint() 统一生成，
-        # 版本数据由 web_ui 的 version_callback（只读缓存）每 350ms 刷新。
-        hint_label = tk.Label(
-            content,
-            text=self_check_hint(None),
-            bg=TITLE_BG,
-            fg=SELF_CHECK_HINT_COLOR,
-            font=SELF_CHECK_HINT_FONT,
-            justify="left",
-            anchor="w",
-            wraplength=px(SELF_CHECK_HINT_WRAP),
-        )
-        hint_label.pack(fill="x", padx=px(10), pady=(px(6), px(4)))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- header ----------------------------------------------------
@@ -2131,6 +2195,21 @@ def _run() -> None:
         exit_btn = _make_btn(btn_frame, "退出脚本", DANGER, _call_exit)
         _place(exit_btn, "exit")
 
+        def _call_self_check():
+            """「装好没反应？」：弹一个自查小窗，把版本/自检/校准顺序列出来。"""
+            try:
+                try:
+                    info = _VERSION_INFO() if _VERSION_INFO is not None else None
+                except Exception:
+                    info = None
+                _info_dialog(root, SELF_CHECK_TITLE, self_check_text(info))
+            finally:
+                _raise_hearthstone()
+
+        self_check_btn = _make_btn(
+            btn_frame, SELF_CHECK_BUTTON_TEXT, WARN, _call_self_check)
+        _place(self_check_btn, "self_check")
+
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
         delay_frame = tk.Frame(content, bg=BG)
         delay_frame.pack(side="bottom", fill="x", padx=px(8), pady=(0, px(8)))
@@ -2300,12 +2379,6 @@ def _run() -> None:
                     )
                 else:
                     _set(score_label, text="战绩： —", fg=DIM)
-            if _VERSION_INFO is not None:
-                try:
-                    hint_info = _VERSION_INFO()
-                except Exception:
-                    hint_info = None
-                _set(hint_label, text=self_check_hint(hint_info))
             if _HUMAN_LIKE is not None:
                 try:
                     hl_info = _HUMAN_LIKE()

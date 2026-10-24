@@ -271,10 +271,13 @@ class ButtonLayoutTests(unittest.TestCase):
         for key, (row, column) in log_overlay.BTN_LAYOUT.items():
             rows.setdefault(row, []).append(column)
 
-        # 7 行：开始/中止、本局结束后停止、校准/保存日志、打开日志/清理日志、
-        # 导出反馈（横跨整行）、重启炉石/退出浮窗、退出脚本（横跨整行）。
+        # 8 行：开始/中止、本局结束后停止、校准/保存日志、打开日志/清理日志、
+        # 导出反馈（横跨整行）、重启炉石/退出浮窗、退出脚本（横跨整行）、
+        # 「装好没反应？」（横跨整行，自查弹窗入口）。
         self.assertEqual(
-            {0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0], 5: [0, 1], 6: [0]}, rows
+            {0: [0, 1], 1: [0], 2: [0, 1], 3: [0, 1], 4: [0], 5: [0, 1],
+             6: [0], 7: [0]},
+            rows,
         )
         for columns in rows.values():
             self.assertLessEqual(len(columns), 2)
@@ -354,9 +357,7 @@ class ButtonLayoutTests(unittest.TestCase):
 
     def test_spanning_rows(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
-        row, _column = log_overlay.BTN_LAYOUT["exit"]
-        rows = [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items() if key != "exit"]
-        self.assertEqual(max(rows) + 1, row)
+        self.assertEqual(6, log_overlay.BTN_LAYOUT["exit"][0])
 
         self.assertEqual(2, log_overlay.BTN_SPAN["stop_after"])
         row, _column = log_overlay.BTN_LAYOUT["stop_after"]
@@ -369,6 +370,13 @@ class ButtonLayoutTests(unittest.TestCase):
             ],
         )
 
+        # 「装好没反应？」是最后一行、横跨整行（自查弹窗入口）。
+        self.assertEqual(2, log_overlay.BTN_SPAN["self_check"])
+        row, _column = log_overlay.BTN_LAYOUT["self_check"]
+        rows = [r for key, (r, _c) in log_overlay.BTN_LAYOUT.items()
+                if key != "self_check"]
+        self.assertEqual(max(rows) + 1, row)
+
     def test_window_metrics_and_grid_helpers(self):
         # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
@@ -379,8 +387,8 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertLessEqual(log_overlay.WINDOW_WIDTH, int(292 * 0.9) + 1)
         # 654 - 17（删副标题）→ 637；再 +56 给「日志」状态行与「打开日志/
         # 清理日志」按钮行，+30 给「导出反馈」按钮行，+49 给「窗口宽度」滑条行，
-        # +108 给顶部红色「装好没反应？按顺序自查」提示（11pt 加粗）。
-        self.assertEqual(880, log_overlay.WINDOW_HEIGHT)
+        # +30 给「装好没反应？」按钮行（自查弹窗入口；顶部红字已按用户要求删除）。
+        self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
 
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)

@@ -133,10 +133,10 @@ class WindowWiringTests(unittest.TestCase):
         self.assertIn("detail_wrap_px(\n                px(WINDOW_WIDTH),", source)
 
     def test_base_constants_keep_the_design_values(self):
-        # 263/880/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
-        # （723 → 772：新增「炉石窗口宽度」滑条行；772 → 880：顶部红色自查提示。）
+        # 263/802/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
+        # （723 → 772：新增「炉石窗口宽度」滑条行；772 → 802：「装好没反应？」按钮行。）
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertEqual(880, log_overlay.WINDOW_HEIGHT)
+        self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
         self.assertEqual(34, log_overlay.MINIMIZED_HEIGHT)
         self.assertEqual(1.0, log_overlay.UI_SCALE)
 
