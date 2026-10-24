@@ -331,10 +331,17 @@ class PostActionPauseHookTests(unittest.TestCase):
                 self.assertFalse(self._pause(kind))
                 self.assertEqual([], self.areas)
 
+    def test_mulligan_skips_the_pause(self):
+        """换牌后不看手牌：开局流程提交完直接进对局，活人感不在这里表演。"""
+        handled = self._pause(ActionKind.MULLIGAN)
+
+        self.assertFalse(handled)
+        self.assertEqual([], self.areas)
+
     def test_non_attack_actions_still_look_at_the_hand(self):
         for kind in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
                      ActionKind.TRADE_CARD, ActionKind.USE_LOCATION,
-                     ActionKind.END_TURN, ActionKind.MULLIGAN, None):
+                     ActionKind.END_TURN, None):
             with self.subTest(kind=kind):
                 self.areas.clear()
                 self.assertTrue(self._pause(kind))
@@ -347,7 +354,7 @@ class PostActionPauseHookTests(unittest.TestCase):
         self.assertEqual([], self.areas)
 
     def test_pause_can_still_be_called_without_arguments(self):
-        """老调用方式（0 参数）保持可用——MulliganFlow 就是这么调的。"""
+        """老调用方式（0 参数）保持可用（例如其它流程复用同一个挂点）。"""
         parameter = inspect.signature(
             self.fsm._human_like_post_action_pause).parameters["action_kind"]
         self.assertIsNone(parameter.default)

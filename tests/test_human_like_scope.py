@@ -1,17 +1,20 @@
-"""活人感的生效范围：只在“对局中识别盒子意见并执行完”之后。
+"""活人感的生效范围：只在「对局中识别盒子意见并执行完」之后。
 
 - RecommendationFlow：出牌/攻击/技能等推荐动作执行成功后调用 post_action_pause；
   返回 True 表示已接管延时，不再叠加固定「操作后延时」。
-- MulliganFlow：盒子留牌意见提交后同样调用一次。
+- MulliganFlow：**不接活人感**。换牌是开局固定流程，提交后马上进入对局，对着
+  手牌区随机悬停既不像真人也没意义（用户 2026-10-24 实测反馈）。这里锁住
+  「MulliganFlow 没有挂点 + FSM 不给它挂」。
 - 其他点击（匹配对手、选卡组、错误弹窗取消…）不经过这两个流程，因此不受影响
   —— 见 tests/test_human_like.py 里的 park_mouse 测试。
 """
 
+import inspect
 import unittest
 from types import SimpleNamespace
 
 from manual_controller import ActionExecutionResult, EndTurnAction
-from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
+from src.flow.mulligan_flow import MulliganFlow
 from src.flow.recommendation_flow import FlowStepStatus, RecommendationFlow
 from src.game_state.recommendation_adapter import adapt_action
 from src.parser.recommendation_parser import RecommendationParser
@@ -183,74 +186,23 @@ class AcceptsActionKindTests(unittest.TestCase):
         self.assertFalse(self.detect(None))
 
 
-class _MulliganExecutor:
-    def __init__(self):
-        self.calls = []
+class MulliganScopeTests(unittest.TestCase):
+    """换牌不接活人感：流程没有挂点，FSM 也不给它挂。"""
 
-    def replace_starting_card(self, index, count):
-        self.calls.append(("replace", index, count))
+    def test_mulligan_flow_has_no_post_action_pause_hook(self):
+        parameters = inspect.signature(MulliganFlow).parameters
+        self.assertNotIn("post_action_pause", parameters)
 
-    def commit_choose_card(self):
-        self.calls.append(("commit",))
+    def test_fsm_does_not_wire_the_human_like_hook_into_mulligan(self):
+        import FSM_action
 
-    def cancel_click(self):
-        self.calls.append(("cancel",))
-
-
-def _card(card_id, entity_id):
-    return SimpleNamespace(card_id=card_id, entity_id=entity_id)
-
-
-class MulliganPauseTests(unittest.TestCase):
-    def _flow(self, hook):
-        cards = tuple(_card(f"CARD_{i}", i) for i in range(3))
-        state = SimpleNamespace(my_hand_cards=cards, is_end=False,
-                                game_num_turns_in_play=0)
-        action = SimpleNamespace(normalized_instruction="留牌1",
-                                 mulligan_slots=(1,))
-        executor = _MulliganExecutor()
-        flow = MulliganFlow(
-            executor=executor,
-            action_supplier=lambda: action,
-            state_supplier=lambda: state,
-            stopped=lambda: False,
-            first_delay=0.0,
-            retry_delay=0.0,
-            post_action_pause=hook,
-        )
-        return flow, executor
-
-    def test_pause_runs_after_mulligan_is_executed(self):
-        order = []
-
-        def hook():
-            order.append("pause")
-            return True
-
-        flow, executor = self._flow(hook)
-        original_commit = executor.commit_choose_card
-
-        def commit():
-            original_commit()
-            order.append("commit")
-
-        executor.commit_choose_card = commit
-
-        result = flow.run()
-
-        self.assertEqual(MulliganStatus.CONFIRMED, result.status)
-        self.assertEqual(["commit", "pause"], order)
-
-    def test_pause_exception_does_not_break_mulligan(self):
-        def boom():
-            raise RuntimeError("鼠标异常")
-
-        flow, executor = self._flow(boom)
-
-        result = flow.run()
-
-        self.assertEqual(MulliganStatus.CONFIRMED, result.status)
-        self.assertIn(("commit",), executor.calls)
+        source = inspect.getsource(
+            FSM_action.initialize_recommendation_automation)
+        mulligan = source.split("auto_mulligan_flow = MulliganFlow(", 1)[1]
+        mulligan = mulligan.split("recommendation_flow = RecommendationFlow(", 1)[0]
+        self.assertNotIn("post_action_pause", mulligan)
+        # 对局内的 RecommendationFlow 仍然保留这个挂点。
+        self.assertIn("post_action_pause=_human_like_post_action_pause", source)
 
 
 if __name__ == "__main__":

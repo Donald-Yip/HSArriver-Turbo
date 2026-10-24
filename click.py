@@ -113,10 +113,10 @@ def side_point(hearthstone_hwnd=0, preferred=None,
     return ordered[0]
 
 # ---------------------------------------------------------------- 活人感（可选）
-# 只在【对局中识别盒子意见并执行完之后】生效：由 RecommendationFlow / MulliganFlow
-# 在动作执行成功后经 FSM_action._human_like_post_action_pause() 调用本函数，
-# 用 0.5~3s 的随机“思考”延时代替固定延时，期间把手牌区当普通人类一样随手悬停
-# （每处约 1s），最后仍复位到 MOUSE_RESET_POS。
+# 只在【对局中识别盒子意见并执行完之后】生效：由 RecommendationFlow 在动作执行
+# 成功后经 FSM_action._human_like_post_action_pause() 调用本函数，用 0.5~3s 的
+# 随机“思考”延时代替固定延时，期间把手牌区当普通人类一样随手悬停（每处约 1s），
+# 最后仍复位到 MOUSE_RESET_POS。**换牌不接**（MulliganFlow 没有这个挂点）。
 # 攻击类动作不经过这里（出手后还看手牌最像脚本，而且攻击常常连着来）：
 # FSM 层会直接返回 False，让流程走正常的固定「操作后延时」去读下一条推荐。
 # 匹配对手、选卡组、错误弹窗取消这类非推荐动作也不会触发。
@@ -230,7 +230,7 @@ def park_mouse(mouse=None):
     """Finish an action: honor the minimum delay, then park without clicking.
 
     「活人感」的随机延时/手牌悬停**不在这里**：它只在对局中识别盒子意见并执行后
-    由流程层调用（RecommendationFlow / MulliganFlow 的 post_action_pause），
+    由流程层调用（RecommendationFlow 的 post_action_pause；换牌不接），
     否则匹配对手、选卡组、错误弹窗取消这类非推荐动作也会被拖慢。
     """
     time.sleep(0.1)

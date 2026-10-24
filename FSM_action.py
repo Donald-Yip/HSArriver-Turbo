@@ -222,8 +222,10 @@ def initialize_recommendation_automation():
         # 上游时序：OCR 前的每局等待由 ChoosingCardAction 的 ready 延时负责；
         # OCR 成功后立即点击，不再叠加缓冲（mulligan_post_ocr_delay=0）。
         first_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
-        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
-        post_action_pause=_human_like_post_action_pause)
+        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds)
+    # 换牌故意**不接**「活人感」：换牌是开局固定流程，提交后马上进入对局，
+    # 对着手牌区随机悬停既不像真人也没意义（用户实测反馈）。活人感只挂在下面
+    # 对局内的 RecommendationFlow 上。
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
         reader=recommendation_reader,
@@ -245,16 +247,17 @@ def initialize_recommendation_automation():
 def _human_like_post_action_pause(action_kind=None) -> bool:
     """「活人感」延时：只在“对局中识别盒子意见并执行完”之后调用。
 
-    由 RecommendationFlow / MulliganFlow 在动作执行成功后调用，返回 True 表示
-    本次延时已被接管（随机 0.5~3s + 鼠标悬停），流程层不再叠加固定延时。
-    未开启时返回 False，走原来的固定「操作后延时」。匹配对手、选卡组、错误弹窗
-    取消这类非推荐动作不会经过这里。
+    只由 RecommendationFlow 在对局内动作执行成功后调用，返回 True 表示本次延时
+    已被接管（随机 0.5~3s + 鼠标悬停），流程层不再叠加固定延时。未开启时返回
+    False，走原来的固定「操作后延时」。匹配对手、选卡组、错误弹窗取消这类非推荐
+    动作不会经过这里；**换牌也不经过这里**（MulliganFlow 不接这个挂点）。
 
     action_kind：刚执行完的动作类型（ActionKind，可能为 None）。**攻击类动作不做
     活人感表演**（出手后还盯着手牌最像脚本，而且攻击常常是连着来的）：直接返回
     False，让流程走正常的固定「操作后延时」去读下一条推荐。星舰发射同理——它也是
-    场面上的动作（点场上星舰 → 点发射按钮），不看手牌。其它动作（出牌/技能/交易/
-    换牌）才看手牌。
+    场面上的动作（点场上星舰 → 点发射按钮），不看手牌。换牌（MULLIGAN）也跳过：
+    即便将来有人重新挂上挂点，也绝不在换牌后随机看手牌。其它动作（出牌/技能/
+    交易/地标）才看手牌。
 
     门禁是“总开关 + 看卡牌”：「随机延时」本身就是手牌悬停的那段等待窗口，所以
     关掉「看卡牌」= 连随机延时一起关掉（回到固定「操作后延时」），不再走到
@@ -267,7 +270,9 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
         if not settings.get("hand_hover_enabled", True):
             return False
         # ActionKind 是 str 枚举，所以字符串 "attack" 也能匹配上。
-        if action_kind in (ActionKind.ATTACK, ActionKind.LAUNCH_STARSHIP):
+        # MULLIGAN 是防御性兜底：换牌流程本来就不挂这个挂点。
+        if action_kind in (ActionKind.ATTACK, ActionKind.LAUNCH_STARSHIP,
+                           ActionKind.MULLIGAN):
             return False
         click.human_like_pause()
         return True
