@@ -343,10 +343,15 @@ def start_periodic(interval=CACHE_TTL, fetch=None):
 
     def _loop():
         while True:
+            with _LOCK:
+                _STATE["refreshing"] = True
             try:
                 refresh(force=True, fetch=fetch)
             except Exception:
                 pass
+            finally:
+                with _LOCK:
+                    _STATE["refreshing"] = False
             time.sleep(max(60.0, float(interval)))
 
     thread = threading.Thread(target=_loop, name="hs-update-loop", daemon=True)
