@@ -30,6 +30,7 @@ from log_op import (
     LOG_LINE_CREATE_GAME,
     LOG_LINE_FULL_ENTITY,
     LOG_LINE_SHOW_ENTITY,
+    LOG_LINE_TAG,
     LOG_LINE_TAG_CHANGE,
 )
 
@@ -934,6 +935,24 @@ class SurrenderRuleEngine:
                     # 召唤/衍生/牌库直接上场都不算"打出"。
                     return
                 self._record_played(log_state, str(info.get("entity") or ""))
+                return
+
+            if line_type == LOG_LINE_TAG:
+                # 对手的牌没有 TAG_CHANGE ZONE=PLAY 行：日志先 SHOW_ENTITY
+                # 揭示 CardID，再在同一个 tag 块里写 tag=ZONE value=PLAY，
+                # 实体由 update_state 的 current_update_id 指向。不在这里补记，
+                # 所有"对方打出过 X"的规则永远不会命中（实测：对手打出冰霜
+                # 新星，facts.played 里一条对手事件都没有）。
+                if str(info.get("tag") or "") != "ZONE":
+                    return
+                if str(info.get("value") or "") != "PLAY":
+                    return
+                if prev_zone != "HAND":
+                    return
+                entity_id = str(getattr(log_state, "current_update_id", "") or "")
+                if entity_id:
+                    self._record_played(log_state, entity_id)
+                return
 
     def _entity_card_id(self, log_state, entity_id) -> str:
         entity = log_state.entity_dict.get(str(entity_id))

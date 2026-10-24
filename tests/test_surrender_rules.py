@@ -9,7 +9,7 @@ import card_catalog
 import surrender_rules as sr
 from log_op import (LineInfoContainer, LOG_LINE_BLOCK_START_TRIGGER,
                     LOG_LINE_CREATE_GAME, LOG_LINE_SHOW_ENTITY,
-                    LOG_LINE_TAG_CHANGE)
+                    LOG_LINE_TAG, LOG_LINE_TAG_CHANGE)
 
 
 # ---------------------------------------------------------------- 合成环境
@@ -423,6 +423,30 @@ class EngineTests(unittest.TestCase):
         self.assertIn("JAIL_430", self.engine.facts.revealed)
         self.assertEqual(self.engine.facts.revealed["JAIL_430"].side,
                          "opponent")
+
+    def test_opponent_play_is_recorded_from_show_entity_zone_tag(self):
+        # 真日志里对手的牌没有 TAG_CHANGE ZONE=PLAY：先 SHOW_ENTITY 揭示
+        # CardID，再在同一个 tag 块里写 tag=ZONE value=PLAY（实体由
+        # current_update_id 指向）。漏掉这条，"对方打出过 X" 永远为假。
+        self.log_state.add(312, "CS2_026", "2", zone="HAND")
+        self.log_state.current_update_id = 312
+        self.engine.observe(self.log_state,
+                            LineInfoContainer(LOG_LINE_TAG, tag="ZONE",
+                                              value="PLAY"),
+                            prev_zone="HAND")
+        self.assertEqual(len(self.engine.facts.played), 1)
+        self.assertEqual(self.engine.facts.played[0].card_id, "CS2_026")
+        self.assertEqual(self.engine.facts.played[0].side, "opponent")
+
+    def test_zone_tag_from_deck_to_play_is_not_played(self):
+        # SHOW_ENTITY 从牌库直接进 PLAY（招募/衍生）不算"打出"。
+        self.log_state.add(313, "CS2_026", "2", zone="DECK")
+        self.log_state.current_update_id = 313
+        self.engine.observe(self.log_state,
+                            LineInfoContainer(LOG_LINE_TAG, tag="ZONE",
+                                              value="PLAY"),
+                            prev_zone="DECK")
+        self.assertEqual(self.engine.facts.played, [])
 
     def test_start_of_game_card_is_recorded_even_though_never_played(self):
         # 阿扎莉娜：开局 BLOCK_START TRIGGER（cardId 空）→ SHOW_ENTITY 补 id

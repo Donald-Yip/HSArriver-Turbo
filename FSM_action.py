@@ -423,14 +423,25 @@ def _zone_before_update(state, container):
     为什么需要：`update_state()` 直接把新值写进实体，写完之后就再也拿不到
     "原来在哪个区域"，而"打出"的判据正是 HAND → PLAY。所以必须在更新前
     偷看一眼旧值。
+
+    两种写法都要认：
+    * `TAG_CHANGE Entity=[...] tag=ZONE value=PLAY` —— 只出现在**自己的牌**
+      打出时（日志里自己的手牌一直是已知实体）；
+    * `SHOW_ENTITY`/`FULL_ENTITY` 块里的 `tag=ZONE value=PLAY` —— **对手的牌**
+      打出时日志只会先 SHOW_ENTITY 揭示 CardID，再在它自己的 tag 块里移进
+      PLAY，没有 TAG_CHANGE 行。漏了后者，"对方打出过 X"的条件永远不成立。
     """
     try:
-        if getattr(container, "line_type", None) != LOG_LINE_TAG_CHANGE:
-            return None
+        line_type = getattr(container, "line_type", None)
         info = getattr(container, "info_dict", {}) or {}
         if str(info.get("tag") or "") != "ZONE":
             return None
-        entity = state.entity_dict.get(str(info.get("entity") or ""))
+        if line_type == LOG_LINE_TAG_CHANGE:
+            entity = state.entity_dict.get(str(info.get("entity") or ""))
+        elif line_type == LOG_LINE_TAG:
+            entity = state.current_update_entity
+        else:
+            return None
         if entity is None:
             return None
         return str(entity.query_tag("ZONE", "") or "")
