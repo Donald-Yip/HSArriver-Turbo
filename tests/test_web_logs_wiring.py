@@ -365,12 +365,15 @@ class OverlayWiringTests(unittest.TestCase):
         slots = list(layout.values())
         self.assertEqual(len(slots), len(set(slots)))
 
-    def test_exit_is_still_the_last_spanning_row(self):
+    def test_self_check_is_the_last_spanning_row(self):
         layout = log_overlay.BTN_LAYOUT
-        row, _column = layout["exit"]
-        rows = [r for key, (r, _c) in layout.items() if key != "exit"]
+        # 「装好没反应？」是新增的最后一行（横跨整行）；退出脚本仍在它上面。
+        row, _column = layout["self_check"]
+        rows = [r for key, (r, _c) in layout.items() if key != "self_check"]
         self.assertEqual(max(rows) + 1, row)
+        self.assertEqual(2, log_overlay.BTN_SPAN["self_check"])
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
+        self.assertEqual(6, layout["exit"][0])
 
     def test_run_uses_the_log_row_and_confirms_before_clearing(self):
         import inspect
