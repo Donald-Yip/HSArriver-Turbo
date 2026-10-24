@@ -52,6 +52,8 @@ import script_logs
 
 # 版本号的唯一来源（网页顶栏、浮窗品牌行、CLI 都从这里取）。
 import version
+# 线上最新版本号（浮窗红色自查提示用）：后台线程 + 6h 缓存，导入不联网。
+import update_check
 
 # 结构化分块对战日志（每行一个回合块）+ 出错自动截图/反馈包。
 import battle_record
@@ -2552,6 +2554,8 @@ def _bind_overlay():
         # 「窗口宽度」滑条：读炉石当前客户区宽度做初值；拖动按 16:9 改客户区。
         window_width_callback=_overlay_window_width,
         on_resize_window=_overlay_resize_window,
+        # 顶部红色自查提示：本机版本 / 线上最新版本对比（只读缓存）。
+        version_callback=_overlay_version_info,
         # 「退出浮窗」：只关窗口，脚本继续跑，网页可以再打开。
         on_exit_overlay=_overlay_exit_overlay,
         on_exit=_overlay_exit,
@@ -2771,6 +2775,17 @@ def _overlay_window_width():
 
         size = hs_window.current_client_size()
         return int(size[0]) if size else None
+    except Exception:
+        return None
+
+
+def _overlay_version_info():
+    """浮窗红色自查提示用的版本快照（只读缓存，绝不联网）。
+
+    浮窗每 350ms 调一次；联网检查在 update_check 的后台线程里，6 小时一次。
+    """
+    try:
+        return update_check.status()
     except Exception:
         return None
 
@@ -4356,6 +4371,8 @@ def main():
     _boot_resume_schedule()
     # 启动即自检：Python 版本 / 依赖包 / 分辨率和缩放（结果进日志与页面）。
     start_selfcheck_async()
+    # 线上最新版本号：后台线程每 6 小时查一次（断网只显示“获取失败”，不影响运行）。
+    update_check.start_periodic()
 
     server = None
     port = None

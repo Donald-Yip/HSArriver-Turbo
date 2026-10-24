@@ -134,7 +134,9 @@ WINDOW_WIDTH = 263
 # 654 - 17（删掉副标题）→ 637；再 +56 给新增的「日志」状态行与「打开日志 /
 # 清理日志」按钮行；+30 给新增的「导出本次出错截屏与日志」按钮行，日志正文保持 9 行左右。
 # 再 +49 给新增的「炉石窗口宽度」滑条行（标题/数值 + 横向 Scale）。
-WINDOW_HEIGHT = 772
+# 再 +108 给顶部的红色「装好没反应？按顺序自查」提示（11pt 加粗 + 换行 + 内边距），
+# 否则会把下面的日志区挤没。
+WINDOW_HEIGHT = 880
 # 炉石窗口宽度滑条（保持 16:9）。范围/步进的「真值」在 hs_window；这里的默认值
 # 只是它不可用时的兜底（见 `_run` 里的滑条构建）。
 SIZE_SLIDER_MIN = 960
@@ -225,6 +227,12 @@ BRAND_NAME = version.NAME
 # 品牌行右侧的版本小字：v2026.10.17（版本号 = 发布日期，不带 git 短哈希）。
 VERSION_TEXT = version.version_label()
 VERSION_FONT = ("Consolas", 8)
+# 顶部红色自查提示：回应「装好却不动」的用户，按顺序 ① 群里是否最新
+# （本机/最新版本号）② 自检是否全部通过 ③ 是否校准过。字号比正文大、
+# 用醒目红色；换行由 wraplength 控制（263px 设计宽）。
+SELF_CHECK_HINT_FONT = ("Microsoft YaHei", 11, "bold")
+SELF_CHECK_HINT_COLOR = "#ff4d4f"
+SELF_CHECK_HINT_WRAP = WINDOW_WIDTH - 20
 # 状态圆点：功能开着 = 绿，关着 = 红，状态未知 = 灰。
 MARKER_ON = GREEN
 MARKER_OFF = DANGER
@@ -325,6 +333,39 @@ def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
     # 文字本身可能已经带省略号（account_row 的 _clip）：别叠成两个。
     kept = kept.rstrip("…").rstrip()
     return f"{kept}{ellipsis}" if kept else ellipsis
+
+
+def self_check_hint(info=None) -> str:
+    """浮窗顶部红色自查提示（纯文本，方便单测）。
+
+    info 来自 web_ui 的 version_callback（update_check.status() 的快照）：
+        state: latest / update_available / local_newer / remote_missing /
+               unknown / checking
+        local_label / latest_label：形如 v2026.10.24
+    info 缺失时只显示本机版本，并把“最新版本”标成获取失败——绝不假装最新。
+    """
+    info = info if isinstance(info, dict) else {}
+    local = str(info.get("local_label") or VERSION_TEXT)
+    latest = info.get("latest_label")
+    state = str(info.get("state") or "unknown")
+    if state == "update_available" and latest:
+        first = f"① 群里不是最新：{local} → {latest}"
+    elif state == "latest":
+        first = f"① 群里已是最新：{local}"
+    elif state == "local_newer" and latest:
+        first = f"① 本机 {local}（线上 {latest}）"
+    elif state == "remote_missing":
+        first = f"① 群里是否最新：{local}（线上未发布）"
+    elif info.get("checking"):
+        first = f"① 群里是否最新：{local}（获取中…）"
+    else:
+        first = f"① 群里是否最新：{local}（获取失败）"
+    return "\n".join((
+        "装好没反应？按顺序自查",
+        first,
+        "② 自检是否全部通过（网页「环境自检」）",
+        "③ 是否校准过（浮窗「校准」）",
+    ))
 
 
 def minimized_geometry(
@@ -578,6 +619,9 @@ _IS_STARTING = None
 _SCORE = None
 _ON_EXIT = None
 _HUMAN_LIKE = None
+# 顶部红色自查提示的版本数据回调（web_ui 传入 update_check.status 的快照；
+# 只读缓存，绝不在这里联网，浮窗刷新是 350ms 一次）。
+_VERSION_INFO = None
 _CONCEDE_DETECT = None
 _LIVENESS = None
 _ACCOUNT = None
@@ -939,6 +983,7 @@ def start(
     on_exit_overlay=None,
     window_width_callback=None,
     on_resize_window=None,
+    version_callback=None,
 ) -> str:
     """开（或重开）浮窗，返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING。
 
@@ -951,7 +996,7 @@ def start(
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
     global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS, _ON_EXPORT_FEEDBACK
-    global _WINDOW_WIDTH, _ON_RESIZE_WINDOW
+    global _WINDOW_WIDTH, _ON_RESIZE_WINDOW, _VERSION_INFO
     # 排队重开时要原样复用这一轮的绑定（start() 会重写全部回调，不能只重开窗口）。
     args = {
         "on_start": on_start,
@@ -979,6 +1024,7 @@ def start(
         "on_exit_overlay": on_exit_overlay,
         "window_width_callback": window_width_callback,
         "on_resize_window": on_resize_window,
+        "version_callback": version_callback,
     }
     with _START_LOCK:
         if _STARTED[0] and not _STOP.is_set() and not _CLOSING.is_set():
@@ -1017,6 +1063,7 @@ def start(
         _ON_EXIT_OVERLAY = on_exit_overlay
         _WINDOW_WIDTH = window_width_callback
         _ON_RESIZE_WINDOW = on_resize_window
+        _VERSION_INFO = version_callback
         if account_visible_setting is not None:
             _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
         _STOP.clear()
@@ -1486,6 +1533,24 @@ def _run() -> None:
             side="right", padx=(0, px(10))
         )
         tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=px(10))
+        tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
+
+        # ---- 红色自查提示：装好没反应时按顺序排查 ----------------------
+        # 用户要求「浮窗上面找个合适的位置写红色大字」：放在品牌行金线之下、
+        # 自动化日志标题之前，进游戏/没进游戏都一眼能看到；折叠成标题条时
+        # 只剩品牌+版本，不占地方。文案由 self_check_hint() 统一生成，
+        # 版本数据由 web_ui 的 version_callback（只读缓存）每 350ms 刷新。
+        hint_label = tk.Label(
+            content,
+            text=self_check_hint(None),
+            bg=TITLE_BG,
+            fg=SELF_CHECK_HINT_COLOR,
+            font=SELF_CHECK_HINT_FONT,
+            justify="left",
+            anchor="w",
+            wraplength=px(SELF_CHECK_HINT_WRAP),
+        )
+        hint_label.pack(fill="x", padx=px(10), pady=(px(6), px(4)))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
         # ---- header ----------------------------------------------------
@@ -2235,6 +2300,12 @@ def _run() -> None:
                     )
                 else:
                     _set(score_label, text="战绩： —", fg=DIM)
+            if _VERSION_INFO is not None:
+                try:
+                    hint_info = _VERSION_INFO()
+                except Exception:
+                    hint_info = None
+                _set(hint_label, text=self_check_hint(hint_info))
             if _HUMAN_LIKE is not None:
                 try:
                     hl_info = _HUMAN_LIKE()

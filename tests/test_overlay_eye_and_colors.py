@@ -378,8 +378,9 @@ class ButtonLayoutTests(unittest.TestCase):
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
         self.assertLessEqual(log_overlay.WINDOW_WIDTH, int(292 * 0.9) + 1)
         # 654 - 17（删副标题）→ 637；再 +56 给「日志」状态行与「打开日志/
-        # 清理日志」按钮行，+30 给「导出反馈」按钮行，+49 给「窗口宽度」滑条行。
-        self.assertEqual(772, log_overlay.WINDOW_HEIGHT)
+        # 清理日志」按钮行，+30 给「导出反馈」按钮行，+49 给「窗口宽度」滑条行，
+        # +108 给顶部红色「装好没反应？按顺序自查」提示（11pt 加粗）。
+        self.assertEqual(880, log_overlay.WINDOW_HEIGHT)
 
         source = inspect.getsource(log_overlay._run)
         self.assertIn("def _place(btn, key)", source)
