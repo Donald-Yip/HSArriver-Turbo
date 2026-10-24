@@ -31,6 +31,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 版本号的唯一来源（只依赖标准库；必须在下面把仓库根从 sys.path 摘掉之前导入）。
+import version  # noqa: E402
+
 # 仓库根目录有 click.py（炉石的鼠标点击模块），`import click` 会解析到它而不是
 # PyPI 的 click —— mcp 依赖的 uvicorn/starlette 会因此在导入时直接炸。导入 mcp
 # 之前先把仓库根从 sys.path 摘掉；之后靠子进程跑 hsctl，不需要它在 sys.path 里。
@@ -46,7 +49,7 @@ _DEFAULT_TIMEOUT = 180.0
 
 server = MCPServer(
     name="hsctl",
-    version="1.0.0",
+    version=version.version_label(),
     instructions=(
         "炉石脚本（HSLegendArriver）的命令行控制台。会话第一条先调 doctor，"
         "看环境 / 控制台 / 提权状态与它给的下一步。"

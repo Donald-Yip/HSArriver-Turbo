@@ -87,6 +87,53 @@ git diff --cached --stat        # stage 后确认只包含本次功能
   `tests/test_version.py` 会检查两者一致。
 - 普通 bugfix / 文档改动不要顺手改版本号，避免「每天都是新版本」。
 
+### 5.1 发布版本号（tag + Release）
+
+GitHub 本身没有“版本号”对象，本项目用 **`version.py` 的发布日期**当版本号，
+发版时另外做两件事：打注释标签 `vYYYY.MM.DD`、在 GitHub 建同名 Release。
+
+- **标签必须逐字等于 `v` + `VERSION`**（如 `v2026.10.24`）；一天一版，同日再改
+  合并进同一次发版，不要造 `2026.10.24.1`（`tests/test_version.py` 只接受三段日期）。
+- 浮窗/网页/CLI 显示的仍是 `version.py` 这一个串；`update_check.py` 去网上查的
+  “最新版本”也按同一格式比较，只认真实日期，`v1.0.0` 这类旧标签自动跳过。
+
+```powershell
+# 1) 校验（版本号与 CHANGELOG 首行一致 + 跑 tests.test_version）
+python tools/release.py check
+
+# 2) 改两处：version.py 的 VERSION、CHANGELOG 表格顶部同日期一行
+python tools/release.py bump 2026.10.24 "本次改了什么"
+# 等价于手改；不想写盘先加 --dry-run 看一遍
+
+# 3) 跑全量测试后，单独提交发版改动（只 stage 这两个文件）
+git add version.py CHANGELOG.md
+git commit -m "chore(release): v2026.10.24"
+
+# 4) 打注释标签（不 push）
+python tools/release.py tag
+
+# 5) 推送（**先问用户**；当前 main 可能领先 origin 很多）
+git push <remote> main
+git push <remote> v2026.10.24
+
+# 6) 建 Release（有 gh CLI 时；没有就网页 Releases → Draft a new release）
+gh release create v2026.10.24 --title "v2026.10.24" --generate-notes
+
+# 7) 验证线上最新版本号
+Invoke-RestMethod https://api.github.com/repos/<owner>/<repo>/releases/latest |
+  Select-Object tag_name
+```
+
+- `.github/workflows/release.yml` 会在**推送 `v*` 标签**后自动建 Release
+  （`generate_release_notes: true`），不需要手动上传也能让 `releases/latest` 生效。
+- 只用 `main` 发版、不打标签也行：`update_check.py` 会降级去读
+  `raw` / `jsDelivr` 上的 `version.py`；但此时 `releases/latest` 是 404，
+  浮窗只会显示“线上未发布/获取失败”，不会假装最新。
+- 浮窗红字自查里的“线上最新”默认同时查 README 公开仓与本机 `mine` 镜像仓
+  （`HSArriver-Turbo`），取日期更大的那个；只想查一个时用环境变量覆盖：
+  `$env:HS_UPDATE_REPO="owner/repo"`。
+- 远端 `main` 还没 push 时，本机查到的最新版本必然落后/缺失，这是预期行为。
+
 ---
 
 ## 6. 常用操作

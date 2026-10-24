@@ -55,7 +55,7 @@ import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from version import VERSION as HSCTL_VERSION, version_info, version_label
+from version import version_label
 
 ROOT = Path(__file__).resolve().parent
 PORT_FILE = ROOT / "log" / "ui_port.txt"

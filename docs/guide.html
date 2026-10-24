@@ -137,7 +137,7 @@
   <h1>HSLegendArriver 安装与使用</h1>
   <p>从一台干净的 Windows 机器开始，到能正常挂机为止。</p>
   <div class="meta">
-    适用于 2026-10-17 之后的版本 · 命令都在 PowerShell 里执行 · 其它文档：
+    适用于 2026-10-24 之后的版本 · 命令都在 PowerShell 里执行 · 其它文档：
     <code>README.md</code>（全量说明）、<code>docs/CLI.md</code>（命令手册）、
     <code>docs/FEATURES.md</code>（功能目录）
   </div>
@@ -304,14 +304,15 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
 <p>浮窗只移动鼠标、不点击，不会干扰出牌；标题行右侧有「最小化」可以把整个浮窗折叠成一条。</p>
 
 <h3 id="daily-version">版本号在哪看</h3>
-<p>版本号就是<b>发布日期</b>，形如 <code>v2026.10.17</code>。想知道手上这份是不是最新的，看三个地方之一就够，显示的是同一个串：</p>
+<p>版本号就是<b>发布日期</b>，形如 <code>v2026.10.24</code>。想知道手上这份是不是最新的，看三个地方之一就够，显示的是同一个串：</p>
 <table>
   <tr><th>位置</th><th>长什么样</th></tr>
-  <tr><td>浮窗最上面一行（项目名右边）</td><td><code>HSLegendArriver&nbsp;&nbsp;v2026.10.17</code></td></tr>
-  <tr><td>网页控制台顶栏右侧（状态圆点左边）</td><td>金色小圆角标签 <code>v2026.10.17</code></td></tr>
+  <tr><td>浮窗最上面一行（项目名右边）</td><td><code>HSLegendArriver&nbsp;&nbsp;v2026.10.24</code></td></tr>
+  <tr><td>网页控制台顶栏右侧（状态圆点左边）</td><td>金色小圆角标签 <code>v2026.10.24</code></td></tr>
   <tr><td>命令行</td><td><code>python hsctl.py --version</code></td></tr>
 </table>
 <p>只有 <code>version.py</code> 里那个 <code>VERSION</code> 能改，改完三处一起变。</p>
+<p>浮窗品牌行下面还有一块<b>红色大字「装好没反应？按顺序自查」</b>：① 群里文件是不是最新（本机 v… / 线上最新 v…，脚本后台每 6 小时从 GitHub 镜像查一次）② 网页「环境自检」是否全部通过 ③ 是否点过浮窗「校准」。断网或远端还没发版时只会显示「获取失败 / 线上未发布」，不会假装最新。</p>
 
 <h2 id="optional">可选开关</h2>
 <p>默认关着的都不影响第一次跑通，按需要开。</p>

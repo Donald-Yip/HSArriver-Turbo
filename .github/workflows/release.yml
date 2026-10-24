@@ -1,0 +1,31 @@
+# 打 tag 即建 GitHub Release（版本号 = version.py 的发布日期，tag = vYYYY.MM.DD）。
+# 发布步骤（本地）：
+#   1. python tools/release.py check
+#   2. python tools/release.py bump 2026.10.24 "本次改了什么"
+#   3. 跑全量测试，git add version.py CHANGELOG.md && git commit -m "chore(release): v2026.10.24"
+#   4. python tools/release.py tag
+#   5. git push <remote> main && git push <remote> v2026.10.24   ← 推 tag 后本工作流生效
+# 不想用 Actions 时：推完 tag 在 GitHub Releases 页面手动 Draft a new release，
+# 或用 `gh release create v2026.10.24 --title v2026.10.24 --generate-notes`。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 只建 Release（附自动生成的 release notes）；桌面包按 CHANGELOG 的约定
+      # 由维护者手动上传为资产（HSArriver-Turbo-latest.zip）。
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          draft: false
+          prerelease: false

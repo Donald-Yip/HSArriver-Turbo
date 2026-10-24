@@ -49,7 +49,7 @@ body{
 .repo-bar a.repo-link:hover{color:#241a05;border-color:#8a6a1c;filter:brightness(1.08);transform:translateY(-1px)}
 .repo-bar-note{color:var(--muted);font-size:12.5px}
 .clock{font-family:Consolas,monospace;color:var(--muted);font-size:13px;text-align:right;line-height:1.5}
-/* 版本徽标：v2026.10.17（版本号 = 发布日期，不挂 git 哈希） */
+/* 版本徽标：v2026.10.24（版本号 = 发布日期，不挂 git 哈希） */
 .ver-chip{font-family:Consolas,monospace;font-size:12px;color:var(--gold-bright);border:1px solid var(--border);background:var(--panel2);border-radius:999px;padding:5px 12px;white-space:nowrap;cursor:default}
 .ver-chip.muted{color:var(--muted)}
 .pill{display:flex;align-items:center;gap:8px;padding:7px 15px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid var(--border);background:var(--panel2)}
@@ -706,7 +706,7 @@ function render(s){
   var pill = $("statusPill");
   pill.className = "pill " + info.cls;
 
-  /* 版本徽标：v2026.10.17（版本号就是发布日期）。
+  /* 版本徽标：v2026.10.24（版本号就是发布日期）。
      老版本后端不带 version 字段，显示 "v—" 而不是报错。 */
   var verBox = $("appVersion");
   if (verBox){

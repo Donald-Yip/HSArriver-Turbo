@@ -175,7 +175,7 @@ Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Un
 
 ```bash
 # 自诊 / 环境（**会话第一条命令就是 doctor**）
-python hsctl.py --version               # 版本号＝发布日期（v2026.10.17），回报里带上便于对账
+python hsctl.py --version               # 版本号＝发布日期（v2026.10.24），回报里带上便于对账
 python hsctl.py --json doctor           # 环境 + 控制台 + 下一步（verdict / next_steps）
 python hsctl.py env                     # 当前 / 已保存的解释器
 python hsctl.py env --discover          # 列出本机候选解释器 + 各自缺什么（不写盘）
