@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Task ID for the scope gate, for example R02B
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  headless-gates:
+    name: Windows headless gates
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+      UV_LINK_MODE: copy
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          uv python install 3.12
+          uv sync --locked --all-groups
+
+      - name: Compile Python
+        shell: pwsh
+        run: uv run python -m compileall -q src tests tools
+
+      - name: Architecture gate
+        shell: pwsh
+        run: uv run python tools/check_architecture.py
+
+      - name: Architecture self-test
+        shell: pwsh
+        run: uv run python tools/check_architecture.py --self-test
+
+      - name: Scope self-test
+        shell: pwsh
+        run: uv run python tools/check_task_scope.py --self-test
+
+      - name: Resolve task ID and scope base
+        id: task
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TASK_ID: ${{ github.event.inputs.task_id }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          REF_NAME: ${{ github.ref_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          $task = $env:INPUT_TASK_ID
+          $branch = if ($env:PR_HEAD_REF) { $env:PR_HEAD_REF } else { $env:REF_NAME }
+          if (-not $task -and $branch -match '(?i)(R\d{2}[A-Z]?)') {
+            $task = $Matches[1].ToUpperInvariant()
+          }
+          if (-not $task) {
+            $subject = git log -1 --pretty=%s
+            if ($subject -match '\((R\d{2}[A-Z]?)\)') {
+              $task = $Matches[1].ToUpperInvariant()
+            }
+          }
+          if (-not $task) {
+            throw "Cannot resolve a task ID from workflow input, branch name, or latest commit subject."
+          }
+
+          $base = $env:PR_BASE_SHA
+          if (-not $base -and $env:EVENT_NAME -eq 'push') {
+            $base = $env:PUSH_BEFORE_SHA
+            if ($base -match '^0+$') {
+              $base = 'HEAD^'
+            }
+          }
+          if (-not $base -and $env:EVENT_NAME -eq 'workflow_dispatch') {
+            $base = 'HEAD^'
+          }
+          if (-not $base) {
+            throw "Cannot resolve a scope base ref for event $($env:EVENT_NAME)."
+          }
+
+          "task_id=$task" >> $env:GITHUB_OUTPUT
+          "base_ref=$base" >> $env:GITHUB_OUTPUT
+          Write-Host "Task scope gate: $task against $base"
+
+      - name: Task scope gate
+        shell: pwsh
+        run: uv run python tools/check_task_scope.py --task "${{ steps.task.outputs.task_id }}" --base-ref "${{ steps.task.outputs.base_ref }}"
+
+      - name: Headless unit tests
+        shell: pwsh
+        run: uv run python tools/run_headless_tests.py

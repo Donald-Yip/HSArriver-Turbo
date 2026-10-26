@@ -38,7 +38,40 @@ git remote -v                  # 当前配置：mine=Donald-Yip/HSArriver-Turbo�
 
 ---
 
-## 3. 提交前检查
+## 3. 必需 CI 门禁与 PR 流程
+
+每个 PR 必须使用 `.github/pull_request_template.md`，写明 Task ID、task book、原因、
+scope、接口、原始测试结果、架构影响、破坏性变更、风险/回滚和检查清单。
+
+提交 PR 前在本地运行：
+
+```powershell
+uv sync --locked --all-groups
+uv run python -m compileall -q src tests tools
+uv run python tools/check_architecture.py
+uv run python tools/check_architecture.py --self-test
+uv run python tools/check_task_scope.py --task <TASK>
+uv run python tools/check_task_scope.py --self-test
+uv run python tools/run_headless_tests.py
+```
+
+`check_architecture.py` 只扫描 `src/hslegend`；空的新架构先 PASS，出现任一层级的
+legacy root import、application 导入 plugins、plugin IO/input import 或 builtin I/O
+调用、新包导入环时失败。它是静态 AST/name 检查，不解析动态 import、容器别名或完整
+词法遮蔽；边界和已记录的误报范围见 `docs/testing/CI_GATES.md`。
+
+`check_task_scope.py` 默认读取 `git diff --cached --name-only`，所以本地必须先精确 stage
+本次文件；传 `--base-ref REF` 时读取 `git diff REF...HEAD`，该命令失败就直接失败，
+绝不回退到 staged index。`**/` 匹配零层或多层目录，因此 `**/*.py` 能匹配根目录
+`a.py`。CI 按 workflow input、`Rxx` 分支名、最新 commit subject `(Rxx)` 的顺序解析任务，
+再按 PR base SHA、push before SHA、dispatch `HEAD^` 解析 base；任何一项解析失败都会
+fail closed，scope 不允许跳过。
+
+Windows CI 只跑 headless 默认测试；Node 前端测试、真实进程枚举、OCR 推理、屏幕截图和
+真实炉石对局不在默认门禁中。排除项及后续 R02C 迁移计划见
+`docs/testing/CI_GATES.md`。
+
+## 4. 提交前检查
 
 ```powershell
 git status --short
@@ -59,7 +92,7 @@ git diff --cached --stat        # stage 后确认只包含本次功能
 
 ---
 
-## 4. 哪些能提交、哪些不能
+## 5. 哪些能提交、哪些不能
 
 **不要提交（本机/产物/临时文件）**
 
@@ -80,14 +113,14 @@ git diff --cached --stat        # stage 后确认只包含本次功能
 
 ---
 
-## 5. 版本号与 CHANGELOG
+## 6. 版本号与 CHANGELOG
 
 - `version.py` 的 `VERSION` 是唯一版本源，格式 `YYYY.MM.DD`，版本号 = 发布日期。
 - 只有**发版**才改 `version.py`，同时把 `CHANGELOG.md` 顶部加一行同日期记录；
   `tests/test_version.py` 会检查两者一致。
 - 普通 bugfix / 文档改动不要顺手改版本号，避免「每天都是新版本」。
 
-### 5.1 发布版本号（tag + Release）
+### 6.1 发布版本号（tag + Release）
 
 GitHub 本身没有“版本号”对象，本项目用 **`version.py` 的发布日期**当版本号，
 发版时另外做两件事：打注释标签 `vYYYY.MM.DD`、在 GitHub 建同名 Release。
@@ -136,7 +169,7 @@ Invoke-RestMethod https://api.github.com/repos/<owner>/<repo>/releases/latest |
 
 ---
 
-## 6. 常用操作
+## 7. 常用操作
 
 ```powershell
 # 只 stage 本次文件（不要 git add -A）
@@ -163,7 +196,7 @@ git commit --amend --no-edit
 
 ---
 
-## 7. 本次工作的提交顺序（示例）
+## 8. 本次工作的提交顺序（示例）
 
 按功能拆分提交，每个提交先测试再落库：
 

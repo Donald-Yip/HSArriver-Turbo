@@ -117,6 +117,35 @@ Only ask the user for irreversible/destructive actions, security-sensitive actio
 
 No completion claim without a fresh command and observed output. A subagent report is never sufficient by itself; the controller checks the diff and reruns the required gate.\n\nA commit cannot embed its own SHA. Reports use the base SHA plus the final commit discovered by `git log --grep "(Rxx)"`. After the commit, the controller records that SHA in the next task handoff.
 
+## Required Checks And PR Flow
+
+Every task report must include the raw commands, exit codes, and pass/fail/skip
+counts for these checks (or a task-book-approved reason why a check does not
+apply):
+
+```powershell
+uv sync --locked --all-groups
+uv run python -m compileall -q src tests tools
+uv run python tools/check_architecture.py
+uv run python tools/check_architecture.py --self-test
+uv run python tools/check_task_scope.py --task <TASK>
+uv run python tools/check_task_scope.py --self-test
+uv run python tools/run_headless_tests.py
+```
+
+The architecture gate is an AST-only dependency-direction and cycle check. The
+scope gate reads `docs/tasks/<TASK>.md` and compares the staged diff by default;
+CI uses the pull-request base SHA, push-before SHA, or `HEAD^` for dispatch, and
+fails closed when the task ID or base ref cannot be resolved. The headless runner
+excludes the Node frontend test and the two real-process enumeration tests until
+R02C moves them.
+
+Before opening a PR, fill `.github/pull_request_template.md` with the task ID,
+task book, why, scope, interfaces, raw test results, architecture impact,
+breaking-change status, risk/rollback, and checklist. A PR is not reviewable
+without those fields. The controller remains the only role allowed to commit,
+push, merge, or change task-board state.
+
 ## Git
 
 - One task produces one final squash commit.

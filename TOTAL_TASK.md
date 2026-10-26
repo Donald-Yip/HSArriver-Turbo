@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02B: architecture, scope, CI, and PR gates.
+R02B: architecture and scope gates fix round 1 complete; awaiting re-review.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: pending R01 branch creation
+- Current feature branch: `feature/R02B-ci-gates`, based on `develop` at `386c986`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -38,7 +38,7 @@ R02B: architecture, scope, CI, and PR gates.
 | R00 | done | Governance and branch baseline | - |
 | R01 | done | uv environment baseline | R00 |
 | R02A | done | Test inventory and classification | R01 |
-| R02B | planned | Architecture, scope, CI and PR gates | R02A |
+| R02B | done | Architecture, scope, CI and PR gates | R02A |
 | R02C | planned | Headless test rationalization | R02B |
 | R03 | planned | Domain contracts | R02C |
 | R04 | planned | Application ports and runtime controls | R03 |
@@ -83,7 +83,7 @@ R01 gate:
 
 ```powershell
 uv lock --check
-uv sync
+uv sync --locked --all-groups
 uv run python --version
 uv run python -m unittest tests.test_uv_environment -v
 ```
@@ -91,9 +91,13 @@ uv run python -m unittest tests.test_uv_environment -v
 R02+ gates:
 
 ```powershell
+uv sync --locked --all-groups
 uv run python -m compileall -q src tests tools
 uv run python tools/check_architecture.py
-uv run python -m unittest discover -s tests -t .
+uv run python tools/check_architecture.py --self-test
+uv run python tools/check_task_scope.py --task R02B
+uv run python tools/check_task_scope.py --self-test
+uv run python tools/run_headless_tests.py
 ```
 
 R12/R13 gate adds:
@@ -110,4 +114,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Create `feature/R01-uv-baseline` from the approved R00 commit and implement the uv-only environment baseline.
+Return R02B fix round 1 to the controller for independent re-review. After approval, commit R02B and start R02C headless test rationalization.
