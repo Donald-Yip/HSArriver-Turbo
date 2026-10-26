@@ -110,7 +110,7 @@
   <a href="#what">这是什么</a>
   <a href="#before">装之前先确认</a>
   <a href="#install">安装</a>
-  <a href="#install-py" class="sub">1 装 Python 3.12</a>
+  <a href="#install-py" class="sub">1 安装 uv（管理 Python 3.12）</a>
   <a href="#install-dep" class="sub">2 装依赖</a>
   <a href="#install-run" class="sub">3 第一次启动</a>
   <a href="#install-task" class="sub">4 免 UAC 常驻</a>
@@ -148,7 +148,7 @@
 <p>三个部件的关系：</p>
 <table>
   <tr><th>部件</th><th>干什么</th><th>怎么开</th></tr>
-  <tr><td>控制台（<code>web_ui.py</code>）</td><td>常驻后台，是唯一的状态源；网页、命令行、浮窗都只是它的客户端</td><td><code>python web_ui.py</code></td></tr>
+  <tr><td>控制台（<code>web_ui.py</code>）</td><td>常驻后台，是唯一的状态源；网页、命令行、浮窗都只是它的客户端</td><td><code>uv run python web_ui.py</code></td></tr>
   <tr><td>网页（<code>http://127.0.0.1:8765</code>）</td><td>所有开关、参数、校准、日志</td><td>启动控制台后自动打开</td></tr>
   <tr><td>浮窗</td><td>游戏画面右上角的置顶小窗：实时日志、战绩、开始/停止/重启炉石</td><td>网页「日志浮窗」或 <code>hsctl overlay on</code></td></tr>
 </table>
@@ -173,20 +173,18 @@
 
 <ol class="steps">
 <li id="install-py">
-  <b>装 Python 3.12</b>
-  <p>到 <a href="https://www.python.org/downloads/" target="_blank" rel="noopener">python.org</a> 下 <b>Python 3.12</b>，安装时勾上 <code>Add python.exe to PATH</code>。装完验证：</p>
-<pre><code>python --version</code></pre>
-  <p>必须是 <code>Python 3.12.x</code>。如果显示 3.13 或别的版本，说明机器上有多个 Python——后面每条命令都要写 3.12 那个的完整路径（例如 <code>C:\Python312\python.exe</code>）。用 conda 的话：</p>
-<pre><code>conda create -n HTL python=3.12 -y
-conda activate HTL</code></pre>
+  <b>安装 uv（自动管理 Python 3.12）</b>
+  <p>安装 <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>。不需要手动切换系统 Python：</p>
+<pre><code>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</code></pre>
+  <p>项目已通过 <code>pyproject.toml</code> 约束 Python 3.12，<code>uv sync</code> 会准备正确解释器。</p>
 </li>
 
 <li id="install-dep">
-  <b>装依赖</b>
+  <b>同步锁定依赖</b>
   <p>在项目根目录打开 PowerShell：</p>
-<pre><code>pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple</code></pre>
+<pre><code>uv sync</code></pre>
   <p>里面有 PaddleOCR 和 PaddlePaddle，首次要下几百 MB，慢是正常的。装完验证：</p>
-<pre><code>python -c "import cv2, paddleocr, win32api, keyboard; print('ok')"</code></pre>
+<pre><code>uv run python -c "import cv2, paddleocr, win32api, keyboard; print('ok')"</code></pre>
   <p>打印 <code>ok</code> 就算齐了。</p>
 </li>
 
@@ -194,7 +192,7 @@ conda activate HTL</code></pre>
   <b>第一次启动</b>
   <p>用<b>管理员</b> PowerShell（开始菜单搜 PowerShell → 右键 → 以管理员身份运行）：</p>
 <pre><code>cd &lt;项目根目录&gt;
-python web_ui.py</code></pre>
+uv run python web_ui.py</code></pre>
   <p>浏览器会在 1 秒内自动打开 <code>http://127.0.0.1:8765</code>。端口被占用时会自动往后顺延（8765–8785），以控制台窗口打印的地址为准。</p>
   <p><span class="chk">验收</span>：网页打开、「运行概览」有数据。<b>这个 PowerShell 窗口别关</b>，关掉服务就停了。</p>
 </li>
@@ -203,20 +201,20 @@ python web_ui.py</code></pre>
   <b>免 UAC 常驻（可选，建议做）</b>
   <p>每次手动开管理员窗口很麻烦，也没法手机远程。注册一次计划任务，之后普通权限就能拉起最高权限的控制台：</p>
 <pre><code><span class="c"># 管理员 PowerShell 里跑一次</span>
-python hsctl.py serve install-task
+uv run python hsctl.py serve install-task
 
 <span class="c"># 之后随时（普通窗口即可，不弹 UAC）</span>
-python hsctl.py serve start --via-task</code></pre>
-  <p><span class="chk">验收</span>：<code>python hsctl.py serve task-status</code> 显示任务存在且勾了最高权限。</p>
+uv run python hsctl.py serve start --via-task</code></pre>
+  <p><span class="chk">验收</span>：<code>uv run python hsctl.py serve task-status</code> 显示任务存在且勾了最高权限。</p>
 </li>
 
 <li id="install-pin">
-  <b>固定解释器（换机器 / 换 agent 必做）</b>
-  <p>机器上 Python 不止一个时，别靠猜，让脚本自己找并记住：</p>
-<pre><code>python hsctl.py env discover                        <span class="c"># 列候选，逐个校验版本与依赖，不写盘</span>
-python hsctl.py env pin "C:\Python312\python.exe"   <span class="c"># 选合格的存进 log/env.json</span>
-python hsctl.py --json doctor                       <span class="c"># 复验，verdict 应为 env_ok</span></code></pre>
-  <p><code>log/env.json</code> 是本机专属配置，不进仓库。之后无论用哪个 Python 跑 <code>hsctl</code>，都会自动切到合格的那个解释器。</p>
+  <b>固定 uv 环境（换机器 / 换 agent 必做）</b>
+  <p>让后台服务和计划任务复用项目 uv 环境：</p>
+<pre><code>uv sync
+uv run python hsctl.py env --pin ".venv\Scripts\python.exe"  <span class="c"># 保存项目 uv 环境</span>
+uv run python hsctl.py --json doctor                         <span class="c"># 复验，verdict 应为 env_ok</span></code></pre>
+  <p><code>log/env.json</code> 是本机专属配置，不进仓库；它只指向 uv 创建的 <code>.venv</code>。</p>
 </li>
 </ol>
 
@@ -250,7 +248,7 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
 <table>
   <tr><td><span class="chk">✅</span></td><td>达标</td></tr>
   <tr><td><span style="color:var(--warn);font-weight:600">⚠️</span></td><td>和推荐值不同，但还能跑</td></tr>
-  <tr><td><span class="x">❌</span></td><td>不满足，<b>必须先修</b>。缺依赖会直接给出 pip 命令</td></tr>
+  <tr><td><span class="x">❌</span></td><td>不满足，<b>必须先修</b>。缺依赖时在仓库根目录执行 <code>uv sync</code></td></tr>
 </table>
 <p>没有 ❌，安装部分就结束了。</p>
 <p>其中「窗口化尺寸」这一项只在炉石<b>窗口化</b>时出现：<b>✅ 窗口化 1920×1080</b> 就是标准配置；显示 <b>⚠️ 窗口化 1600×900（基准 1920×1080）</b> 表示还能跑，但建议把窗口改成 1920×1080 后重新校准。全屏时这一项不显示。</p>
@@ -309,7 +307,7 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
   <tr><th>位置</th><th>长什么样</th></tr>
   <tr><td>浮窗最上面一行（项目名右边）</td><td><code>HSLegendArriver&nbsp;&nbsp;v2026.10.24</code></td></tr>
   <tr><td>网页控制台顶栏右侧（状态圆点左边）</td><td>金色小圆角标签 <code>v2026.10.24</code></td></tr>
-  <tr><td>命令行</td><td><code>python hsctl.py --version</code></td></tr>
+  <tr><td>命令行</td><td><code>uv run python hsctl.py --version</code></td></tr>
 </table>
 <p>只有 <code>version.py</code> 里那个 <code>VERSION</code> 能改，改完三处一起变。</p>
 <p>浮窗按钮区最后一行是<b>「装好没反应？」</b>：点开弹窗按顺序自查 ① 群里文件是不是最新（本机 v… / 线上最新 v…，脚本后台每 6 小时从 GitHub 镜像查一次）② 网页「环境自检」是否全部通过 ③ 是否点过浮窗「校准」。断网或远端还没发版时只会显示「获取失败 / 线上未发布」，不会假装最新。</p>
@@ -347,23 +345,23 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
 <h2 id="trouble">出问题先看这里</h2>
 <table>
   <tr><th>现象</th><th>多半是</th><th>怎么办</th></tr>
-  <tr><td>脚本在跑，但<b>点了没反应</b></td><td>没用管理员权限启动</td><td>重开一个管理员 PowerShell 再 <code>python web_ui.py</code>；或装计划任务后用 <code>serve start --via-task</code></td></tr>
+  <tr><td>脚本在跑，但<b>点了没反应</b></td><td>没用管理员权限启动</td><td>重开一个管理员 PowerShell 再 <code>uv run python web_ui.py</code>；或装计划任务后用 <code>serve start --via-task</code></td></tr>
   <tr><td>进对局后<b>卡在换牌</b>、识别不工作</td><td>Python 不是 3.12</td><td>看「环境自检」第一项；用 <code>hsctl env pin</code> 固定合格的解释器</td></tr>
   <tr><td><b>一直不出牌</b></td><td>用户 ID 没带 <code>#编号</code>，或换了账号没改</td><td>填完整战网昵称；浮窗「账号」行应显示匹配</td></tr>
   <tr><td>点击<b>整体偏掉</b>、老是点空</td><td>炉石用了「最大化窗口」、窗口尺寸不是 1920×1080，或 ROI 是很久以前在别的界面量的</td><td>把窗口设成 1920×1080（别用最大化），再打开校准窗口重拖一次保存</td></tr>
   <tr><td>校准框跑到屏幕外、还拖不动</td><td>当初在炉石<b>最小化</b>时保存的（标记是客户区，值其实是屏幕坐标）</td><td>打开校准窗口会自动识别并复原位置，拖好按 <code>S</code></td></tr>
   <tr><td>浮窗状态和游戏<b>对不上</b></td><td>上一局残留的 <code>Power.log</code></td><td>点浮窗「重启炉石」，再重新开始对战</td></tr>
-  <tr><td>按 <b>Ctrl+Q 没反应</b></td><td>控制台没在跑，热键没注册</td><td><code>python hsctl.py status</code> 确认控制台在；不在就 <code>serve start --via-task</code></td></tr>
+  <tr><td>按 <b>Ctrl+Q 没反应</b></td><td>控制台没在跑，热键没注册</td><td><code>uv run python hsctl.py status</code> 确认控制台在；不在就 <code>serve start --via-task</code></td></tr>
   <tr><td>提示<b>端口连不上</b></td><td>控制台换到 8766 等别的端口了</td><td>看控制台窗口打印的地址，或 <code>hsctl --json doctor</code></td></tr>
   <tr><td>卡组识别投降<b>不投</b></td><td>条件类型选错（对面那张是「亮出/开局生效」不是「打出」）</td><td><code>hsctl surrender check</code> 看每条 ✓/✗，改成 <code>played_or_revealed</code> 或 <code>start_of_game</code></td></tr>
   <tr><td>规则一保存就<b>立刻投降</b></td><td>这套规则在当前这局已经成立</td><td>属正常。调规则时先 <code>surrender off</code>，配好再 <code>on</code></td></tr>
   <tr><td>段位目标不生效</td><td>段位数字没校准，或功能没开</td><td>校准窗口 <code>Tab</code> 到「段位数字（名次）」拖好保存；网页「段位目标」里开启</td></tr>
-  <tr><td>OCR 报错 / 缺依赖</td><td>依赖没装全</td><td>看「环境自检」的 ❌ 项，它会给出 pip 命令</td></tr>
+  <tr><td>OCR 报错 / 缺依赖</td><td>依赖没装全</td><td>看「环境自检」的 ❌ 项，在仓库根目录执行 <code>uv sync</code></td></tr>
 </table>
 
 <div class="box">
   <span class="t">一条命令先自诊</span>
-  <p>不知道该查哪儿时：<code>python hsctl.py --json doctor</code>。它一条命令回答环境对不对、控制台在不在跑、权限够不够，并直接给出下一步该跑什么。</p>
+  <p>不知道该查哪儿时：<code>uv run python hsctl.py --json doctor</code>。它一条命令回答环境对不对、控制台在不在跑、权限够不够，并直接给出下一步该跑什么。</p>
 </div>
 
 <h2 id="files">文件都在哪</h2>
@@ -379,15 +377,15 @@ python hsctl.py --json doctor                       <span class="c"># 复验，v
 
 <h2 id="portable">换机器 / 交给 agent</h2>
 <p>换机器只有一件事要做：把解释器固定到新机器上。</p>
-<pre><code>python hsctl.py --json doctor
-python hsctl.py env discover
-python hsctl.py env pin "&lt;新机器上 3.12 的路径&gt;"
-python hsctl.py --json doctor     <span class="c"># verdict 应为 env_ok</span></code></pre>
+<pre><code>uv run python hsctl.py --json doctor
+uv run python hsctl.py env discover
+uv run python hsctl.py env pin "&lt;新机器上 3.12 的路径&gt;"
+uv run python hsctl.py --json doctor     <span class="c"># verdict 应为 env_ok</span></code></pre>
 <p>交给本机 agent（WorkBuddy / DSH / Claude Code 等）时，最短闭环是四条：</p>
-<pre><code>python hsctl.py --json doctor     <span class="c"># 拿到 verdict + next_steps</span>
+<pre><code>uv run python hsctl.py --json doctor     <span class="c"># 拿到 verdict + next_steps</span>
 <span class="c"># 照抄 next_steps 里的命令，把环境和控制台修好</span>
-python hsctl.py --json doctor     <span class="c"># 复验到 env_ok</span>
-python hsctl.py --json status     <span class="c"># 之后按需探活、干活</span></code></pre>
+uv run python hsctl.py --json doctor     <span class="c"># 复验到 env_ok</span>
+uv run python hsctl.py --json status     <span class="c"># 之后按需探活、干活</span></code></pre>
 <ul>
   <li>命令一律加 <code>--json</code>：输出机器可读，错误也走 stdout，退出码可判断。</li>
   <li>退出码：<code>0</code> 成功 · <code>1</code> 业务失败 · <code>2</code> 参数错误 · <code>3</code> 连不上控制台 · <code>4</code> 本机没有合格的 Python 环境。</li>
@@ -397,41 +395,41 @@ python hsctl.py --json status     <span class="c"># 之后按需探活、干活<
 
 <h2 id="cmd">命令速查</h2>
 <pre><code><span class="c"># 状态与自检</span>
-python hsctl.py --version            <span class="c"># 版本号（就是发布日期）</span>
-python hsctl.py --json doctor        <span class="c"># 一条命令自诊（会话第一条）</span>
-python hsctl.py status               <span class="c"># 阶段 / 账号 / 战绩 / 参数</span>
-python hsctl.py log -f               <span class="c"># 实时跟随日志</span>
-python hsctl.py selfcheck            <span class="c"># 环境自检</span>
+uv run python hsctl.py --version            <span class="c"># 版本号（就是发布日期）</span>
+uv run python hsctl.py --json doctor        <span class="c"># 一条命令自诊（会话第一条）</span>
+uv run python hsctl.py status               <span class="c"># 阶段 / 账号 / 战绩 / 参数</span>
+uv run python hsctl.py log -f               <span class="c"># 实时跟随日志</span>
+uv run python hsctl.py selfcheck            <span class="c"># 环境自检</span>
 
 <span class="c"># 控制台</span>
-python hsctl.py serve start --via-task
-python hsctl.py serve stop
-python hsctl.py serve task-status
+uv run python hsctl.py serve start --via-task
+uv run python hsctl.py serve stop
+uv run python hsctl.py serve task-status
 
 <span class="c"># 打一局</span>
-python hsctl.py prepare              <span class="c"># 开浮窗 + 切前台，不开打</span>
-python hsctl.py start                <span class="c"># 开打</span>
-python hsctl.py stop                 <span class="c"># 立刻停</span>
-python hsctl.py stop --after-game    <span class="c"># 打完这局再停</span>
-python hsctl.py cancel               <span class="c"># 急停（同 Ctrl+Q）</span>
+uv run python hsctl.py prepare              <span class="c"># 开浮窗 + 切前台，不开打</span>
+uv run python hsctl.py start                <span class="c"># 开打</span>
+uv run python hsctl.py stop                 <span class="c"># 立刻停</span>
+uv run python hsctl.py stop --after-game    <span class="c"># 打完这局再停</span>
+uv run python hsctl.py cancel               <span class="c"># 急停（同 Ctrl+Q）</span>
 
 <span class="c"># 进对战 / 选卡组 / 切模式</span>
-python hsctl.py enter-battle --deck 6 --start
-python hsctl.py deck-click 6         <span class="c"># 秒级快选第 6 格</span>
-python hsctl.py mode wild
+uv run python hsctl.py enter-battle --deck 6 --start
+uv run python hsctl.py deck-click 6         <span class="c"># 秒级快选第 6 格</span>
+uv run python hsctl.py mode wild
 
 <span class="c"># 认输</span>
-python hsctl.py concede now          <span class="c"># 手动投降（运行中可用）</span>
-python hsctl.py surrender            <span class="c"># 看卡组识别规则</span>
-python hsctl.py surrender check      <span class="c"># 这局的判定进度</span>
-python hsctl.py surrender on         <span class="c"># 打开总闸（off 关掉，卡组保留）</span>
+uv run python hsctl.py concede now          <span class="c"># 手动投降（运行中可用）</span>
+uv run python hsctl.py surrender            <span class="c"># 看卡组识别规则</span>
+uv run python hsctl.py surrender check      <span class="c"># 这局的判定进度</span>
+uv run python hsctl.py surrender on         <span class="c"># 打开总闸（off 关掉，卡组保留）</span>
 
 <span class="c"># 排查</span>
-python hsctl.py screenshot           <span class="c"># 抓一帧，返回路径</span>
-python hsctl.py ui                   <span class="c"># 现在在哪个界面</span>
-python hsctl.py regions              <span class="c"># 所有区域框画在图上</span>
-python hsctl.py card 神秘            <span class="c"># 查卡（本地，不联网）</span></code></pre>
-<p>完整参数见 <code>docs/CLI.md</code>，或 <code>python hsctl.py --help</code>。</p>
+uv run python hsctl.py screenshot           <span class="c"># 抓一帧，返回路径</span>
+uv run python hsctl.py ui                   <span class="c"># 现在在哪个界面</span>
+uv run python hsctl.py regions              <span class="c"># 所有区域框画在图上</span>
+uv run python hsctl.py card 神秘            <span class="c"># 查卡（本地，不联网）</span></code></pre>
+<p>完整参数见 <code>docs/CLI.md</code>，或 <code>uv run python hsctl.py --help</code>。</p>
 
 <footer>
   HSLegendArriver · 仅用于技术研究与代码交流，请勿用于商业用途。<br>

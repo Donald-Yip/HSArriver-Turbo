@@ -5,7 +5,7 @@ Updated: 2026-10-27
 | ID | Status | Branch | Depends | Notes |
 |---|---|---|---|---|
 | R00 | done | feature/R00-governance | - | Governance baseline |
-| R01 | planned | feature/R01-uv-baseline | R00 | Uv-only environment |
+| R01 | done | feature/R01-uv-baseline | R00 | Uv-only environment |
 | R02 | planned | feature/R02-contracts-tests-ci | R01 | Contracts, golden replay, CI, test rationalization |
 | R03 | planned | feature/R03-domain-contracts | R02 | Domain models and rules |
 | R04 | planned | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |

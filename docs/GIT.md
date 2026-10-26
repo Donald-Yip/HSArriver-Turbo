@@ -46,14 +46,14 @@ git diff --stat
 git diff --cached --stat        # stage 后确认只包含本次功能
 ```
 
-- 先跑对应测试（项目测试用 `unittest` 可直接跑，装了 pytest 也可以）：
+- 先跑对应测试（项目测试统一使用 `unittest`，所有 Python 命令走 uv）：
 
   ```powershell
-  # 本机解释器以 log/env.json 的 interpreter 为准，例如：
-  D:\miniconda3\envs\HTL\python.exe -m unittest -q tests.test_xxx
+  # 所有 Python 命令必须走 uv 环境：
+  uv run python -m unittest -q tests.test_xxx
   ```
 
-- 改动涉及界面/校准/OCR 区域时，额外跑一次离屏渲染或 `python hsctl.py --json doctor`。
+- 改动涉及界面/校准/OCR 区域时，额外跑一次离屏渲染或 `uv run python hsctl.py --json doctor`。
 - 改动涉及启动/重启/点击时，确认没有把真实鼠标/键盘操作带进单测（测试必须可注入桩）。
 - 改动涉及 `version.py` / `CHANGELOG.md` 时，两者顶部日期必须一致（`tests/test_version.py` 会检查）。
 
@@ -63,7 +63,7 @@ git diff --cached --stat        # stage 后确认只包含本次功能
 
 **不要提交（本机/产物/临时文件）**
 
-- `ui_config.json`、`log/env.json`、`log/`、`logs/`、`tmp_screens/`、`*.log`、`*.txt`（`requirements.txt` 除外）
+- `ui_config.json`、`log/env.json`、`log/`、`logs/`、`tmp_screens/`、`*.log`、`*.txt`
 - 截图/调试图：`out.jpg`、`snapshot_live.jpg`、`tmp*/`、`*.png`（项目正式文档图除外）
 - `__pycache__/`、`.pytest_cache/`、`pytest-cache-files-*/`、`.tmp-tests/`
 - 本机计划任务、绝对路径、账号/令牌
@@ -99,10 +99,10 @@ GitHub 本身没有“版本号”对象，本项目用 **`version.py` 的发布
 
 ```powershell
 # 1) 校验（版本号与 CHANGELOG 首行一致 + 跑 tests.test_version）
-python tools/release.py check
+uv run python tools/release.py check
 
 # 2) 改两处：version.py 的 VERSION、CHANGELOG 表格顶部同日期一行
-python tools/release.py bump 2026.10.24 "本次改了什么"
+uv run python tools/release.py bump 2026.10.24 "本次改了什么"
 # 等价于手改；不想写盘先加 --dry-run 看一遍
 
 # 3) 跑全量测试后，单独提交发版改动（只 stage 这两个文件）
@@ -110,7 +110,7 @@ git add version.py CHANGELOG.md
 git commit -m "chore(release): v2026.10.24"
 
 # 4) 打注释标签（不 push）
-python tools/release.py tag
+uv run python tools/release.py tag
 
 # 5) 推送（**先问用户**；当前 main 可能领先 origin 很多）
 git push <remote> main

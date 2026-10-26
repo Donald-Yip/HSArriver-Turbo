@@ -2,41 +2,33 @@
 
 ## Current Phase
 
-R01 - uv environment baseline
+R02 - contract, golden replay, CI, and test rationalization
 
 ## Current Task
 
-R01 (`planned`)
+R02 (`planned`)
 
 ## Completed
 
-- R00 governance baseline is committed and approved.
-- R00 final commit is discoverable with `git log -1 --format=%H --grep "(R00)"`.
+- R00 governance baseline committed and merged.
+- R01 uv environment baseline committed and independently approved.
+- R01 final commit is discoverable with `git log -1 --format=%H --grep "(R01)"`.
 
-## Git State
+## Environment
 
-- Active branch: will be `feature/R01-uv-baseline` after R00 fast-forwards `develop`.
-- Remotes: `origin` personal, `upstream` read-only with disabled push URL.
-- Production code changes: none.
+- uv-managed Python 3.12.13.
+- All OpenCV distributions constrained to 4.10.0.84.
+- Active docs use uv only.
 
-## Interfaces Changed
+## Current Risks
 
-- R00 added the planning/interface contracts; no runtime interfaces changed.
-
-## Verification
-
-- R00 staged diff check: exit 0.
-- R00 task-board JSON: pass.
-- R00 independent review: APPROVED.
-- R00 scope: documentation/governance only.
-
-## Risks
-
-- Legacy tests remain noisy until R02.
-- Paddle/OCR wheel compatibility under uv must be proven in R01.
+- Legacy full suite has one Node/Windows encoding failure.
+- Existing test suite is noisy and must be inventoried before deletion.
+- CI and architecture gates do not exist yet.
 
 ## Exact Next Action
 
-1. Fast-forward `develop` to the approved R00 commit.
-2. Create `feature/R01-uv-baseline`.
-3. Add `pyproject.toml`, `uv.lock`, and uv smoke verification.
+1. Fast-forward develop to the approved R01 commit.
+2. Create `feature/R02-contracts-tests-ci`.
+3. Produce `docs/testing/TEST_INVENTORY.md` before changing tests.
+4. Add golden replay, architecture/scope gates, CI, and headless test classification.

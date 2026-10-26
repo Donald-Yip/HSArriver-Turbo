@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R01: uv environment baseline.
+R02: contract, golden replay, CI, and test rationalization.
 
 ## Branch And Environment
 
@@ -36,7 +36,7 @@ R01: uv environment baseline.
 | ID | Status | Goal | Depends |
 |---|---|---|---|
 | R00 | done | Governance and branch baseline | - |
-| R01 | planned | uv environment baseline | R00 |
+| R01 | done | uv environment baseline | R00 |
 | R02 | planned | Contract, golden replay, CI and architecture gates | R01 |
 | R03 | planned | Domain contracts | R02 |
 | R04 | planned | Application ports and runtime controls | R03 |
@@ -77,13 +77,26 @@ Details: `docs/interfaces.md`.
 
 R00 gate: required files exist, task board JSON parses, staged diff check passes, and no production files change.
 
-Gates from R01 onward:
+R01 gate:
 
 ```powershell
+uv lock --check
 uv sync
+uv run python --version
+uv run python -m unittest tests.test_uv_environment -v
+```
+
+R02+ gates:
+
+```powershell
 uv run python -m compileall -q src tests tools
 uv run python tools/check_architecture.py
 uv run python -m unittest discover -s tests -t .
+```
+
+R12/R13 gate adds:
+
+```powershell
 uv run hslegend-onegame --help
 ```
 

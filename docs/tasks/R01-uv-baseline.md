@@ -30,6 +30,7 @@ Make uv the only supported dependency and execution manager for development, tes
 
 ## Outputs
 
+- `TOTAL_TASK.md`
 - `pyproject.toml`
 - `uv.lock`
 - uv smoke test.
@@ -48,6 +49,7 @@ Make uv the only supported dependency and execution manager for development, tes
 
 ## Allowed Files
 
+- `TOTAL_TASK.md`
 - `pyproject.toml`
 - `uv.lock`
 - `requirements.txt`

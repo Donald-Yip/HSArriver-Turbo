@@ -1,3 +1,7 @@
+# DEPRECATED compatibility manifest for legacy self-check and tooling only.
+# Do not install with pip. The authoritative dependency contract is pyproject.toml + uv.lock.
+# R02 cleanup: migrate selfcheck/tooling to pyproject.toml and delete this compatibility file.
+# Run `uv sync` and all Python commands through `uv run python ...`.
 click==8.4.2
 keyboard==0.13.5
 mcp==2.3.0

@@ -17,21 +17,21 @@ JSON」的翻译与结果渲染，不含任何自动化逻辑。所以它既能�
 ## 0. agent 速查（一屏内看完）
 
 ```bash
-python hsctl.py --json doctor     # ① 每次会话第一条：环境 + 控制台 + 下一步该执行什么
+uv run python hsctl.py --json doctor     # ① 每次会话第一条：环境 + 控制台 + 下一步该执行什么
 # ② 照抄 next_steps 里的命令（通常 1-2 条）
-python hsctl.py --json doctor     # ③ 复验到 verdict=env_ok
-python hsctl.py --json status     # ④ 之后按需要探活/干活
+uv run python hsctl.py --json doctor     # ③ 复验到 verdict=env_ok
+uv run python hsctl.py --json status     # ④ 之后按需要探活/干活
 ```
 
 | `doctor.verdict` | 意思 | 典型的 `next_steps` |
 | --- | --- | --- |
 | `env_ok` | 环境已保存且合格 | （空；看 `console`） |
-| `env_ok_unsaved` | 能用，但**还没保存**到本机 `log/env.json` | `hsctl env --pin "<路径>"` |
-| `env_deps_missing` | 找到 3.12 但缺包 | 已定位到该解释器的 pip 命令 |
-| `env_no_valid_interpreter` | 本机没有合格解释器 | conda/venv 建环境 → pip → `env --pin` |
+| `env_ok_unsaved` | 能用，但**还没保存**到本机 `log/env.json` | `uv run python hsctl.py env --pin ".venv\Scripts\python.exe"` |
+| `env_deps_missing` | uv 环境缺包 | 在仓库根目录执行 `uv sync` 后复验 |
+| `env_no_valid_interpreter` | uv 尚未提供 Python 3.12 环境 | 在仓库根目录执行 `uv sync` 后复验 |
 | `console_not_running` | 环境 OK，控制台没跑 | `hsctl serve start --via-task` |
 | `console_not_admin` | 在跑但没提权（点击不生效） | `serve stop` → `serve start --via-task` |
-| `env_wrong_interpreter` | 控制台跑在错的解释器上 | `env --pin` → `serve stop` → `serve start --via-task` |
+| `env_wrong_interpreter` | 控制台不是由 uv 环境启动 | 先 pin 到 `.venv`，再重启控制台 |
 
 退出码：`0` 成功 ／ `1` 业务失败（读 `error`）／ `2` 参数错 ／ `3` 连不上控制台 ／
 `4` 环境不可用（先跑 `doctor`）。`--json` 下错误也走 **stdout**，便于只读 stdout 的 agent。
@@ -45,18 +45,18 @@ python hsctl.py --json status     # ④ 之后按需要探活/干活
 
 ```powershell
 # 前提：脚本已经在跑（网页控制台在 8765-8785 之一）
-python hsctl.py status              # 看状态
-python hsctl.py log -f              # 实时跟随日志
-python hsctl.py start               # 开始对战
-python hsctl.py stop --after-game   # 打完本局再停（默认是立即停）
-python hsctl.py --json status       # 机器可读
+uv run python hsctl.py status              # 看状态
+uv run python hsctl.py log -f              # 实时跟随日志
+uv run python hsctl.py start               # 开始对战
+uv run python hsctl.py stop --after-game   # 打完本局再停（默认是立即停）
+uv run python hsctl.py --json status       # 机器可读
 ```
 
 控制台没在跑时，可以让 CLI 自己拉起来：
 
 ```powershell
-python hsctl.py serve start         # 后台拉起，等端口就绪后返回
-python hsctl.py serve stop          # 先停自动化，再结束控制台进程
+uv run python hsctl.py serve start         # 后台拉起，等端口就绪后返回
+uv run python hsctl.py serve stop          # 先停自动化，再结束控制台进程
 ```
 
 > **建议用管理员 PowerShell。** 非管理员时点击会被系统拦掉，现象是「脚本在跑但点了
@@ -117,15 +117,15 @@ JSON 模式下：
 ### 4.1.1 抓图 `screenshot`（给 agent 看画面）
 
 ```powershell
-python hsctl.py screenshot                       # 默认：炉石客户区
-python hsctl.py screenshot --kind full           # 整屏（看盒子/浮窗摆位）
-python hsctl.py screenshot --kind roi            # 盒子推荐面板 = OCR 真正看到的那块
-python hsctl.py screenshot --kind boxes          # 整屏 + 所有校准区域框
-python hsctl.py screenshot --points mode         # 客户区 + 「模式切换」四个点击点（红十字）
-python hsctl.py screenshot --max-width 1280      # 4K 屏建议缩一下再喂给模型
-python hsctl.py screenshot --open                # 抓完用系统看图打开
-python hsctl.py screenshot --watch --interval 2  # 持续抓，每次覆盖同一张（实时看）
-python hsctl.py --json screenshot                # 机器可读
+uv run python hsctl.py screenshot                       # 默认：炉石客户区
+uv run python hsctl.py screenshot --kind full           # 整屏（看盒子/浮窗摆位）
+uv run python hsctl.py screenshot --kind roi            # 盒子推荐面板 = OCR 真正看到的那块
+uv run python hsctl.py screenshot --kind boxes          # 整屏 + 所有校准区域框
+uv run python hsctl.py screenshot --points mode         # 客户区 + 「模式切换」四个点击点（红十字）
+uv run python hsctl.py screenshot --max-width 1280      # 4K 屏建议缩一下再喂给模型
+uv run python hsctl.py screenshot --open                # 抓完用系统看图打开
+uv run python hsctl.py screenshot --watch --interval 2  # 持续抓，每次覆盖同一张（实时看）
+uv run python hsctl.py --json screenshot                # 机器可读
 ```
 
 `--points mode` 只**画图**（不点击、不移动鼠标）：把 `hsctl mode` 实际会点的四个点
@@ -162,11 +162,11 @@ python hsctl.py --json screenshot                # 机器可读
 ### 4.1.2 界面识别 `ui`（只认文字）
 
 ```powershell
-python hsctl.py ui                    # 现在在哪个界面 + 两个匹配分
-python hsctl.py ui --frame            # 顺带把这一帧存成 PNG（tmp_screens\ui_frame.png）
-python hsctl.py ui --learn            # 按当前框重裁识别模板（皮肤/补丁改了字之后）
-python hsctl.py ui --learn traditional  # 只重裁「传统对战」那一个
-python hsctl.py --json ui             # 机器可读
+uv run python hsctl.py ui                    # 现在在哪个界面 + 两个匹配分
+uv run python hsctl.py ui --frame            # 顺带把这一帧存成 PNG（tmp_screens\ui_frame.png）
+uv run python hsctl.py ui --learn            # 按当前框重裁识别模板（皮肤/补丁改了字之后）
+uv run python hsctl.py ui --learn traditional  # 只重裁「传统对战」那一个
+uv run python hsctl.py --json ui             # 机器可读
 ```
 
 它回答的是"**脚本现在认为自己在哪个界面**"，这是"先看清楚再动手"的前提：
@@ -191,11 +191,11 @@ python hsctl.py --json ui             # 机器可读
 ### 4.1.3 进入对战 `enter-battle`
 
 ```powershell
-python hsctl.py enter-battle                    # 拉起炉石 → 点「传统对战」→ 停在选套牌界面
-python hsctl.py enter-battle --deck 8           # 顺带选第 8 个卡组
-python hsctl.py enter-battle --deck 8 --start   # 再点「开始」（等于开始排队）
-python hsctl.py enter-battle --no-wait          # 只下发，不等它跑完
-python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每 3s 看一眼
+uv run python hsctl.py enter-battle                    # 拉起炉石 → 点「传统对战」→ 停在选套牌界面
+uv run python hsctl.py enter-battle --deck 8           # 顺带选第 8 个卡组
+uv run python hsctl.py enter-battle --deck 8 --start   # 再点「开始」（等于开始排队）
+uv run python hsctl.py enter-battle --no-wait          # 只下发，不等它跑完
+uv run python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每 3s 看一眼
 ```
 
 流程（每一步都会写进日志和返回的 `steps`，含坐标，事后能逐条核对有没有乱点）：
@@ -217,9 +217,9 @@ python hsctl.py enter-battle --interval 3 --wait-timeout 180   # 等界面时每
 ### 4.1.4 选卡组（自动选卡组已停用）
 
 ```powershell
-python hsctl.py deck-click 8           # 立即点第 8 格（自动化未运行时）
-python hsctl.py enter-battle --deck 8  # 进入对战时顺带选第 8 格
-python hsctl.py deck --clear           # 清掉本机旧的自动选卡组设置
+uv run python hsctl.py deck-click 8           # 立即点第 8 格（自动化未运行时）
+uv run python hsctl.py enter-battle --deck 8  # 进入对战时顺带选第 8 格
+uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡组设置
 ```
 
 **自动化不再每局自动点卡组**（用户 2026-10-23 口径）：旧版会按 `ui_config.json` 的
@@ -314,8 +314,8 @@ pid**（那个 pid 可能已被系统复用给别的进程）。
 ### 4.6 交互模式
 
 ```powershell
-python hsctl.py            # 裸命令进 REPL（非交互环境会打印帮助）
-python hsctl.py repl
+uv run python hsctl.py            # 裸命令进 REPL（非交互环境会打印帮助）
+uv run python hsctl.py repl
 ```
 
 REPL 里不带 `hsctl` 前缀，`help` 看帮助，`exit` / Ctrl+D 退出。
@@ -369,17 +369,17 @@ REPL 里不带 `hsctl` 前缀，`help` 看帮助，`exit` / Ctrl+D 退出。
 
 ```powershell
 # 存一套规则（会自动校验：卡名错、结构错一律不写盘，保留上一份能用的）
-python hsctl.py surrender set --file rules.json
+uv run python hsctl.py surrender set --file rules.json
 
 # 运行中热保存，且这套规则在当前这一局已经能命中 → 会先要求确认
-python hsctl.py surrender set --file rules.json --yes
+uv run python hsctl.py surrender set --file rules.json --yes
 
 # 看这一局判到哪儿了（对方职业、每个条件是 ✓ 还是 ×）
-python hsctl.py surrender check
+uv run python hsctl.py surrender check
 
 # 查卡名（本地 cards.json，不联网、不用开控制台）
-python hsctl.py card 神秘
-python hsctl.py card 裂魂者阿莉扎娜 --show
+uv run python hsctl.py card 神秘
+uv run python hsctl.py card 裂魂者阿莉扎娜 --show
 ```
 
 网页上等价入口是「🎯 卡组识别投降（只判对方）」那张卡片：表单式填条件，卡名输入中文
@@ -474,39 +474,34 @@ token 只在本机端口文件里（`log/` 不入库），且接口只回 `127.0
 
 ---
 
-### 5.6 换机器 / 换 Python：解释器自配置（`doctor` + `env`）
+### 5.6 换机器 / uv 环境：解释器自配置（`doctor` + `env`）
 
-**运行环境因机器而异**，所以本仓库**不把任何解释器路径写进代码或默认值**：
-代码只负责"找、验、存、用"，具体路径由每台机器自己保存。
+`pyproject.toml` 与 `uv.lock` 是唯一依赖声明；`uv sync` 会创建项目内 `.venv`。
+运行时仍把实际解释器保存到本机 `log/env.json`（该文件不入库），供后台服务和计划任务复用。
 
 | 文件 | 是否入库 | 内容 |
 | --- | --- | --- |
-| [`env.example.json`](../env.example.json) | ✅ 进仓库 | 只有占位符与说明的模板（**不含任何本机路径**） |
-| `log/env.json` | ❌ 被 `log/` 忽略 | 本机实际生效的那一份：`interpreter` / `pinned_at` / `source` / `last_ok` |
+| [`pyproject.toml`](../pyproject.toml) | ✅ 进仓库 | 直接依赖与 Python 版本约束 |
+| [`uv.lock`](../uv.lock) | ✅ 进仓库 | 完整锁定依赖图 |
+| `.venv/` | ❌ 本机生成 | `uv sync` 创建的环境 |
+| `log/env.json` | ❌ 被 `log/` 忽略 | 本机实际使用的 uv 环境解释器与校验时间 |
 
 ```powershell
-python hsctl.py --json doctor      # 一条命令：环境 + 控制台 + verdict + next_steps
-python hsctl.py env                # 当前解释器 / 已保存的解释器 / 来源
-python hsctl.py env --discover     # 列出本机候选解释器并逐个校验（不写盘）
-python hsctl.py env --pin "<python.exe 路径>"   # 校验并**保存**到 log/env.json
-python hsctl.py env --pin auto     # 自动选第一个合格候选
+uv sync
+uv run python hsctl.py --json doctor      # 一条命令：环境 + 控制台 + verdict + next_steps
+uv run python hsctl.py env                # 当前解释器 / 已保存的解释器 / 来源
+uv run python hsctl.py env --pin ".venv\Scripts\python.exe"  # 保存项目 uv 环境
+uv run python hsctl.py --json doctor      # 复验到 env_ok
 ```
 
 - **校验**：必须 Python **3.12.x**（3.13+ 装不上 OCR 轮子）且
   `win32gui/cv2/numpy/PIL/paddleocr/paddle/psutil/keyboard/pynput/requests/click`
   全部齐全。校验只 `find_spec`（**不 import**），所以不会把 paddle 拉起来。
-- **解析顺序**：`HS_PYTHON` 环境变量 → `log/env.json` → 当前解释器（校验通过才用）
-  → 候选探测（`CONDA_PREFIX` / `VIRTUAL_ENV` / 常见 conda 位置 / 仓库内 venv /
-  `where python`）。
-- **透明代理**：任何 agent 用任何 python 跑 `hsctl`，只要当前解释器不合格而本机有合格的，
-  `hsctl` 就 `os.execv` 重入过去（并顺手保存），退出码/输出原样传递。
-  `HSCTL_NO_PROXY=1` 关掉它；`HSCTL_REEXEC=1` 防死循环。一个都不合格 → 退出码 **4**。
-- **计划任务跟着走**：`serve install-task` 生成的启动器以 `log/env.json` 为准，
-  不会再出现"计划任务被硬编码成生成它时那个错误 Python"的老坑（原 §8.1 那套
-  手改 `log/hs_serve_elevated.cmd` 的应急流程已经不需要了）。
-
-**多个候选都合格**时 `doctor` 会把它们都列出来，**问你一次**要固定哪个，
-然后 `hsctl env --pin "<路径>"` 保存 —— 保存完再 `doctor` 复验到 `env_ok`。
+- **解析顺序**：`HS_PYTHON` 环境变量 → `log/env.json` → 当前解释器（`uv run` 会给出
+  `.venv` 解释器）。不再探测其他包管理器环境。
+- **透明代理**：`hsctl` 只在解释器不合格时重入到已保存的 uv 解释器
+  （`HSCTL_NO_PROXY=1` 可关闭；`HSCTL_REEXEC=1` 防死循环）。不能修复时退出码 **4**。
+- **计划任务跟着走**：`serve install-task` 生成的启动器以 `log/env.json` 为准。
 
 ---
 
@@ -551,7 +546,7 @@ python hsctl.py env --pin auto     # 自动选第一个合格候选
 （炉石的鼠标点击模块），在仓库内 `import click` 会解析到它而不是 PyPI 的 click：
 
 ```powershell
-> conda run -n HTL python -c "import click; print(click.__file__)"
+> uv run python -c "import click; print(click.__file__)"
 C:\...\HearthstoneLegendArriver-main\click.py     # ← 不是 site-packages
 ```
 
@@ -569,7 +564,7 @@ C:\...\HearthstoneLegendArriver-main\click.py     # ← 不是 site-packages
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| `✗ 没找到正在运行的控制台（已探测 …）` | 脚本没跑：`python web_ui.py`（管理员）或 `hsctl serve start` |
+| `✗ 没找到正在运行的控制台（已探测 …）` | 脚本没跑：`uv run python web_ui.py`（管理员）或 `uv run python hsctl.py serve start` |
 | 退出码 1 且提示「自动化运行中，请先停止」 | 那是网页保护性守卫。给该命令加 `hot` 通道即可（参数类命令默认已带） |
 | `hsctl status` 显示账号「未读到玩家名」 | 还没打过一局，日志里还没有玩家名 |
 | 改了延时但没感觉 | 看 `hsctl delays` 标的生效时机：`下次「开始对战」生效` / `需重启脚本进程` |
