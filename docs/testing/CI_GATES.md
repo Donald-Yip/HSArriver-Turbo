@@ -53,13 +53,24 @@ compile, architecture, scope, and headless unit tests. It does not run native Wi
 smoke tests, Node frontend tests, real OCR inference, screen capture, or a real
 Hearthstone game.
 
-Until R02C moves the legacy cases, `tools/run_headless_tests.py` explicitly excludes:
+R02C4 moved the external cases to `tests/native/`. That directory has no
+`__init__.py`, so ordinary discovery rooted at `tests` does not recurse into it.
+`tools/run_headless_tests.py` also enumerates only top-level `tests/test_*.py`
+modules, so Node and native files are not imported by the default runner rather
+than being collected and filtered afterward.
 
-- `tests.test_surrender_frontend` because it invokes Node.
-- `tests.test_hearthstone_liveness.NativeProcessTests.test_can_enumerate_processes`.
-- `tests.test_hearthstone_liveness.NativeProcessTests.test_finds_this_python_process`.
+Run opt-in smoke tests explicitly when the environment supports them:
 
-The exclusions are visible with:
+```powershell
+uv run python -m unittest tests.native.test_process_enumeration -v
+uv run python -m unittest tests.native.test_surrender_frontend -v
+```
+
+Set `HSL_NODE` to an explicit Node executable if it is not on `PATH`. The Node
+test otherwise auto-discovers `node` from `PATH` or environment-derived standard
+installation directories and always decodes the child process output as UTF-8.
+
+The default/opt-in discovery manifest is visible with:
 
 ```powershell
 uv run python tools/run_headless_tests.py --list-exclusions

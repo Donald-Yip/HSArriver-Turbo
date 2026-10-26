@@ -146,6 +146,13 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 - 只移动 2 个真实进程枚举方法；2 个注入 fake 的 unknown 分支继续默认 headless。前端 Node 测试改为显式 opt-in web integration 并修 UTF-8。
 - 默认平台测试不得因缺失 Node/Windows/游戏而 skip 或失败。
 
+#### R02C4 实现记录
+
+- Node 前端往返测试迁到 `tests/native/test_surrender_frontend.py`；Node 子进程固定 UTF-8 解码，支持 `HSL_NODE` 或从 `PATH`/环境变量推导的安装目录自动发现，不再含用户目录或盘符硬编码。
+- 两个真实进程枚举方法迁到 `tests/native/test_process_enumeration.py`；原 `test_hearthstone_liveness.py` 只保留两个注入 fake 的 headless 进程判定测试。
+- `tests/native/` 不包含 `__init__.py`，默认 unittest discovery 不递归；`tools/run_headless_tests.py` 改为显式枚举顶层 `tests/test_*.py`，不再先全量收集再过滤。
+- 验证结果见 `docs/agent/reports/R02C4-implementer.md`。
+
 ### Batch 5：确定性 rewrite（11）
 
 - 替换 hand-target metadata 与 web selfcheck 私有 patch（5 个方法）。

@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02C3: non-overlay source-string test replacement (fix round 1 complete; ready for re-review).
+R02C4: native/Node opt-in migration implemented; ready for review.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R02C3-non-overlay-tests`, based on `develop` at `55d1be9eea0d5fd7ce0513034499f60a3db86617`
+- Current feature branch: `feature/R02C4-native-node`, based on `develop` at `7a8ccf8`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -42,7 +42,7 @@ R02C3: non-overlay source-string test replacement (fix round 1 complete; ready f
 | R02C1 | done | Safe click behavior and CLI contract tests | R02B |
 | R02C2 | done | Overlay test replacement | R02C1 |
 | R02C3 | done | Non-overlay test replacement | R02C2 |
-| R02C4 | planned | Native and Node isolation | R02C3 |
+| R02C4 | done | Native and Node isolation | R02C3 |
 | R02C5 | planned | Headless finalization | R02C4 |
 | R03 | planned | Domain contracts | R02C5 |
 | R04 | planned | Application ports and runtime controls | R03 |
@@ -99,7 +99,7 @@ uv sync --locked --all-groups
 uv run python -m compileall -q src tests tools
 uv run python tools/check_architecture.py
 uv run python tools/check_architecture.py --self-test
-uv run python tools/check_task_scope.py --task R02C1
+uv run python tools/check_task_scope.py --task R02C4
 uv run python tools/check_task_scope.py --self-test
 uv run python tools/run_headless_tests.py
 ```
@@ -110,7 +110,12 @@ R12/R13 gate adds:
 uv run hslegend-onegame --help
 ```
 
-Native gate is explicit and never part of the default suite.
+Native gate is explicit and never part of the default suite:
+
+```powershell
+uv run python -m unittest tests.native.test_process_enumeration -v
+uv run python -m unittest tests.native.test_surrender_frontend -v
+```
 
 ## Decisions
 
@@ -118,4 +123,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Controller re-reviews R02C3 fix round 1. Commit only after focused, headless, compile, architecture, and scope gates are confirmed.
+Controller runs independent review for R02C4, then commits only after focused, headless, compile, architecture, and scope gates are confirmed.

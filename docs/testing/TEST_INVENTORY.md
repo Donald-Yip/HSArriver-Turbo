@@ -147,7 +147,7 @@
 | `test_fsm_liveness_stop.py::LoopWiringTests` | `test_main_loop_and_battling_call_the_check` | replaced (R02C3) | 已由 `test_main_loop_and_battling_call_the_check_once_before_stopping` 通过 fake loop 计数 `check_hearthstone_liveness` 的出口调用替代。 |
 | `test_human_like_scope.py::MulliganScopeTests` | `test_fsm_does_not_wire_the_human_like_hook_into_mulligan` | replaced (R02C3) | 已由 `test_fsm_wires_the_human_like_hook_only_into_recommendation_flow` 通过 fake flow 构造参数替代：MulliganFlow 无挂点，RecommendationFlow 有挂点。 |
 | `test_hsctl.py::TableDriftTests` | `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | deleted (R02C1) | 私有表互相比较已删除；由 5 个 CLI 可观察输出/参数契约测试替代。 |
-| `test_hearthstone_liveness.py::NativeProcessTests` | `test_can_enumerate_processes`, `test_finds_this_python_process` | move-native | 只有两个真实 ctypes 进程枚举方法归入 opt-in Windows smoke；`test_returns_bool_for_unknown_process` 与 `test_unreadable_process_list_is_unknown` 注入 fake，保留默认 headless。 |
+| `test_hearthstone_liveness.py::NativeProcessTests` | `test_can_enumerate_processes`, `test_finds_this_python_process` | moved (R02C4) | 两个真实 ctypes 进程枚举方法已迁到 `tests/native/test_process_enumeration.py`；`test_returns_bool_for_unknown_process` 与 `test_unreadable_process_list_is_unknown` 注入 fake，保留默认 headless。 |
 | `test_overlay_dpi_scaling.py::WindowWiringTests` | `test_run_computes_the_scale_and_pins_tk_font_scaling`, `test_run_sizes_the_window_through_px`, `test_detail_wrap_uses_the_scaled_window_width` | replaced (R02C2) | 已由 `test_window_run_applies_dpi_scale_to_tk_and_geometry`、`test_window_and_minimized_bar_use_scaled_geometry`、`test_status_detail_wrap_uses_scaled_window_width` 通过 fake Tk scaling/geometry/wraplength 替代。 |
 | `test_overlay_eye_and_colors.py::AccountEyeToggleTests/LogColorTests/ButtonLayoutTests` | `test_eye_is_rendered_and_clickable`, `test_renderer_uses_the_tag_function_and_configures_every_tag`, `test_destructive_buttons_guard_themselves`, `test_button_labels_have_no_tofu_glyphs`, `test_window_metrics_and_grid_helpers`, `test_status_rows_put_name_and_value_next_to_each_other`, `test_status_rows_wrap_instead_of_being_clipped`, `test_overlay_can_be_minimized_to_a_title_bar` | replaced (R02C2) | 8 个 fake widget/event/callback 测试替代：眼睛点击、日志标签、危险确认、纯文本按钮、grid 契约、状态行 pack/wrap、最小化/展开。 |
 | `test_overlay_human_like_status.py::BrandHeaderTests` | `test_brand_name_has_no_subtitle` | replaced (R02C2) | 已由 `test_rendered_brand_header_has_no_subtitle_widget` 通过 fake Label 树断言品牌文本且无副标题。 |
@@ -157,11 +157,21 @@
 | `test_region_overlay_button.py::OverlayButtonTests` | `test_calibrate_button_exists_and_is_short` | replaced (R02C2) | 已由 `test_calibrate_button_dispatches_callback` 通过 fake Button 调用与校准回调 spy 替代。 |
 | `test_start_latency.py::NoFixedSleepTests/OverlayStartingFeedbackTests` | `test_main_menu_action_does_not_wait_three_seconds`, `test_choosing_hero_action_does_not_wait_two_seconds`, `test_both_entry_states_log_a_milestone`, `test_overlay_renders_starting_text`, `test_start_accepts_the_is_starting_callback` | replaced (R02C3) | 已由 fake clock 睡眠记录、milestone logger spy、fake widget 的「启动中…」按钮状态和 `start(is_starting=...)` 回调接线测试替代。 |
 | `test_window_tracker.py::TrackerTests` | `test_ensure_started_is_idempotent`, `test_stop_stops_recording`, `test_rehook_when_handle_changes`, `test_wait_ready_sees_the_hook_after_startup`, `test_wait_ready_gives_up_when_the_hook_fails`, `test_wait_ready_never_blocks_when_nothing_is_starting` | rewrite | 现用 `time.time()` + `time.sleep(0.01)` 轮询后台 hook 线程，最长 2s；改为 Event/Condition/可注入同步器，禁止实时轮询。 |
-| `test_surrender_frontend.py::FrontendRoundTripTests` | `test_nested_config_survives_the_form` | rewrite | Node 前端往返是真实契约；固定 `encoding="utf-8"`、删除机器路径并移到 opt-in web integration。 |
+| `test_surrender_frontend.py::FrontendRoundTripTests` | `test_nested_config_survives_the_form` | moved (R02C4) | 已迁到 `tests/native/test_surrender_frontend.py`；Node 前端往返契约保留，子进程固定 `encoding="utf-8"`，支持 `HSL_NODE` 或自动发现且无机器路径。 |
 | `test_version.py::SurfaceTests` | `test_overlay_draws_version_label`, `test_cli_version_flag_uses_module` | replaced (R02C3) | 已由 `test_overlay_renders_version_text_next_to_brand` 与 `test_cli_version_flag_prints_module_label` 通过 fake Label 树和公开 `hsctl.py --version` 子进程替代。 |
 | `test_web_admin_banner.py::AdminWarningBannerTests` | `test_main_prints_the_banner_only_for_non_admins` | replaced (R02C3) | 已由 `test_main_outputs_the_banner_only_for_non_admins` 通过 patch admin bool 并捕获 `main()` stdout 替代。 |
 | `test_web_logs_wiring.py::OverlayWiringTests` | `test_run_uses_the_log_row_and_confirms_before_clearing` | replaced (R02C3) | 已由 `test_run_renders_log_row_and_clears_only_after_confirmation` 通过 fake widget 树、日志回调和确认取消/确认两路径替代。 |
 | `test_web_selfcheck_api.py::SelfcheckCacheTests/SelfcheckApiTests` | `test_result_is_cached_until_forced`, `test_status_carries_the_summary_after_a_run`, `test_api_selfcheck_wraps_the_result` | rewrite | 私有 patch；注入 fake selfcheck runner 并保留 API/cache 行为。 |
+
+### R02C4 opt-in 迁移记录
+
+| 原测试 | 新测试 | 说明 |
+|---|---|---|
+| `tests.test_surrender_frontend.FrontendRoundTripTests.test_nested_config_survives_the_form` | `tests.native.test_surrender_frontend.FrontendRoundTripTests.test_nested_config_survives_the_form` | 假 DOM 往返、嵌套条件、折叠状态与渲染断言全部保留；Node 输出固定 UTF-8 解码。 |
+| `tests.test_hearthstone_liveness.NativeProcessTests.test_can_enumerate_processes` | `tests.native.test_process_enumeration.NativeProcessTests.test_can_enumerate_processes` | 真实 ctypes 进程枚举保持 opt-in。 |
+| `tests.test_hearthstone_liveness.NativeProcessTests.test_finds_this_python_process` | `tests.native.test_process_enumeration.NativeProcessTests.test_finds_this_python_process` | 真实 ctypes 进程枚举保持 opt-in。 |
+| `tests.test_hearthstone_liveness.NativeProcessTests.test_returns_bool_for_unknown_process` | 原位置保留 | 注入 fake 的 headless 行为未移动。 |
+| `tests.test_hearthstone_liveness.NativeProcessTests.test_unreadable_process_list_is_unknown` | 原位置保留 | 注入 fake 的 headless 行为未移动。 |
 
 ## 发现的主要垃圾测试类型
 

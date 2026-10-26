@@ -11,6 +11,7 @@ Move the Node frontend test and two native process-enumeration tests out of the 
 ## Allowed Files
 
 - `tests/test_surrender_frontend.py`
+- `tests/test_hearthstone_liveness.py`
 - `tests/frontend_surrender_roundtrip.js`
 - `tests/native/**`
 - `tools/run_headless_tests.py`

@@ -7,12 +7,9 @@
   * 主菜单/匹配阶段的日志本来就安静，绝不能因此误判。
 """
 
-import os
-import sys
 import unittest
 
-from src.safety.hearthstone_liveness import (
-    HearthstoneLiveness, hearthstone_process_running, list_process_names)
+from src.safety.hearthstone_liveness import HearthstoneLiveness, hearthstone_process_running
 
 
 class _Clock:
@@ -187,20 +184,7 @@ class LogStalenessTests(_MonitorFixture):
 
 
 class NativeProcessTests(unittest.TestCase):
-    """不注入替身，直接验证 ctypes 进程枚举真的能用（Windows）。"""
-
-    def test_can_enumerate_processes(self):
-        names = list_process_names()
-        if names is None:
-            self.skipTest("当前环境不支持进程枚举")
-        self.assertTrue(names)
-
-    def test_finds_this_python_process(self):
-        names = list_process_names()
-        if names is None:
-            self.skipTest("当前环境不支持进程枚举")
-        exe = os.path.basename(sys.executable).lower()
-        self.assertIn(exe, names)
+    """用注入的进程列表验证判定逻辑；真实枚举位于 tests/native。"""
 
     def test_returns_bool_for_unknown_process(self):
         result = hearthstone_process_running(
