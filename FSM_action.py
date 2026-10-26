@@ -27,7 +27,7 @@ from src.flow.recommendation_flow import (
 )
 from src.game_state.recommendation_adapter import adapt_action
 from src.ocr.paddle_adapter import PaddleOcrAdapter
-from src.ocr.stable_reader import StableRecommendationReader
+from src.ocr.stable_reader import OcrRejectedError, StableRecommendationReader
 from src.parser.recommendation_parser import RecommendationParser
 from src.recommendation_config import RecommendationConfig
 from src.recommendation_models import ActionKind
@@ -70,6 +70,10 @@ last_automation_diagnostic = None
 _snapshot_cache_key = None
 _snapshot_cache = None
 _mulligan_diagnostic_key = None
+# 换牌 OCR 失败诊断：同一段"读到了什么"只打一次（不刷屏），诊断截图另有节流。
+_mulligan_ocr_detail_key = None
+_mulligan_ocr_dump_at = 0.0
+_mulligan_ocr_dump_count = 0
 # 自动投降状态：连续低胜率检测 + 触发标记（每局重置）。
 _concede_streak = 0
 _concede_last_turn = None
@@ -157,6 +161,132 @@ def _automation_state_with_revision():
     return snapshot, log_state.revision
 
 
+def _mulligan_stability_key(evidence):
+    """换牌 OCR 的「结论指纹」：解析出的号位集合；解析不出动作时退回归一化原文。
+
+    为什么换牌不能只按 OCR 原文判稳：换牌面板要一次读最多 4 行「替换N号位卡牌」，
+    OCR 常把同一行读成合并/拆分的两行、或偶尔漏掉一行 ⇒ 原文一抖，整轮读取就
+    判 `recommendation_not_stable`，可实际要点的号位根本没变。只要解析出的号位
+    集合一致，点下去的结果完全相同。
+    解析失败时退回原文，让后面照样报 `recommendation_is_not_mulligan`
+    （那条提示比 not stable 准确：说明面板不在/写的不是留牌建议）。
+    """
+    text = getattr(evidence, "normalized_text", "") or ""
+    parser = recommendation_parser
+    if parser is not None:
+        try:
+            action = parser.parse(evidence, 0, 0)
+        except Exception:
+            action = None
+        if action is not None and action.action == ActionKind.MULLIGAN:
+            return ("mulligan", tuple(action.mulligan_slots))
+    return ("text", text)
+
+
+def _describe_ocr_attempts(attempts) -> str:
+    """把失败那几帧的 OCR 结果压成一行：同样的行只留一次，置信度取最低。"""
+    lines = []
+    confidences = []
+    unreadable = 0
+    for item in attempts or ():
+        if not item:
+            unreadable += 1
+            continue
+        text, confidence = item
+        confidences.append(float(confidence))
+        for line in str(text or "").splitlines():
+            line = line.strip()
+            if line and line not in lines:
+                lines.append(line)
+    parts = ["读到：" + " / ".join(lines[:6])] if lines else ["没读到留牌文字"]
+    if confidences:
+        parts.append(f"最低置信度 {min(confidences):.2f}")
+    if unreadable:
+        parts.append(f"{unreadable} 帧读不清")
+    return "；".join(parts)
+
+
+def _dump_mulligan_ocr_failure(detail: str):
+    """换牌 OCR 失败时存一张「整屏 + 黄绿框」诊断图，供核对框偏没偏。
+
+    框就是程序真正截去 OCR 的 `mulligan_recommendation_roi`（黄绿色，与校准
+    窗口第 2 项「换牌推荐面板」同色）。框没罩住留牌建议 → 重新校准；
+    罩住了但框内文字在变/没有字 → 盒子面板还没刷新好。
+
+    节流：每 20s 最多一张、每轮自动化最多 8 张（失败会每 5s 重试，不能每个
+    重试都写盘）。任何一步出错都静默返回 None —— 诊断不能反过来影响换牌。
+    """
+    global _mulligan_ocr_dump_at, _mulligan_ocr_dump_count
+    now = time.time()
+    if _mulligan_ocr_dump_count >= 8 or now - _mulligan_ocr_dump_at < 20.0:
+        return None
+    _mulligan_ocr_dump_at = now
+    _mulligan_ocr_dump_count += 1
+    try:
+        from pathlib import Path
+
+        import cv2
+        import numpy as np
+
+        import screen_regions
+        from display_mapping import box_to_screen, display_mapping
+
+        frame = get_screen.catch_screen()
+        if frame is None:
+            return None
+        # catch_screen 给的是桌面 BGRA（且可能不连续）：转成 BGR 再画。
+        image = np.ascontiguousarray(frame[:, :, :3])
+        mapping = display_mapping()
+        roi = (tuple(recommendation_config.mulligan_recommendation_roi)
+               if recommendation_config is not None else ())
+        box = box_to_screen(roi, mapping) if roi else (0, 0, 0, 0)
+        hex_color = screen_regions.MULLIGAN_RECOMMENDATION_COLOR.lstrip("#")
+        color = tuple(int(hex_color[i:i + 2], 16) for i in (4, 2, 0))  # RGB→BGR
+        cv2.rectangle(image, (box[0], box[1]), (box[2], box[3]), color, 3)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        folder = (Path(__file__).resolve().parent / "logs"
+                  / f"换牌OCR诊断_{time.strftime('%Y%m%d')}" / stamp)
+        folder.mkdir(parents=True, exist_ok=True)
+        cv2.imencode(".png", image)[1].tofile(str(folder / "截图.png"))
+        client = f"{mapping.width}×{mapping.height}" if mapping is not None else "未知"
+        (folder / "说明.txt").write_text(
+            "换牌 OCR 未稳定诊断\n"
+            f"时间       {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"客户区     {client}\n"
+            f"截取区域   {roi}（基准 1920×1080 的客户区相对坐标）\n"
+            f"屏幕坐标   {box}\n"
+            f"OCR 结果   {detail}\n"
+            "\n截图里的黄绿框 = 程序截给换牌 OCR 的区域（校准窗口第 2 项同色）。\n"
+            "· 框没罩住盒子的「留牌建议」→ 打开校准窗口，把第 2 项拖到留牌建议上"
+            "保存（那一项现在有实时 OCR 预览，能直接看到读到什么）；\n"
+            "· 框罩住了但框内文字在变/没有字 → 盒子面板还没刷新好，等重试即可；\n"
+            "· 客户区不是 16:9 或太小 → 先把炉石窗口设成 1920×1080（或 16:9 尺寸）再校准。\n",
+            encoding="utf-8",
+        )
+        return str(folder)
+    except Exception:
+        return None
+
+
+def _report_mulligan_ocr_failure(exc) -> None:
+    """换牌 OCR 失败留痕：读到什么只打一次（原因变了才再打）+ 落一张诊断图。"""
+    global _mulligan_ocr_detail_key
+    detail = _describe_ocr_attempts(getattr(exc, "attempts", ()))
+    if not detail or detail == _mulligan_ocr_detail_key:
+        return
+    _mulligan_ocr_detail_key = detail
+    try:
+        warn_print(f"[SYS] 换牌 OCR 未稳定：{detail}")
+    except Exception:
+        pass
+    folder = _dump_mulligan_ocr_failure(detail)
+    if folder:
+        try:
+            warn_print(f"[SYS] 换牌诊断截图已保存：{folder}")
+        except Exception:
+            pass
+
+
 def initialize_recommendation_automation():
     """Rebuild per-game flows while reusing expensive OCR components.
 
@@ -195,20 +325,28 @@ def initialize_recommendation_automation():
     if mulligan_reader is None:
         # 换牌面板只有留牌建议（无"打法参考A"标题）：不设信标，
         # 面板是否在场由 `替换N号位卡牌` 换牌句式唯一把关。
+        # 稳定判定按「解析出的号位集合」而不是 OCR 原文：换牌那几行文字
+        # 常被读成多行/漏一行，原文一抖就整轮 not stable（见
+        # _mulligan_stability_key）。
         # 独立 if 保证每次 initialize（含 config 已存在的后续对局）
         # 都会为闭包绑定该变量。
         mulligan_reader = StableRecommendationReader(
             recommendation_config, recommendation_reader.backend,
-            text_normalizer=recommendation_parser.normalize_action_text)
+            text_normalizer=recommendation_parser.normalize_action_text,
+            stability_key=_mulligan_stability_key)
         recommendation_validator = RecommendationValidator(
             recommendation_config)
 
     def read_mulligan_action():
         # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
         # `替换N号位卡牌` 换牌句式（无"打法参考A"信标的专用 reader）。
-        evidence = mulligan_reader.read(
-            lambda: mulligan_capture.capture(ocr_panel_ok=True),
-            mulligan_capture.crop_recommendation)
+        try:
+            evidence = mulligan_reader.read(
+                lambda: mulligan_capture.capture(ocr_panel_ok=True),
+                mulligan_capture.crop_recommendation)
+        except OcrRejectedError as exc:
+            _report_mulligan_ocr_failure(exc)
+            raise
         action = recommendation_parser.parse(
             evidence, log_state.game_num_turns_in_play, log_state.revision)
         if action.action != ActionKind.MULLIGAN:
@@ -340,6 +478,7 @@ def reset_game_session():
     global mulligan_delay_generation, player_turn_delay_key
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
+    global _mulligan_ocr_detail_key
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
     global _name_match_result
@@ -354,6 +493,7 @@ def reset_game_session():
     _snapshot_cache_key = None
     _snapshot_cache = None
     _mulligan_diagnostic_key = None
+    _mulligan_ocr_detail_key = None
     _concede_streak = 0
     _concede_last_turn = None
     _concede_triggered = False
@@ -377,6 +517,8 @@ def init():
     global mulligan_delay_generation, player_turn_delay_key
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
+    global _mulligan_ocr_detail_key
+    global _mulligan_ocr_dump_at, _mulligan_ocr_dump_count
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
     global _name_match_result, _name_match_reported
@@ -396,6 +538,9 @@ def init():
     _snapshot_cache_key = None
     _snapshot_cache = None
     _mulligan_diagnostic_key = None
+    _mulligan_ocr_detail_key = None
+    _mulligan_ocr_dump_at = 0.0
+    _mulligan_ocr_dump_count = 0
     _concede_streak = 0
     _concede_last_turn = None
     _concede_triggered = False
@@ -800,6 +945,11 @@ def ChoosingCardAction():
                     or diag.endswith(":confirm_button_absent")):
                 message = ("换牌阶段未检测到可执行的留牌面板（可能已提交或"
                            "面板未就绪），等待对局开始……")
+            elif "recommendation_not_stable" in diag:
+                message = ("换牌留牌建议没读稳（连续几帧读出的文字不一致），继续重试……"
+                           "一直这样的话打开校准窗口，把第 2 项黄绿框（换牌推荐面板）"
+                           "重新拖到「留牌建议」上保存；那一项现在有实时 OCR 预览。"
+                           "最近一次读到的原文和截图已写进日志。")
             _report_mulligan_diagnostic(result.diagnostics, message)
             _sleep_with_delay(retry_delay, "换牌重试")
 

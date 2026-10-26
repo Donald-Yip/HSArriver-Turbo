@@ -6,7 +6,17 @@ from src.ocr.preprocess import iter_preprocess_recommendation
 
 
 class OcrRejectedError(RuntimeError):
-    pass
+    """本次读取没拿到可用的稳定证据。
+
+    ``attempts`` 记录每一帧的 OCR 结果（``(text, confidence)`` 元组；``None``
+    表示这一帧压根没读出具信度的文本），供调用方把"到底读到了什么"打出来。
+    用户反馈里的 `recommendation_not_stable` 只有一句码，没有原文根本分不清
+    是"面板没对准"还是"面板还在刷新"。
+    """
+
+    def __init__(self, message, attempts=()):
+        super().__init__(message)
+        self.attempts = tuple(attempts)
 
 
 class StableRecommendationReader:
@@ -18,16 +28,23 @@ class StableRecommendationReader:
         text_normalizer=None,
         required_headers=(),
         cache=None,
+        stability_key=None,
     ):
         self.config = config
         self.backend = backend
         self.sleep = sleep
         self.text_normalizer = text_normalizer or self._normalize
         self.required_headers = tuple(required_headers)
+        # 可选：把一帧证据映射成“结论指纹”（可哈希）。给了它，稳定判定就按
+        # 结论而不是 OCR 原文比 —— 同一句留牌建议被 OCR 读成多行/少一行、
+        # 或面板标题行时有时无，只要结论一致就算稳（换牌用：见 FSM_action）。
+        self.stability_key = stability_key
         # Panel-pixel -> OCR evidence cache. Identical pixels always produce
         # identical OCR output, so a frame whose exact hash was already
         # recognized can skip the (expensive) inference entirely.
         self._cache = {} if cache is None else cache
+        # 最近一帧“读到了但没过门槛”的证据（只用于失败诊断）。
+        self._last_rejected = None
 
     def _cached(self, frame):
         """Reuse the OCR result for an unchanged panel, or None on miss."""
@@ -48,9 +65,13 @@ class StableRecommendationReader:
         )
 
     def read(self, frame_supplier, roi_supplier):
-        previous_text = None
+        previous_key = None
         stable_count = 0
-        latest = None
+        # 本次读取里每个“结论指纹”出现过几次：容忍 A/B/A 这种抖动。
+        # 以前只认“连续两帧完全相同”，OCR 在两行文字之间来回跳一次就整轮
+        # 判失败（用户反馈「换牌经常 not stable」）。
+        seen_counts = {}
+        attempts = []
         for attempt in range(self.config.max_attempts):
             frame = frame_supplier()
             roi = roi_supplier(frame)
@@ -63,24 +84,58 @@ class StableRecommendationReader:
                 if evidence is not None and frame_hash:
                     self._cache[frame_hash] = evidence
             if evidence is None:
-                previous_text = None
+                # 这一帧没给出合格证据：把“读到了但不够格”的原文也记下来，
+                # 失败信息才能区分“没读到字”和“字读到了但置信度低”。
+                rejected = self._last_rejected
+                attempts.append(
+                    (rejected.normalized_text, rejected.confidence)
+                    if rejected is not None and rejected.normalized_text
+                    else None)
+                previous_key = None
                 stable_count = 0
                 if attempt + 1 < self.config.max_attempts:
                     self.sleep(self.config.retry_interval_seconds)
                 continue
             text = evidence.normalized_text
-            if evidence.confidence >= self.config.min_ocr_confidence and text:
-                stable_count = stable_count + 1 if text == previous_text else 1
-                previous_text = text
-                latest = evidence
-                if stable_count >= self.config.stable_frames:
-                    return latest
+            key = self._stability_key(evidence, text)
+            if (evidence.confidence >= self.config.min_ocr_confidence
+                    and text and key is not None):
+                attempts.append((text, evidence.confidence))
+                if key == previous_key:
+                    stable_count += 1
+                else:
+                    stable_count = 1
+                    previous_key = key
+                seen_counts[key] = seen_counts.get(key, 0) + 1
+                # 连续 stable_frames 帧相同 → 稳；或者同一结论在本次读取里
+                # 已经出现过 stable_frames 次、而**最后一帧就是它** → 也接受
+                # （返回的仍是最后一帧，frame_id 与调用方手里的当前帧一致）。
+                if (stable_count >= self.config.stable_frames
+                        or seen_counts[key] >= self.config.stable_frames):
+                    return evidence
             else:
-                previous_text = None
+                # 读不清/空文本/给不出结论的帧：记下原文方便排错，但不计入稳定。
+                attempts.append((text, evidence.confidence))
+                previous_key = None
                 stable_count = 0
             if attempt + 1 < self.config.max_attempts:
                 self.sleep(self.config.retry_interval_seconds)
-        raise OcrRejectedError("recommendation_not_stable")
+        raise OcrRejectedError("recommendation_not_stable", attempts)
+
+    def _stability_key(self, evidence, text):
+        """这一帧的“结论指纹”：默认就是归一化文本。
+
+        指纹必须可哈希（要拿去计数）；调用方给错类型时按“这一帧给不出结论”
+        处理，绝不让一个辅助判定把整条换牌流程抛崩。
+        """
+        if self.stability_key is None:
+            return text
+        try:
+            key = self.stability_key(evidence)
+            hash(key)
+            return key
+        except Exception:
+            return None
 
     def read_frame(self, frame, roi_supplier):
         evidence = self._cached(frame)
@@ -121,14 +176,21 @@ class StableRecommendationReader:
         return min(factor, cap)
 
     def _recognize_roi(self, roi, frame_id, scale: float = 1.0):
+        # 留一份“最像样但没过门槛”的证据：全都不达标时至少能说清读到了什么
+        # （置信度不够 vs 完全没字），排错时比只有 not_stable 一句码有用。
+        best = None
         for candidate_name, candidate in iter_preprocess_recommendation(roi, scale):
             evidence = self.backend.recognize(candidate, frame_id, candidate_name)
             evidence = self._action_evidence(evidence)
+            if best is None or evidence.confidence > best.confidence:
+                best = evidence
             if (
                 evidence.confidence >= self.config.min_ocr_confidence
                 and evidence.normalized_text
             ):
+                self._last_rejected = None
                 return evidence
+        self._last_rejected = best
         return None
 
     def _action_evidence(self, evidence):

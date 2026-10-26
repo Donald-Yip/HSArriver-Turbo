@@ -1292,5 +1292,62 @@ class HintWrapTests(unittest.TestCase):
                          calibrate_roi._hint_parts("没有冒号的说明"))
 
 
+class OcrPreviewFollowsActiveTargetTests(unittest.TestCase):
+    """实时 OCR 预览必须跟着当前选中的目标，不能写死第 1 项。
+
+    2026-10-26 反馈「换牌经常 not stable」的根因：加了第 2 项「换牌推荐面板」
+    之后，校准窗口的预览仍旧只抓/只读第 1 个框 —— 用户在第 2 项上拖框时看到的
+    是第 1 个框的 OCR，等于盲拖，框一偏换牌阶段就读不准。
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        self.grabbed = []
+        self.session._grab_crop = self._fake_grab
+
+    def _fake_grab(self, box):
+        self.grabbed.append(tuple(int(v) for v in box))
+        return Image.new("RGB", (8, 8), (10, 20, 30))
+
+    def _select_key(self, key):
+        index = next(index for index, target in enumerate(self.session.targets)
+                     if target["key"] == key)
+        self.session.select(index)
+
+    def test_preview_grabs_the_selected_ocr_region(self):
+        self._select_key("recommendation")
+        self.session._capture_for_ocr()
+        self._select_key("mulligan_recommendation")
+        self.session._capture_for_ocr()
+
+        self.assertEqual(2, len(self.grabbed))
+        mulligan = next(target for target in self.session.targets
+                        if target["key"] == "mulligan_recommendation")
+        self.assertEqual(tuple(mulligan["box"]), self.grabbed[-1])
+        self.assertEqual("mulligan_recommendation", self.session.last_crop_key)
+
+    def test_switching_target_clears_the_previous_preview(self):
+        self._select_key("recommendation")
+        self.session._capture_for_ocr()
+        self.assertIsNotNone(self.session.last_crop)
+
+        self._select_key("mulligan_recommendation")
+
+        self.assertIsNone(self.session.last_crop)
+        self.assertIsNone(self.session.last_crop_key)
+
+    def test_non_ocr_target_skips_the_preview(self):
+        self._select_key("mulligan_confirm")
+
+        self.session._capture_for_ocr()
+
+        self.assertEqual([], self.grabbed)
+        self.assertIsNone(self.session.last_crop)
+
+    def test_ocr_preview_targets_are_exactly_the_two_panels(self):
+        self.assertEqual(("recommendation", "mulligan_recommendation"),
+                         calibrate_roi.OCR_PREVIEW_TARGET_KEYS)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -127,8 +127,15 @@ MOVE_CROSS_MIN_HALF = 6
 
 # 顶部提示条的重判间隔（与 region_overlay 保持一致）。
 PANEL_REFRESH_SECONDS = 1.5
-# OCR 预览的自动刷新间隔（秒）：只在校准「推荐面板」时跑，避免拖框时满核。
+# OCR 预览的自动刷新间隔（秒）：只在校准「盒子推荐面板 / 换牌推荐面板」时跑，
+# 避免拖别的框时占满 CPU。
 OCR_REFRESH_SECONDS = 2.5
+# 会真的被 OCR 读的两块区域（其余目标不需要实时 OCR 预览）。
+# 2026-10-26 用户反馈：换牌经常 `recommendation_not_stable`，根因就是当初只给
+# 第 1 项「推荐面板」做了 OCR 预览 —— 加了第 2 项「换牌推荐面板」之后，用户在
+# 第 2 项上拖框时预览根本没有刷新（还一直读第 1 个框），等于盲拖，框一偏换牌
+# OCR 就读不准。预览必须跟着**当前选中的目标**走。
+OCR_PREVIEW_TARGET_KEYS = ("recommendation", "mulligan_recommendation")
 
 # ---------------------------------------------------------------- 配色（RGBA）
 CARD_BG = (24, 28, 36, 238)
@@ -404,6 +411,8 @@ class CalibrationSession:
 
         # OCR 预览
         self.last_crop = None
+        # 这张 crop 是从哪个目标框抓的（OCR 文案要按目标区分，见 _ocr_worker）。
+        self.last_crop_key = None
         self.crop_event = threading.Event()
         self.ocr_result = {"status": "loading", "lines": [], "beacon": None,
                            "msg": "正在加载 OCR 引擎……"}
@@ -418,6 +427,10 @@ class CalibrationSession:
             self.active_index = index
             # 换了目标，上一个目标的判定结果就不再适用（下次定时检查会重算）。
             self.target_status = None
+            # 预览图/OCR 结果也是上一个目标的：清掉，等下一次抓图刷新
+            # （否则拖换牌照会给用户看推荐面板的 OCR，误以为已经对准）。
+            self.last_crop = None
+            self.last_crop_key = None
             self.dirty = True
             print(f"[校准] 当前目标：{self.active['label']}"
                   f"（{self.active['config_key']}）")
@@ -763,14 +776,20 @@ class CalibrationSession:
             return None
 
     def _capture_for_ocr(self) -> None:
-        target = next((t for t in self.targets
-                       if t["key"] == "recommendation"), None)
-        if target is None:
+        """抓**当前选中目标**的框给 OCR 预览（只抓两块真正做 OCR 的区域）。
+
+        以前这里写死 `key == "recommendation"`：加了「换牌推荐面板」之后，
+        用户在第 2 项上拖框时预览仍在读第 1 个框，等于盲拖 —— 框偏了也没提示，
+        换牌阶段就一路 `recommendation_not_stable`（本次 bug 的根因）。
+        """
+        target = self.active
+        if target is None or target.get("key") not in OCR_PREVIEW_TARGET_KEYS:
             return
         crop = self._grab_crop(target["box"])
         if crop is None:
             return
         self.last_crop = crop
+        self.last_crop_key = target.get("key")
         self.crop_event.set()
 
     def _ocr_worker(self) -> None:
@@ -804,9 +823,17 @@ class CalibrationSession:
                 lines = [line.text for line in evidence.lines if line.text]
                 beacon = any("打法参考A" in text or "打法参考Ａ" in text
                              for text in lines)
+                if self.last_crop_key == "mulligan_recommendation":
+                    hint = ("识别到『打法参考A』→ 已套住盒子面板（换牌建议读这里）"
+                            if beacon else
+                            "没读到『打法参考A』：把「留牌建议」整块框进去")
+                else:
+                    hint = ("识别到『打法参考A』→ 对齐成功"
+                            if beacon else
+                            "没读到『打法参考A』：把面板框进绿框")
                 self.ocr_result = {
                     "status": "ok", "lines": lines[:6], "beacon": beacon,
-                    "conf": evidence.confidence,
+                    "conf": evidence.confidence, "hint": hint,
                     "msg": f"OCR {len(lines)} 行 置信 {evidence.confidence:.2f}"
                            f" 耗时 {time.time() - started:.0f}s",
                 }
@@ -1345,8 +1372,11 @@ class CalibrationSession:
         left, top, right, bottom = self._preview_rect(width)
         draw.rectangle((left, top, right, bottom), fill=PANEL_BG,
                        outline=PANEL_BORDER, width=sp(2))
+        # 标题带上当前目标：拖第 2 项（换牌推荐）时能一眼看出预览读的是这个框，
+        # 不是第 1 个绿框（之前写死读推荐面板，用户在换牌照上等于盲拖）。
+        short = self.active.get("short") or "区域"
         self._draw_text(draw, (left + sp(10), top + sp(8)),
-                        "推荐区域预览（OCR 实时识别）", 14, TEXT_MAIN)
+                        f"{short} · OCR 实时识别", 14, TEXT_MAIN)
         img_top = top + sp(32)
         area_w = right - left - sp(20)
         crop = self.last_crop
@@ -1358,8 +1388,12 @@ class CalibrationSession:
             resized = crop.resize(target_size, Image.LANCZOS).convert("RGBA")
             layer.alpha_composite(resized, dest=(left + sp(10), img_top))
         else:
+            waiting = ("等待画面……（拖动后自动刷新）"
+                       if self.active["key"] in OCR_PREVIEW_TARGET_KEYS else
+                       "这个目标不需要 OCR 预览（只有 1 推荐面板 / 2 换牌推荐"
+                       " 会跑实时 OCR）")
             self._draw_text(draw, (left + sp(12), img_top + sp(8)),
-                            "等待画面……（拖动后自动刷新）", 12, TEXT_DIM)
+                            waiting, 12, TEXT_DIM)
         draw.rectangle((left + sp(10), img_top, left + sp(10) + area_w,
                         img_top + img_h), outline=PANEL_BORDER)
         # OCR 结果
@@ -1376,13 +1410,12 @@ class CalibrationSession:
             msg_y = text_y + 6 * sp(17) + sp(2)
             self._draw_text(draw, (left + sp(12), msg_y),
                             result.get("msg", ""), 12, TEXT_DIM)
-            if result.get("beacon"):
-                self._draw_text(draw, (left + sp(12), msg_y + sp(18)),
-                                "识别到『打法参考A』→ 对齐成功", 13, TEXT_OK)
-            else:
-                self._draw_text(draw, (left + sp(12), msg_y + sp(18)),
-                                "没读到『打法参考A』：把面板框进绿框", 13,
-                                TEXT_WARN)
+            hint = result.get("hint") or (
+                "识别到『打法参考A』→ 对齐成功" if result.get("beacon")
+                else "没读到『打法参考A』：把面板框进绿框")
+            self._draw_text(draw, (left + sp(12), msg_y + sp(18)),
+                            hint, 13,
+                            TEXT_OK if result.get("beacon") else TEXT_WARN)
         else:
             color = TEXT_BAD if status == "error" else TEXT_DIM
             self._draw_text(draw, (left + sp(12), text_y),
@@ -1482,8 +1515,10 @@ class CalibrationSession:
                     self._check_active_target()
                     if self.target_status != before:
                         self.dirty = True
-                # OCR 只在校准「推荐面板」时自动跑：拖别的框时别占满 CPU。
-                if (self.ocr_enabled and self.active["key"] == "recommendation"
+                # OCR 只在校准两块「真的要 OCR 的面板」时跑（推荐面板 /
+                # 换牌推荐面板）：拖别的框时别占满 CPU。
+                if (self.ocr_enabled
+                        and self.active["key"] in OCR_PREVIEW_TARGET_KEYS
                         and now >= next_ocr):
                     next_ocr = now + OCR_REFRESH_SECONDS
                     self._capture_for_ocr()
