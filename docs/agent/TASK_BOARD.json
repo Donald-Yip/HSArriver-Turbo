@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "plan_version": "v4",
+  "updated_at": "2026-10-27",
+  "status_enum": ["planned", "in_progress", "ready_for_review", "changes_requested", "approved", "committing", "done", "blocked"],
+  "branch_strategy": {
+    "main": "stable-minimal",
+    "develop": "integration",
+    "feature_prefix": "feature/R"
+  },
+  "wip_limit": {"implementers": 1, "reviewers": 1},
+  "remote_policy": {"origin": "personal", "upstream": "read_only"},
+  "quality_gates": {
+    "default_env": "uv",
+    "default_tests": "headless",
+    "native_tests": "opt_in",
+    "commit_policy": "one_task_one_squash_commit"
+  },
+  "tasks": [
+    {
+      "id": "R00",
+      "status": "done",
+      "owner": "controller",
+      "review_round": 2,
+      "branch": "feature/R00-governance",
+      "depends_on": [],
+      "task_book": "docs/tasks/R00-governance.md",
+      "implementer_report": "docs/agent/reports/R00-implementer.md",
+      "review_report": "docs/agent/reviews/R00-review.md",
+      "base_sha": "f35c5f3c98fba44041fcbad276b3af3a8c31b088",
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": "R00 committed by task ID; staged diff exit 0; independent review APPROVED"
+    },
+    {"id":"R01","status":"planned","owner":null,"review_round":0,"branch":"feature/R01-uv-baseline","depends_on":["R00"],"task_book":"docs/tasks/R01-uv-baseline.md","implementer_report":"docs/agent/reports/R01-implementer.md","review_report":"docs/agent/reviews/R01-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R02","status":"planned","owner":null,"review_round":0,"branch":"feature/R02-contracts-tests-ci","depends_on":["R01"],"task_book":"docs/tasks/R02-contracts-tests-ci.md","implementer_report":"docs/agent/reports/R02-implementer.md","review_report":"docs/agent/reviews/R02-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null,"focus":["contracts","golden replay","CI","test rationalization"]},
+    {"id":"R03","status":"planned","owner":null,"review_round":0,"branch":"feature/R03-domain-contracts","depends_on":["R02"],"task_book":"docs/tasks/R03-domain-contracts.md","implementer_report":"docs/agent/reports/R03-implementer.md","review_report":"docs/agent/reviews/R03-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R04","status":"planned","owner":null,"review_round":0,"branch":"feature/R04-application-ports","depends_on":["R03"],"task_book":"docs/tasks/R04-application-ports.md","implementer_report":"docs/agent/reports/R04-implementer.md","review_report":"docs/agent/reviews/R04-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R05","status":"planned","owner":null,"review_round":0,"branch":"feature/R05-plan-execution","depends_on":["R04"],"task_book":"docs/tasks/R05-plan-execution.md","implementer_report":"docs/agent/reports/R05-implementer.md","review_report":"docs/agent/reviews/R05-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R06","status":"planned","owner":null,"review_round":0,"branch":"feature/R06-data-adapters","depends_on":["R05"],"task_book":"docs/tasks/R06-data-adapters.md","implementer_report":"docs/agent/reports/R06-implementer.md","review_report":"docs/agent/reviews/R06-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R07","status":"planned","owner":null,"review_round":0,"branch":"feature/R07-external-adapters","depends_on":["R06"],"task_book":"docs/tasks/R07-external-adapters.md","implementer_report":"docs/agent/reports/R07-implementer.md","review_report":"docs/agent/reviews/R07-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R08","status":"planned","owner":null,"review_round":0,"branch":"feature/R08-enter-battle","depends_on":["R07"],"task_book":"docs/tasks/R08-enter-battle.md","implementer_report":"docs/agent/reports/R08-implementer.md","review_report":"docs/agent/reviews/R08-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R09","status":"planned","owner":null,"review_round":0,"branch":"feature/R09-mulligan","depends_on":["R08"],"task_book":"docs/tasks/R09-mulligan.md","implementer_report":"docs/agent/reports/R09-implementer.md","review_report":"docs/agent/reviews/R09-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R10","status":"planned","owner":null,"review_round":0,"branch":"feature/R10-turn-loop","depends_on":["R09"],"task_book":"docs/tasks/R10-turn-loop.md","implementer_report":"docs/agent/reports/R10-implementer.md","review_report":"docs/agent/reviews/R10-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R11","status":"planned","owner":null,"review_round":0,"branch":"feature/R11-settlement-stop","depends_on":["R10"],"task_book":"docs/tasks/R11-settlement-stop.md","implementer_report":"docs/agent/reports/R11-implementer.md","review_report":"docs/agent/reviews/R11-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R12","status":"planned","owner":null,"review_round":0,"branch":"feature/R12-one-game-cli","depends_on":["R11"],"task_book":"docs/tasks/R12-one-game-cli.md","implementer_report":"docs/agent/reports/R12-implementer.md","review_report":"docs/agent/reviews/R12-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R13","status":"planned","owner":null,"review_round":0,"branch":"feature/R13-native-cutover","depends_on":["R12"],"task_book":"docs/tasks/R13-native-cutover.md","implementer_report":"docs/agent/reports/R13-implementer.md","review_report":"docs/agent/reviews/R13-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R14","status":"planned","owner":null,"review_round":0,"branch":"feature/R14-plugin-registry","depends_on":["R05"],"task_book":"docs/tasks/R14-plugin-registry.md","implementer_report":"docs/agent/reports/R14-implementer.md","review_report":"docs/agent/reviews/R14-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R15","status":"planned","owner":null,"review_round":0,"branch":"feature/R15-control-security","depends_on":["R13"],"task_book":"docs/tasks/R15-control-security.md","implementer_report":"docs/agent/reports/R15-implementer.md","review_report":"docs/agent/reviews/R15-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null},
+    {"id":"R16","status":"planned","owner":null,"review_round":0,"branch":"feature/R16-legacy-retirement","depends_on":["R15"],"task_book":"docs/tasks/R16-legacy-retirement.md","implementer_report":"docs/agent/reports/R16-implementer.md","review_report":"docs/agent/reviews/R16-review.md","base_sha":null,"head_sha":null,"blockers":[],"last_verified_command":null}
+  ]
+}

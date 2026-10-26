@@ -44,3 +44,6 @@ out.jpg
 snapshot_live.jpg
 __pycache__/
 pytest-cache-files-*
+
+# Refactor agent coordination state
+!docs/agent/TASK_BOARD.json
