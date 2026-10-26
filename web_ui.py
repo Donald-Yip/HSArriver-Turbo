@@ -175,6 +175,66 @@ def _is_admin() -> bool:
 IS_ADMIN = _is_admin()
 
 
+# ---------------------------------------------------------------- 命令行告警横幅
+ADMIN_WARNING_TITLE = "当前不是管理员权限，自动化鼠标/键盘操作可能失效"
+ADMIN_WARNING_HINT = "请关闭本窗口，用【管理员身份】重新运行：python web_ui.py"
+
+
+def _enable_console_ansi(stream=None) -> bool:
+    """尝试开启 Windows 控制台的 ANSI（VT）转义：成功才用加粗/亮色。
+
+    老 cmd / 输出被重定向到文件时不认 `\\x1b[...` 转义，会把它们打成乱码 ——
+    所以先试着打开；打不开就退回纯文本（一样整框 + 重复三遍，只是没法加粗）。
+    """
+    stream = sys.stdout if stream is None else stream
+    try:
+        if not stream.isatty():
+            return False
+    except Exception:
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        enable_virtual_terminal = 0x0004
+        return bool(kernel32.SetConsoleMode(
+            handle, mode.value | enable_virtual_terminal))
+    except Exception:
+        return False
+
+
+def _print_admin_warning(stream=None, ansi=None, repeat: int = 3) -> None:
+    """非管理员时在命令行里把这条告警放大、加粗，并**重复三遍**。
+
+    为什么要这么吵：忽略它就表现为「脚本在跑，但点了没反应」（自动化点击被
+    系统拦掉），是用户踩得最多的坑。控制台里没法改字号，只能靠整框 + 块字符
+    + 加粗亮色 + 重复来保证一眼看到；不支持 ANSI 的老终端退回纯文本（不会
+    把转义序列打成乱码）。
+    """
+    stream = sys.stdout if stream is None else stream
+    if ansi is None:
+        ansi = _enable_console_ansi(stream)
+    bar = "█" * 64
+    color = "\x1b[1;4;91m" if ansi else ""   # 加粗 + 下划线 + 亮红
+    border = "\x1b[1;93m" if ansi else ""    # 加粗 + 亮黄
+    reset = "\x1b[0m" if ansi else ""
+    block = "\n".join((
+        f"{border}{bar}{reset}",
+        f"{border}██{reset}  {color}⚠️  {ADMIN_WARNING_TITLE}{reset}",
+        f"{border}██{reset}      {color}{ADMIN_WARNING_HINT}{reset}",
+        f"{border}{bar}{reset}",
+    ))
+    for index in range(max(1, int(repeat))):
+        if index:
+            stream.write("\n")
+        stream.write(block + "\n")
+    stream.flush()
+
+
 # ---------------------------------------------------------------- 配置持久化
 DEFAULT_CONFIG = {
     "name": "",
@@ -4393,8 +4453,9 @@ def main():
     print("  HSLegendArriver Web 控制台")
     print(f"  请在浏览器中打开: {url}")
     if not IS_ADMIN:
-        print("  [!] 当前不是管理员权限，自动化鼠标/键盘操作可能失效，")
-    print("      建议以管理员身份重新运行本程序。")
+        # 非管理员 = 自动化点击会被系统拦掉（脚本在跑但点了没反应），
+        # 控制台横幅放大加粗、重复三遍，避免一开窗就被忽略。
+        _print_admin_warning()
     print("  随时按 Ctrl+Q 急停（自动化 / 手动进对战都停）；关闭本窗口即退出控制台。")
     print("=" * 64)
     if "--no-browser" not in sys.argv:
