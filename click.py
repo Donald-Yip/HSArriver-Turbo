@@ -90,8 +90,8 @@ def side_point(hearthstone_hwnd=0, preferred=None,
 
     * 按「首选点 → 候选列表」顺序，用 point_targets_hearthstone（WindowFromPoint）
       验证该位置最上层窗口属于炉石；
-    * 全部不命中（炉石最小化/被完全遮挡）或拿不到 hwnd 时，退回首选点，
-      保持与改动前完全一致的行为，不会退化成“什么都不点”。
+    * 全部不命中（炉石最小化/被完全遮挡）或拿不到 hwnd 时返回首选点作为诊断值；
+      click_button 会在真正发送鼠标事件前再次校验，校验失败时不点击。
     """
     ordered = []
     if preferred is not None:
@@ -265,11 +265,21 @@ def click_button(x, y, button, require_hearthstone=True):
     这是"屏幕坐标出口"：调用方传进来的必须已经是屏幕坐标。客户区相对坐标
     请走 left_click / right_click（它们负责换算），别在这里再换一次。
     """
-    hearthstone_hwnd = get_HS_hwnd() if require_hearthstone else 0
+    try:
+        x, y = int(x), int(y)
+        hearthstone_hwnd = get_HS_hwnd() if require_hearthstone else 0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    if require_hearthstone:
+        if not hearthstone_hwnd:
+            return False
+        if not point_targets_hearthstone(x, y, hearthstone_hwnd):
+            return False
+
     mouse = Controller()
     rand_sleep(0.1)
     if (require_hearthstone
-            and hearthstone_hwnd != 0
             and win32gui.GetForegroundWindow() != hearthstone_hwnd):
         # The first physical click on a background Unity window can be
         # consumed solely to activate it. Activate via the same harmless
@@ -277,10 +287,14 @@ def click_button(x, y, button, require_hearthstone=True):
         # 该点必须真的落在炉石上：右上角日志浮窗会盖住固定坐标（见 side_point）。
         activate_x, activate_y = side_point(hearthstone_hwnd,
                                             preferred=(1800, 500))
+        if not point_targets_hearthstone(
+                activate_x, activate_y, hearthstone_hwnd):
+            return False
         _send_physical_click(
             mouse, activate_x, activate_y, Button.right)
         rand_sleep(0.25)
     _send_physical_click(mouse, x, y, button)
+    return True
 
 
 def left_click(x, y, require_hearthstone=True, mapping=None):
@@ -708,14 +722,14 @@ def battlenet_play_point(left, top, right, bottom, grabber=None):
 
 def _point_targets_window(x, y, hwnd):
     """这个屏幕坐标的点击会不会真的落到 hwnd 上（WindowFromPoint 会自动跳过
-    点击穿透窗，比如炉石盒子的浮窗）。判不了时返回 True——照点，不拦。"""
+    点击穿透窗，比如炉石盒子的浮窗）。判不了时 fail-closed。"""
     try:
         hit = win32gui.WindowFromPoint((int(x), int(y)))
         if not hit:
-            return True
+            return False
         return win32gui.GetAncestor(hit, win32con.GA_ROOT) == int(hwnd)
     except Exception:
-        return True
+        return False
 
 
 def enter_HS():
@@ -743,9 +757,9 @@ def enter_HS():
     x, y = battlenet_play_point(left, top, right, bottom)
     if not _point_targets_window(x, y, battlenet_hwnd):
         warn_print(f"战网「开始游戏」按钮位置 ({x}, {y}) 被其它窗口盖住，"
-                   "这一下可能点空")
-    click_button(x, y, Button.left, require_hearthstone=False)
-    return True
+                   "已取消点击")
+        return False
+    return click_button(x, y, Button.left, require_hearthstone=False)
 
 
 # 「模式选择」菜单（选卡组界面）。2026-10 实机截图实测，1920x1080 客户区基准：
@@ -801,4 +815,3 @@ def click_mode_option(mode, points=None):
         rand_sleep(OPERATE_INTERVAL)               # 等模式切换动画收尾
 
     run_hearthstone_action(_action)
-

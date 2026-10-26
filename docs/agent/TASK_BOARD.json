@@ -66,7 +66,7 @@
     },
     {
       "id": "R02A",
-      "status": "in_progress",
+      "status": "done",
       "owner": "implementer",
       "review_round": 0,
       "branch": "feature/R02A-test-inventory",
@@ -83,7 +83,7 @@
     },
     {
       "id": "R02B",
-      "status": "changes_requested",
+      "status": "done",
       "owner": null,
       "review_round": 1,
       "branch": "feature/R02B-ci-gates",
@@ -99,17 +99,85 @@
       "last_verified_command": null
     },
     {
-      "id": "R02C",
-      "status": "planned",
-      "owner": null,
-      "review_round": 0,
-      "branch": "feature/R02C-test-rationalization",
+      "id": "R02C1",
+      "status": "ready_for_review",
+      "owner": "implementer",
+      "review_round": 1,
+      "branch": "feature/R02C1-safe-click-contracts",
       "depends_on": [
         "R02B"
       ],
-      "task_book": "docs/tasks/R02C-test-rationalization.md",
-      "implementer_report": "docs/agent/reports/R02C-implementer.md",
-      "review_report": "docs/agent/reviews/R02C-review.md",
+      "task_book": "docs/tasks/R02C1-safe-click-contracts.md",
+      "implementer_report": "docs/agent/reports/R02C1-implementer.md",
+      "review_report": "docs/agent/reviews/R02C1-review.md",
+      "base_sha": "24a5c91f54b4267336c48b5ddac88611d2aae423",
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": "Focused 25 OK; headless retry run=1523 passed=1522 failures=0 errors=0 skipped=1; compile/architecture/scope PASS"
+    },
+    {
+      "id": "R02C2",
+      "status": "planned",
+      "owner": null,
+      "review_round": 0,
+      "branch": "feature/R02C2-overlay-tests",
+      "depends_on": [
+        "R02C1"
+      ],
+      "task_book": "docs/tasks/R02C2-overlay-tests.md",
+      "implementer_report": "docs/agent/reports/R02C2-implementer.md",
+      "review_report": "docs/agent/reviews/R02C2-review.md",
+      "base_sha": null,
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": null
+    },
+    {
+      "id": "R02C3",
+      "status": "planned",
+      "owner": null,
+      "review_round": 0,
+      "branch": "feature/R02C3-non-overlay-tests",
+      "depends_on": [
+        "R02C2"
+      ],
+      "task_book": "docs/tasks/R02C3-non-overlay-tests.md",
+      "implementer_report": "docs/agent/reports/R02C3-implementer.md",
+      "review_report": "docs/agent/reviews/R02C3-review.md",
+      "base_sha": null,
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": null
+    },
+    {
+      "id": "R02C4",
+      "status": "planned",
+      "owner": null,
+      "review_round": 0,
+      "branch": "feature/R02C4-native-node",
+      "depends_on": [
+        "R02C3"
+      ],
+      "task_book": "docs/tasks/R02C4-native-node.md",
+      "implementer_report": "docs/agent/reports/R02C4-implementer.md",
+      "review_report": "docs/agent/reviews/R02C4-review.md",
+      "base_sha": null,
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": null
+    },
+    {
+      "id": "R02C5",
+      "status": "planned",
+      "owner": null,
+      "review_round": 0,
+      "branch": "feature/R02C5-headless-final",
+      "depends_on": [
+        "R02C4"
+      ],
+      "task_book": "docs/tasks/R02C5-headless-final.md",
+      "implementer_report": "docs/agent/reports/R02C5-implementer.md",
+      "review_report": "docs/agent/reviews/R02C5-review.md",
       "base_sha": null,
       "head_sha": null,
       "blockers": [],
@@ -122,7 +190,7 @@
       "review_round": 0,
       "branch": "feature/R03-domain-contracts",
       "depends_on": [
-        "R02C"
+        "R02C5"
       ],
       "task_book": "docs/tasks/R03-domain-contracts.md",
       "implementer_report": "docs/agent/reports/R03-implementer.md",

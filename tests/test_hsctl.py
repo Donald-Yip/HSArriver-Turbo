@@ -984,24 +984,97 @@ class KillPidTests(unittest.TestCase):
         self.assertIn("已停止", out)
 
 
-class TableDriftTests(unittest.TestCase):
-    """CLI 里的延时字段表必须和 web_ui / config 保持一致，否则会给出错误提示。"""
+class CliDelayAndScreenshotContractTests(unittest.TestCase):
+    """CLI 的可观察契约：不比较私有表，只验证命令收支和用户可见提示。"""
 
-    def test_delay_keys_match_config_whitelist(self):
-        import config
-        self.assertEqual(set(hsctl.DELAY_KEYS), set(config._USER_DELAY_KEYS))
+    DELAY_EFFECTS = (
+        ("mulligan_ready_delay_seconds", "立即生效"),
+        ("mulligan_retry_delay_seconds", "立即生效"),
+        ("pre_action_delay_seconds", "立即生效"),
+        ("first_turn_per_card_delay_seconds", "立即生效"),
+        ("discover_target_delay_seconds", "立即生效"),
+        ("mulligan_post_ocr_delay_seconds", "下次「开始对战」生效"),
+        ("post_action_delay_seconds", "下次「开始对战」生效"),
+        ("draw_extra_delay_per_card_seconds", "下次「开始对战」生效"),
+        ("ocr_preprocess_scale", "需重启脚本进程"),
+    )
+    SCREENSHOT_KINDS = ("client", "full", "roi", "boxes")
 
-    def test_delay_effect_table_matches_web_ui(self):
-        import web_ui
-        for key in hsctl.DELAY_KEYS:
-            self.assertEqual(hsctl.DELAY_EFFECT[key],
-                             web_ui._delay_effect_scope(key),
-                             f"{key} 的生效时机在两个文件里不一致")
+    def setUp(self):
+        self.console = _FakeConsole({"/api/status": dict(STATUS_FIXTURE)})
+        self.addCleanup(self.console.close)
 
-    def test_screenshot_kinds_match_web_ui(self):
-        import web_ui
-        self.assertEqual(tuple(hsctl.SCREENSHOT_KINDS),
-                         tuple(web_ui.SCREENSHOT_KINDS))
+    def _base(self):
+        return ["--port", str(self.console.port)]
+
+    def test_delays_show_exposes_every_supported_key_and_effect(self):
+        code, out, _ = run_cli([*self._base(), "delays", "show"])
+        self.assertEqual(code, hsctl.EXIT_OK)
+        lines = out.splitlines()
+        for key, effect in self.DELAY_EFFECTS:
+            matching = [line for line in lines if key in line]
+            self.assertEqual(1, len(matching), f"{key} 未在 delays show 中展示")
+            self.assertIn(effect, matching[0])
+
+    def test_delays_set_accepts_every_supported_key(self):
+        pairs = [f"{key}={index + 1}" for index, (key, _) in
+                 enumerate(self.DELAY_EFFECTS)]
+        code, _, _ = run_cli([*self._base(), "delays", "set", *pairs])
+        self.assertEqual(code, hsctl.EXIT_OK)
+        posts = self.console.posts()
+        self.assertEqual(1, len(posts))
+        _, path, body = posts[0]
+        self.assertEqual("/api/delays", path)
+        self.assertIs(True, body["hot"])
+        for index, (key, _) in enumerate(self.DELAY_EFFECTS):
+            self.assertEqual(float(index + 1), body[key])
+
+    def test_delays_set_rejects_an_unknown_key_without_posting(self):
+        code, _, err = run_cli([
+            *self._base(), "delays", "set", "unknown_delay_seconds=1",
+        ])
+        self.assertEqual(code, hsctl.EXIT_API)
+        self.assertIn("未知延时字段", err)
+        self.assertIn("pre_action_delay_seconds", err)
+        self.assertEqual([], self.console.posts())
+
+    def test_screenshot_accepts_every_public_kind(self):
+        sent = []
+
+        def fake_post(path, body=None):
+            sent.append((path, body))
+            return {
+                "ok": True,
+                "path": "p",
+                "latest": "l",
+                "width": 640,
+                "height": 360,
+                "kind": body["kind"],
+                "note": "",
+            }
+
+        for kind in self.SCREENSHOT_KINDS:
+            with unittest.mock.patch.object(
+                    hsctl.Ctx, "post", side_effect=fake_post):
+                code, _, _ = run_cli([
+                    *self._base(), "screenshot",
+                    "--kind", kind,
+                    "--max-width", "640",
+                ])
+            self.assertEqual(code, hsctl.EXIT_OK)
+
+        self.assertEqual(
+            [("/api/screenshot", {"kind": kind, "max_width": 640})
+             for kind in self.SCREENSHOT_KINDS],
+            sent,
+        )
+
+    def test_screenshot_rejects_an_unknown_kind_before_posting(self):
+        with unittest.mock.patch.object(hsctl.Ctx, "post") as post:
+            with self.assertRaises(SystemExit) as raised:
+                run_cli([*self._base(), "screenshot", "--kind", "unknown"])
+        self.assertEqual(hsctl.EXIT_USAGE, raised.exception.code)
+        post.assert_not_called()
 
 
 class ParserTests(unittest.TestCase):

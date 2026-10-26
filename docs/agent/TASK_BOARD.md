@@ -8,8 +8,12 @@ Updated: 2026-10-27
 | R01 | done | feature/R01-uv-baseline | R00 | Uv-only environment |
 | R02A | done | feature/R02A-test-inventory | R01 | Test inventory and classification |
 | R02B | done | feature/R02B-ci-gates | R02A | Architecture, scope, CI, and PR gates |
-| R02C | planned | feature/R02C-test-rationalization | R02B | Headless test cleanup and replacement |
-| R03 | planned | feature/R03-domain-contracts | R02 | Domain models and rules |
+| R02C1 | done | feature/R02C1-safe-click-contracts | R02B | Safe click behavior and CLI contracts |
+| R02C2 | planned | feature/R02C2-overlay-tests | R02C1 | Overlay source-string replacement |
+| R02C3 | planned | feature/R02C3-non-overlay-tests | R02C2 | Non-overlay source-string replacement |
+| R02C4 | planned | feature/R02C4-native-node | R02C3 | Native and Node isolation |
+| R02C5 | planned | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |
+| R03 | planned | feature/R03-domain-contracts | R02C5 | Domain models and rules |
 | R04 | planned | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
 | R05 | planned | feature/R05-plan-execution | R04 | Plan and execution pipeline |
 | R06 | planned | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |

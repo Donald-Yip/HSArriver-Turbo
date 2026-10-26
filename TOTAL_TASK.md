@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02B: architecture and scope gates fix round 1 complete; awaiting re-review.
+R02C2: overlay source-string test replacement.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R02B-ci-gates`, based on `develop` at `386c986`
+- Current feature branch: `feature/R02C1-safe-click-contracts`, based on `develop` at `24a5c91f54b4267336c48b5ddac88611d2aae423`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -39,8 +39,12 @@ R02B: architecture and scope gates fix round 1 complete; awaiting re-review.
 | R01 | done | uv environment baseline | R00 |
 | R02A | done | Test inventory and classification | R01 |
 | R02B | done | Architecture, scope, CI and PR gates | R02A |
-| R02C | planned | Headless test rationalization | R02B |
-| R03 | planned | Domain contracts | R02C |
+| R02C1 | done | Safe click behavior and CLI contract tests | R02B |
+| R02C2 | planned | Overlay test replacement | R02C1 |
+| R02C3 | planned | Non-overlay test replacement | R02C2 |
+| R02C4 | planned | Native and Node isolation | R02C3 |
+| R02C5 | planned | Headless finalization | R02C4 |
+| R03 | planned | Domain contracts | R02C5 |
 | R04 | planned | Application ports and runtime controls | R03 |
 | R05 | planned | Plan and execution pipeline | R04 |
 | R06 | planned | Data adapters | R05 |
@@ -95,7 +99,7 @@ uv sync --locked --all-groups
 uv run python -m compileall -q src tests tools
 uv run python tools/check_architecture.py
 uv run python tools/check_architecture.py --self-test
-uv run python tools/check_task_scope.py --task R02B
+uv run python tools/check_task_scope.py --task R02C1
 uv run python tools/check_task_scope.py --self-test
 uv run python tools/run_headless_tests.py
 ```
@@ -114,4 +118,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Return R02B fix round 1 to the controller for independent re-review. After approval, commit R02B and start R02C headless test rationalization.
+Return R02C1 fix round 1 to the controller for scoped re-review. After approval, commit R02C1 and proceed to R02C2 overlay test replacement.

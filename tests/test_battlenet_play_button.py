@@ -48,7 +48,9 @@ class EnterHsScreenCoordinateTests(unittest.TestCase):
                              lambda *a, **k: True), \
                 patch.object(click, "win32gui") as fake_win32, \
                 patch.object(click, "click_button",
-                             lambda *a, **k: calls.append((a, k))), \
+                             lambda *a, **k: calls.append((a, k)) or True), \
+                patch.object(click, "_point_targets_window",
+                             lambda *a, **k: True), \
                 patch.object(click, "_bitblt_region", lambda zone: None), \
                 patch.object(click, "_display_mapping",
                               lambda *a, **k: DisplayMapping(
@@ -83,29 +85,33 @@ class EnterHsScreenCoordinateTests(unittest.TestCase):
         self.assertFalse(result)
         self.assertEqual([], calls)
 
-    def test_warns_when_the_point_is_covered(self):
-        """点击点被别的窗口盖住时给警告（诊断用，不拦点击）。"""
+    def test_blocks_when_the_point_is_covered(self):
+        """点击点被别的窗口盖住时 fail-closed：给诊断且不调用点击出口。"""
         warnings = []
+        clicks = []
         with patch.object(click, "rand_sleep", lambda *_: None), \
                 patch.object(click, "test_hs_available", lambda: False), \
                 patch.object(click, "get_battlenet_hwnd", lambda: 1234), \
                 patch.object(click, "move_window_foreground",
                              lambda *a, **k: True), \
                 patch.object(click, "win32gui") as fake_win32, \
-                patch.object(click, "click_button", lambda *a, **k: None), \
+                patch.object(click, "click_button",
+                             lambda *a, **k: clicks.append((a, k))), \
                 patch.object(click, "_bitblt_region", lambda zone: None), \
                 patch.object(click, "_point_targets_window",
                              lambda *a, **k: False), \
                 patch.object(click, "warn_print",
                              lambda text: warnings.append(text)):
             fake_win32.GetWindowRect.return_value = self.WINDOW
-            click.enter_HS()
+            result = click.enter_HS()
+        self.assertFalse(result)
+        self.assertEqual([], clicks)
         self.assertEqual(1, len(warnings))
         self.assertIn("被其它窗口盖住", warnings[0])
 
 
 class PointTargetsWindowTests(unittest.TestCase):
-    """点击命中判定：子窗口算命中、外窗算没命中、判不了不拦。"""
+    """点击命中判定：子窗口算命中、外窗和判不了都 fail-closed。"""
 
     def test_direct_hit(self):
         with patch.object(click.win32gui, "WindowFromPoint",
@@ -129,10 +135,10 @@ class PointTargetsWindowTests(unittest.TestCase):
                           lambda hwnd, flags: 555):
             self.assertFalse(click._point_targets_window(10, 20, 1234))
 
-    def test_unknown_defaults_to_allowing_the_click(self):
+    def test_unknown_fails_closed(self):
         with patch.object(click.win32gui, "WindowFromPoint",
                           side_effect=RuntimeError("boom")):
-            self.assertTrue(click._point_targets_window(10, 20, 1234))
+            self.assertFalse(click._point_targets_window(10, 20, 1234))
 
 
 class BattlenetPlayPointTests(unittest.TestCase):

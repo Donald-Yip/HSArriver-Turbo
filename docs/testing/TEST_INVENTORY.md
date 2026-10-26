@@ -1,6 +1,6 @@
 # R02A Test Inventory
 
-> 状态：盘点完成，未删除、未修改任何 `tests/` 文件。本文的 `candidate-delete` 只是 R02C 候选，必须先在 R02C 创建并通过替代测试。
+> 状态：R02A 盘点完成；R02C1 已按 Batch 1 删除 5 个批准候选并加入替代测试。其余 `candidate-delete` 仍只是 R02C 候选，必须先创建并通过替代测试。
 
 ## 口径
 
@@ -38,7 +38,7 @@
 | 8 | `tests/test_card_catalog.py` | 179 | 22 | NormalizeTests(1), ParseClassTests(3), LookupTests(11), SearchTests(5), RealCardsJsonSmokeTests(2) | Domain | 无 | keep | controller | - | 卡牌目录解析与真实 cards.json 只读 smoke。  |
 | 9 | `tests/test_card_search_api.py` | 96 | 11 | SearchTests(11) | Web contract | 无 | keep | controller | - | 卡牌搜索 API 输出契约。  |
 | 10 | `tests/test_choose_one.py` | 246 | 15 | ChooseOneTests(15) | Application | 无 | keep | controller | - | 抉择/发现与目标选择。  |
-| 11 | `tests/test_click_safety_checks.py` | 76 | 2 | ClickSafetyCheckRemovalTests(2) | Adapter safety | 接受危险行为 | candidate-delete | R02C | R02C | 断言窗口不存在或命中失败时仍点击，直接接受危险行为。  |
+| 11 | `tests/test_click_safety_checks.py` | 162 | 6 | ClickSafetyContractTests(6) | Adapter safety | 私有 patch | keep | controller | - | R02C1 已替换危险验收：无窗口/未命中/未知坐标/未验证激活点均零点击，合法前台与后台激活路径仍点击。  |
 | 12 | `tests/test_deck_auto_select_disabled.py` | 86 | 3 | ChoosingHeroNoAutoDeckTests(1), DeckSettingApiTests(2) | Web / Application | 私有 patch | keep | controller | - | 禁止旧自动选卡组配置的兼容边界。  |
 | 13 | `tests/test_desktop_capture_scaled_roi.py` | 106 | 5 | ScaledRoiFrameTests(5) | Adapter contract | 无 | keep | controller | - | 缩放 ROI 捕获与 client-size 兼容。  |
 | 14 | `tests/test_discover_with_target.py` | 288 | 11 | DiscoverWithTargetTests(10), DiscoverTargetModelTests(1) | Application | 无 | keep | controller | - | 发现牌目标选择与旧路径兼容。  |
@@ -58,7 +58,7 @@
 | 28 | `tests/test_hearthstone_liveness.py` | 221 | 17 | ProcessLivenessTests(7), LogStalenessTests(6), NativeProcessTests(4) | Application / native smoke | 真实 OS/子进程/依赖环境 | keep + move-native 2 | R02C | R02C | 13 个 fake-clock 行为测试保留；2 个真实进程枚举转 opt-in Windows smoke；2 个注入 fake 的 unknown 分支保留 headless。  |
 | 29 | `tests/test_hs_restart.py` | 449 | 28 | ResolvePathsTests(5), ClearLogsTests(3), KillHearthstoneTests(4), LaunchHearthstoneTests(10), OverlayDelayDisplayTests(6) | Tooling | 破坏性行为覆盖（fake/临时目录） | keep | controller | - | 重启、清日志、进程终止路径；全部通过 fake/临时目录覆盖。  |
 | 30 | `tests/test_hs_window.py` | 66 | 9 | HeightForWidthTests(3), ClampWidthTests(6) | Domain | 无 | keep | controller | - | 窗口宽高纯函数。  |
-| 31 | `tests/test_hsctl.py` | 1149 | 86 | CliTests(47), ServeStopSafetyTests(1), TaskHintTests(5), ElevationTests(18), KillPidTests(4), TableDriftTests(3), ParserTests(2), DoctorAndEnvTests(5), HelpCoverageTests(1) | CLI / Adapter contract | 本地 loopback HTTP；管理员路径（仅 fake/文案）；破坏性行为覆盖（fake/临时目录）；私有 patch | rewrite | R02C | R02C | CLI/本地 HTTP 契约保留；3 个私有表漂移断言删除并用可观察输出契约替代。  |
+| 31 | `tests/test_hsctl.py` | 1222 | 88 | CliTests(47), ServeStopSafetyTests(1), TaskHintTests(5), ElevationTests(18), KillPidTests(4), CliDelayAndScreenshotContractTests(5), ParserTests(2), DoctorAndEnvTests(5), HelpCoverageTests(1) | CLI / Adapter contract | 本地 loopback HTTP；管理员路径（仅 fake/文案）；破坏性行为覆盖（fake/临时目录）；私有 patch | keep | controller | - | R02C1 已用 CLI 可观察契约替换 3 个私有表漂移测试；延时字段/效果与 screenshot kind 均由命令收支验证。  |
 | 32 | `tests/test_hsctl_surrender.py` | 301 | 24 | ShowTests(4), ToggleTests(4), SetTests(8), CheckTests(3), CardTests(4), ParserTests(1) | CLI / Domain | 无 | keep | controller | - | 投降规则 CLI 参数与输出。  |
 | 33 | `tests/test_human_like.py` | 524 | 32 | HumanLikeSettingsTests(4), HumanLikePauseTests(5), ParkMouseTests(2), PostActionPauseHookTests(12), WebHumanLikeTests(9) | Application | 私有 patch | keep | controller | - | 拟人时序、悬停和后动作挂点。  |
 | 34 | `tests/test_human_like_minion_hover.py` | 389 | 24 | OpponentMinionHoverPointTests(2), HoverOpponentMinionTests(3), HumanLikeOpponentMinionWatchTests(9), BattleStepWiringTests(2), ConfigDefaultsTests(4), WebPageTests(4) | Application | 无 | keep | controller | - | 对手随从悬停与配置/网页契约。  |
@@ -129,14 +129,24 @@
 
 除下表外，每个文件中的其余测试方法均按文件级 `keep` 处理；类名后的数字已给出完整分组计数。
 
+### R02C1 Batch 1 删除记录
+
+| 原测试 | 删除原因 | 替代测试 | 状态 |
+|---|---|---|---|
+| `test_click_safety_checks.py::ClickSafetyCheckRemovalTests.test_clicks_when_hearthstone_window_is_not_found` | 把无窗口仍点击锁成正确行为 | `ClickSafetyContractTests.test_unknown_hearthstone_window_is_not_clicked` | 已删除 |
+| `test_click_safety_checks.py::ClickSafetyCheckRemovalTests.test_background_window_activates_and_clicks_without_hit_testing` | 把未命中仍点击锁成正确行为 | `ClickSafetyContractTests.test_unverified_hearthstone_point_is_not_clicked`、`test_background_window_without_a_verified_activation_point_is_not_clicked`、`test_verified_background_window_activates_then_clicks_target` | 已删除 |
+| `test_hsctl.py::TableDriftTests.test_delay_keys_match_config_whitelist` | 比较 CLI 与 config 私有表 | `CliDelayAndScreenshotContractTests.test_delays_show_exposes_every_supported_key_and_effect`、`test_delays_set_accepts_every_supported_key` | 已删除 |
+| `test_hsctl.py::TableDriftTests.test_delay_effect_table_matches_web_ui` | 比较 CLI 与 web_ui 私有表 | `CliDelayAndScreenshotContractTests.test_delays_show_exposes_every_supported_key_and_effect` | 已删除 |
+| `test_hsctl.py::TableDriftTests.test_screenshot_kinds_match_web_ui` | 比较 CLI 与 web_ui 私有表 | `CliDelayAndScreenshotContractTests.test_screenshot_accepts_every_public_kind`、`test_screenshot_rejects_an_unknown_kind_before_posting` | 已删除 |
+
 | 文件 / 类 | 方法 | 决策 | 依据 |
 |---|---|---|---|
-| `test_click_safety_checks.py::ClickSafetyCheckRemovalTests` | `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | candidate-delete | 两个测试把“找不到窗口仍点击 / 未命中仍点击”锁成正确行为，违背 fail-closed 策略。R02C 先加“无窗口、无命中、未知坐标不点击”替代测试。 |
+| `test_click_safety_checks.py::ClickSafetyCheckRemovalTests` | `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | deleted (R02C1) | 两个危险验收已由 5 个 fail-closed/合法路径测试替代；见上方 R02C1 删除记录。 |
 | `test_friendly_hand_target_battlecries.py::FriendlyHandTargetBattlecryTests` | `test_unreadable_card_data_falls_back_to_the_legacy_cards` | rewrite | 行为值得保留，改为注入 metadata reader fake，不 patch 私有函数。 |
 | `test_hand_or_board_targets.py::HandOrBoardCardDataTests` | `test_unreadable_card_data_falls_back_to_the_legacy_card` | rewrite | 同上，改为构造损坏 reader/fake port。 |
 | `test_fsm_liveness_stop.py::LoopWiringTests` | `test_main_loop_and_battling_call_the_check` | candidate-delete | 源码串断言；改为 fake loop 计数 `check_hearthstone_liveness` 调用。 |
 | `test_human_like_scope.py::MulliganScopeTests` | `test_fsm_does_not_wire_the_human_like_hook_into_mulligan` | candidate-delete | 源码切片断言；改为构造 fake flow 并断言两处 post-action 参数。 |
-| `test_hsctl.py::TableDriftTests` | `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | candidate-delete | 私有表互相比较；改为通过 CLI 可观察输出/参数验证契约。 |
+| `test_hsctl.py::TableDriftTests` | `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | deleted (R02C1) | 私有表互相比较已删除；由 5 个 CLI 可观察输出/参数契约测试替代。 |
 | `test_hearthstone_liveness.py::NativeProcessTests` | `test_can_enumerate_processes`, `test_finds_this_python_process` | move-native | 只有两个真实 ctypes 进程枚举方法归入 opt-in Windows smoke；`test_returns_bool_for_unknown_process` 与 `test_unreadable_process_list_is_unknown` 注入 fake，保留默认 headless。 |
 | `test_overlay_dpi_scaling.py::WindowWiringTests` | `test_run_computes_the_scale_and_pins_tk_font_scaling`, `test_run_sizes_the_window_through_px`, `test_detail_wrap_uses_the_scaled_window_width` | candidate-delete | 源码串断言；改为 fake Tk root 的 scaling/geometry/wraplength 观测。 |
 | `test_overlay_eye_and_colors.py::AccountEyeToggleTests/LogColorTests/ButtonLayoutTests` | `test_eye_is_rendered_and_clickable`, `test_renderer_uses_the_tag_function_and_configures_every_tag`, `test_destructive_buttons_guard_themselves`, `test_button_labels_have_no_tofu_glyphs`, `test_window_metrics_and_grid_helpers`, `test_status_rows_put_name_and_value_next_to_each_other`, `test_status_rows_wrap_instead_of_being_clipped`, `test_overlay_can_be_minimized_to_a_title_bar` | candidate-delete | 源码串断言；改为 fake widget tree、按钮回调/确认 spy、标签文本与 wraplength 观测。 |
@@ -156,8 +166,8 @@
 ## 发现的主要垃圾测试类型
 
 1. **源码字符串测试 30 个方法 / 13 个文件**：`inspect.getsource` 28 个，直接读取 `log_overlay.py`/`hsctl.py` 2 个。它们复制实现文本，重构必误报。
-2. **危险行为验收 2 个方法**：`test_click_safety_checks` 明确断言无窗口/未命中仍点击。
-3. **重复表漂移 3 个方法**：`test_hsctl.TableDriftTests` 直接比较私有表，应改为外部可观察契约。
+2. **危险行为验收 2 个方法**：`test_click_safety_checks` 曾明确断言无窗口/未命中仍点击；R02C1 已替换为 fail-closed。
+3. **重复表漂移 3 个方法**：`test_hsctl.TableDriftTests` 曾直接比较私有表；R02C1 已改为外部可观察 CLI 契约。
 4. **私有 patch 133 个方法 / 32 个文件**：多数是注入日志、时钟、进程/窗口等 seam，暂时可保留；其中 2 个 hand-target metadata patch 和 3 个 web selfcheck runner patch 明确需要 R02C rewrite。
 5. **真实/外部运行依赖**：Node 1 个测试，真实进程枚举 2 个方法，MCP 子进程 2 个，环境/依赖 smoke 8 个；大多可保留在独立层，Node 与进程枚举不应进默认核心门。
 6. **本机路径与编码**：`test_surrender_frontend.py` 硬编码 `C:\Users\DonaldYip\...` 和 `D:\nodejs\node.exe`，且 `subprocess.run(text=True)` 使用 GBK，导致当前唯一失败。

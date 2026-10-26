@@ -23,3 +23,7 @@ Ruling: Refactor garbage code immediately only when it is inside the current tas
 ## 2026-10-27 - Split R02
 
 Ruling: Split R02 into R02A inventory, R02B CI/architecture gates, and R02C test rationalization - the original task combined irreversible test deletion with gate creation and risked coverage loss - if wrong, the three sequential commits can be reverted independently without touching production code.
+
+## 2026-10-27 - Split R02C Into Batches
+
+Ruling: Execute test rationalization as R02C1-R02C5 by replacement batch - prevents a single irreversible test-cleanup commit and keeps each deletion traceable - if wrong, batches can be reverted independently.

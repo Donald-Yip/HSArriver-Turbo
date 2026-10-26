@@ -76,8 +76,8 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 
 | 批次 | 文件 / 方法 | 数量 | 替代或非行为理由 |
 |---|---|---:|---|
-| B1 危险验收 | `test_click_safety_checks`: `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | 2 | 替代为 fail-closed：window=0 / point 未命中 / 坐标未知时 dispatch 不被调用。旧断言不是可保留行为。 |
-| B1 表漂移 | `test_hsctl.TableDriftTests`: `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | 3 | 替代为 CLI 黑盒参数化：`delays show` 的字段/提示、`delays set` 的接受/拒绝、`screenshot` 的 kind/max-width 请求。 |
+| B1 危险验收 | `test_click_safety_checks`: `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | 2 | R02C1 已完成：6 个 fail-closed/合法路径测试覆盖无窗口/未命中/未知坐标/未验证激活点、合法前台点击，以及合法后台激活后点击目标。 |
+| B1 表漂移 | `test_hsctl.TableDriftTests`: `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | 3 | R02C1 已完成：5 个 CLI 黑盒契约测试覆盖 `delays show` 字段/生效提示、`delays set` 接受/拒绝、`screenshot` 全部 kind 与非法 kind。 |
 | B2 浮窗源码串 | `test_overlay_dpi_scaling.WindowWiringTests`: 3 个源码串方法 | 3 | fake Tk root：断言 scaling 设置、窗口 geometry 由 `px()` 计算、detail wraplength 使用缩放宽度。 |
 | B2 浮窗源码串 | `test_overlay_eye_and_colors`: 8 个源码串方法 | 8 | fake widget tree/callback spy：眼睛绑定、日志 tag 渲染、危险按钮确认、按钮标签、状态行布局/换行、最小化标题栏。 |
 | B2 浮窗源码串 | `test_overlay_human_like_status::test_brand_name_has_no_subtitle` | 1 | 渲染后的品牌标题只有标题、没有副标题；由 widget text 断言。 |
@@ -114,6 +114,14 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 - 删除 2 个危险验收 + 3 个 `TableDriftTests`。
 - 门槛：默认 suite 0 failures；新的 fail-closed/CLI 契约测试全绿。
 
+#### R02C1 删除记录
+
+- 状态：已实现，待独立 review 与 commit。
+- 删除：`test_clicks_when_hearthstone_window_is_not_found`、`test_background_window_activates_and_clicks_without_hit_testing`。
+- 删除：`TableDriftTests.test_delay_keys_match_config_whitelist`、`test_delay_effect_table_matches_web_ui`、`test_screenshot_kinds_match_web_ui`。
+- 替代：`ClickSafetyContractTests` 6 个 fail-closed/合法路径测试；`CliDelayAndScreenshotContractTests` 5 个可观察 CLI 契约测试。
+- 原始证据：目标测试 25 个通过；headless suite retry `1523 run / 1522 passed / 0 failures / 0 errors / 1 skipped`。
+
 ### Batch 2：浮窗源码串（19）
 
 - 覆盖 `test_overlay_dpi_scaling`、`test_overlay_eye_and_colors`、`test_overlay_human_like_status`、`test_overlay_self_check_hint`、`test_overlay_tk_lifecycle`、`test_overlay_window_slider`、`test_region_overlay_button`。
@@ -148,7 +156,7 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 ## 风险
 
 - 浮窗源码串测试虽然反模式，但其中文案/布局是用户可见行为；替代测试不能只做快照，要断言触发条件和回调。
-- `TableDriftTests` 删除后可能失去 CLI-Web 字段一致性保护；必须用可见契约覆盖全部字段。
+- `TableDriftTests` 已由 R02C1 的可见 CLI 契约覆盖全部延时字段/生效提示与 screenshot kind；review 需确认没有退回私有表比较。
 - 只移动 2 个真实进程枚举后，默认 CI 仍保留 2 个 fake unknown 分支；真实 ctypes 分支需要 opt-in Windows job 或 release smoke。
 - Node 前端测试目前是全量唯一失败；修复编码不等于降低契约，必须保留嵌套配置往返断言。
 - 删除批次必须与 R02A 台账一一对应；若出现未登记删除，立即停止并回滚该批次。
