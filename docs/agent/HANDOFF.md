@@ -2,20 +2,19 @@
 
 ## Current Phase
 
-R02C3 - non-overlay source-string replacement
+R02C4 - Node and native test isolation
 
 ## Current Task
 
-R02C3 (`planned`)
+R02C4 (`planned`)
 
 ## Completed
 
-- R00, R01, R02A, R02B, R02C1, R02C2 complete.
-- Remaining source-string cleanup: 11 Batch 3 candidates.
-- Remaining explicit headless exclusions: 1 Node module + 2 native process tests.
+- R00, R01, R02A, R02B, R02C1, R02C2, R02C3 complete.
+- Remaining default exclusions: one Node frontend module and two native process tests.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R02C2.
-2. Create feature/R02C3-non-overlay-tests.
-3. Replace the 11 approved Batch 3 candidates with fake flow/clock/stdout/CLI behavior.
+1. Fast-forward develop to R02C3.
+2. Create feature/R02C4-native-node.
+3. Move Node/native tests to opt-in suites and remove hardcoded paths/GBK decoding.

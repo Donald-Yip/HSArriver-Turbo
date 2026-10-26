@@ -16,6 +16,7 @@ from unittest.mock import patch
 import log_overlay
 import script_logs
 import web_ui
+from tests.helpers.fake_tk import overlay_harness
 
 
 def make_temp_dir() -> Path:
@@ -375,19 +376,35 @@ class OverlayWiringTests(unittest.TestCase):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
         self.assertEqual(6, layout["exit"][0])
 
-    def test_run_uses_the_log_row_and_confirms_before_clearing(self):
-        import inspect
+    def test_run_renders_log_row_and_clears_only_after_confirmation(self):
+        opened = []
+        cleared = []
+        info = {"files": 2, "bytes": 2048}
+        expected_value = log_overlay.logs_row(info)["value"]
 
-        source = inspect.getsource(log_overlay._run)
+        with patch.object(
+            log_overlay, "_confirm_clear_logs", return_value=False
+        ) as confirm:
+            with overlay_harness(
+                _IS_RUNNING=lambda: False,
+                _LOGS=lambda: info,
+                _ON_OPEN_LOGS=lambda: opened.append(1),
+                _ON_CLEAR_LOGS=lambda: cleared.append(1),
+            ) as ui:
+                self.assertTrue(ui.label("日志").packed)
+                self.assertTrue(ui.label(expected_value).packed)
 
-        self.assertIn('_status_row("日志")', source)
-        self.assertIn("logs_row(lg_info)", source)
-        self.assertIn('_make_btn(btn_frame, "打开日志", NEUTRAL', source)
-        self.assertIn('_make_btn(btn_frame, "清理日志", WARN', source)
-        self.assertIn("_confirm_clear_logs(root, info)", source)
-        self.assertIn("已无可清理的脚本日志。", source)
-        self.assertIn("_ON_OPEN_LOGS", source)
-        self.assertIn("_ON_CLEAR_LOGS", source)
+                ui.button("打开日志").invoke()
+                ui.button("清理日志").invoke()
+
+                self.assertEqual([1], opened)
+                self.assertEqual([], cleared)
+                confirm.assert_called_once()
+
+                confirm.return_value = True
+                ui.button("清理日志").invoke()
+
+        self.assertEqual([1], cleared)
 
     def test_bind_overlay_passes_the_log_callbacks(self):
         bound = {}

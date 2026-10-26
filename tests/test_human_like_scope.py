@@ -12,6 +12,7 @@
 import inspect
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from manual_controller import ActionExecutionResult, EndTurnAction
 from src.flow.mulligan_flow import MulliganFlow
@@ -193,16 +194,62 @@ class MulliganScopeTests(unittest.TestCase):
         parameters = inspect.signature(MulliganFlow).parameters
         self.assertNotIn("post_action_pause", parameters)
 
-    def test_fsm_does_not_wire_the_human_like_hook_into_mulligan(self):
+    def test_fsm_wires_the_human_like_hook_only_into_recommendation_flow(self):
         import FSM_action
 
-        source = inspect.getsource(
-            FSM_action.initialize_recommendation_automation)
-        mulligan = source.split("auto_mulligan_flow = MulliganFlow(", 1)[1]
-        mulligan = mulligan.split("recommendation_flow = RecommendationFlow(", 1)[0]
-        self.assertNotIn("post_action_pause", mulligan)
-        # 对局内的 RecommendationFlow 仍然保留这个挂点。
-        self.assertIn("post_action_pause=_human_like_post_action_pause", source)
+        config = SimpleNamespace(
+            recommendation_roi=(1, 2, 3, 4),
+            mulligan_recommendation_roi=(5, 6, 7, 8),
+            mulligan_post_ocr_delay_seconds=0.0,
+            result_timeout_seconds=1.0,
+            post_action_delay_seconds=0.2,
+            draw_extra_delay_per_card_seconds=0.0,
+        )
+        parser = SimpleNamespace(
+            normalize_action_text=lambda text: text,
+            parse=lambda *_args: None,
+        )
+        reader = SimpleNamespace(backend=object())
+        validator = object()
+        mulligan_kwargs = {}
+        recommendation_kwargs = {}
+
+        def fake_mulligan_flow(*_args, **kwargs):
+            mulligan_kwargs.update(kwargs)
+            return object()
+
+        def fake_recommendation_flow(*_args, **kwargs):
+            recommendation_kwargs.update(kwargs)
+            return object()
+
+        with (
+            patch.object(FSM_action, "RecommendationConfig", lambda: config),
+            patch.object(
+                FSM_action, "DesktopCapture", lambda *_a, **_k: object()
+            ),
+            patch.object(FSM_action, "recommendation_config", None),
+            patch.object(FSM_action, "recommendation_capture", None),
+            patch.object(FSM_action, "mulligan_capture", None),
+            patch.object(FSM_action, "recommendation_parser", parser),
+            patch.object(FSM_action, "recommendation_reader", reader),
+            patch.object(FSM_action, "mulligan_reader", object()),
+            patch.object(FSM_action, "recommendation_validator", validator),
+            patch.object(FSM_action, "auto_mulligan_flow", None),
+            patch.object(FSM_action, "recommendation_flow", None),
+            patch.object(FSM_action, "MulliganFlow", fake_mulligan_flow),
+            patch.object(
+                FSM_action,
+                "RecommendationFlow",
+                fake_recommendation_flow,
+            ),
+        ):
+            FSM_action.initialize_recommendation_automation()
+
+        self.assertNotIn("post_action_pause", mulligan_kwargs)
+        self.assertIs(
+            FSM_action._human_like_post_action_pause,
+            recommendation_kwargs["post_action_pause"],
+        )
 
 
 if __name__ == "__main__":

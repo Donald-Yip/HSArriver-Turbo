@@ -1,6 +1,6 @@
 # R02A Test Inventory
 
-> 状态：R02A 盘点完成；R02C1 已按 Batch 1 删除 5 个批准候选，R02C2 已按 Batch 2 删除 19 个浮窗源码串候选，均由行为测试替代。其余 `candidate-delete` 仍只是 R02C 候选，必须先创建并通过替代测试。
+> 状态：R02A 盘点完成；R02C1 已按 Batch 1 删除 5 个批准候选，R02C2 已按 Batch 2 删除 19 个浮窗源码串候选，R02C3 已按 Batch 3 删除 11 个非浮窗源码串候选，均由行为测试替代。其余 `candidate-delete` 仍只是 R02C 候选，必须先创建并通过替代测试。
 
 ## 口径
 
@@ -144,8 +144,8 @@
 | `test_click_safety_checks.py::ClickSafetyCheckRemovalTests` | `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | deleted (R02C1) | 两个危险验收已由 5 个 fail-closed/合法路径测试替代；见上方 R02C1 删除记录。 |
 | `test_friendly_hand_target_battlecries.py::FriendlyHandTargetBattlecryTests` | `test_unreadable_card_data_falls_back_to_the_legacy_cards` | rewrite | 行为值得保留，改为注入 metadata reader fake，不 patch 私有函数。 |
 | `test_hand_or_board_targets.py::HandOrBoardCardDataTests` | `test_unreadable_card_data_falls_back_to_the_legacy_card` | rewrite | 同上，改为构造损坏 reader/fake port。 |
-| `test_fsm_liveness_stop.py::LoopWiringTests` | `test_main_loop_and_battling_call_the_check` | candidate-delete | 源码串断言；改为 fake loop 计数 `check_hearthstone_liveness` 调用。 |
-| `test_human_like_scope.py::MulliganScopeTests` | `test_fsm_does_not_wire_the_human_like_hook_into_mulligan` | candidate-delete | 源码切片断言；改为构造 fake flow 并断言两处 post-action 参数。 |
+| `test_fsm_liveness_stop.py::LoopWiringTests` | `test_main_loop_and_battling_call_the_check` | replaced (R02C3) | 已由 `test_main_loop_and_battling_call_the_check_once_before_stopping` 通过 fake loop 计数 `check_hearthstone_liveness` 的出口调用替代。 |
+| `test_human_like_scope.py::MulliganScopeTests` | `test_fsm_does_not_wire_the_human_like_hook_into_mulligan` | replaced (R02C3) | 已由 `test_fsm_wires_the_human_like_hook_only_into_recommendation_flow` 通过 fake flow 构造参数替代：MulliganFlow 无挂点，RecommendationFlow 有挂点。 |
 | `test_hsctl.py::TableDriftTests` | `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | deleted (R02C1) | 私有表互相比较已删除；由 5 个 CLI 可观察输出/参数契约测试替代。 |
 | `test_hearthstone_liveness.py::NativeProcessTests` | `test_can_enumerate_processes`, `test_finds_this_python_process` | move-native | 只有两个真实 ctypes 进程枚举方法归入 opt-in Windows smoke；`test_returns_bool_for_unknown_process` 与 `test_unreadable_process_list_is_unknown` 注入 fake，保留默认 headless。 |
 | `test_overlay_dpi_scaling.py::WindowWiringTests` | `test_run_computes_the_scale_and_pins_tk_font_scaling`, `test_run_sizes_the_window_through_px`, `test_detail_wrap_uses_the_scaled_window_width` | replaced (R02C2) | 已由 `test_window_run_applies_dpi_scale_to_tk_and_geometry`、`test_window_and_minimized_bar_use_scaled_geometry`、`test_status_detail_wrap_uses_scaled_window_width` 通过 fake Tk scaling/geometry/wraplength 替代。 |
@@ -155,12 +155,12 @@
 | `test_overlay_tk_lifecycle.py::RunTeardownSourceTests` | `test_frame_must_be_released_before_collecting`, `test_start_threads_the_wrapper_not_run` | replaced (R02C2) | 已由 `test_wrapper_collects_after_run_returns` 与 `test_start_records_wrapper_as_thread_target` 替代；同文件其余源码断言也改为 wrapper 行为。 |
 | `test_overlay_window_slider.py::SliderWiringTests` | `test_run_builds_a_custom_canvas_slider`, `test_root_drag_ignores_events_from_the_slider` | replaced (R02C2) | 已由 `test_slider_canvas_events_update_value_and_apply_on_release` 与 `test_root_drag_ignores_slider_events` 替代。 |
 | `test_region_overlay_button.py::OverlayButtonTests` | `test_calibrate_button_exists_and_is_short` | replaced (R02C2) | 已由 `test_calibrate_button_dispatches_callback` 通过 fake Button 调用与校准回调 spy 替代。 |
-| `test_start_latency.py::NoFixedSleepTests/StartMilestoneTests/StartingFlagTests/OverlayStartingFeedbackTests` | `test_main_menu_action_does_not_wait_three_seconds`, `test_choosing_hero_action_does_not_wait_two_seconds`, `test_both_entry_states_log_a_milestone`, `test_overlay_renders_starting_text`, `test_start_accepts_the_is_starting_callback` | candidate-delete | 源码串断言；改为 fake clock 不推进、milestone logger spy、starting callback/widget 状态测试。 |
+| `test_start_latency.py::NoFixedSleepTests/OverlayStartingFeedbackTests` | `test_main_menu_action_does_not_wait_three_seconds`, `test_choosing_hero_action_does_not_wait_two_seconds`, `test_both_entry_states_log_a_milestone`, `test_overlay_renders_starting_text`, `test_start_accepts_the_is_starting_callback` | replaced (R02C3) | 已由 fake clock 睡眠记录、milestone logger spy、fake widget 的「启动中…」按钮状态和 `start(is_starting=...)` 回调接线测试替代。 |
 | `test_window_tracker.py::TrackerTests` | `test_ensure_started_is_idempotent`, `test_stop_stops_recording`, `test_rehook_when_handle_changes`, `test_wait_ready_sees_the_hook_after_startup`, `test_wait_ready_gives_up_when_the_hook_fails`, `test_wait_ready_never_blocks_when_nothing_is_starting` | rewrite | 现用 `time.time()` + `time.sleep(0.01)` 轮询后台 hook 线程，最长 2s；改为 Event/Condition/可注入同步器，禁止实时轮询。 |
 | `test_surrender_frontend.py::FrontendRoundTripTests` | `test_nested_config_survives_the_form` | rewrite | Node 前端往返是真实契约；固定 `encoding="utf-8"`、删除机器路径并移到 opt-in web integration。 |
-| `test_version.py::SurfaceTests` | `test_overlay_draws_version_label`, `test_cli_version_flag_uses_module` | candidate-delete | 读源码文件；改为公开 CLI `--version` 与浮窗版本回调/标签行为。 |
-| `test_web_admin_banner.py::AdminWarningBannerTests` | `test_main_prints_the_banner_only_for_non_admins` | candidate-delete | `inspect.getsource(web_ui.main)`；改为 patch admin bool、捕获 stdout 的 main() 行为测试。 |
-| `test_web_logs_wiring.py::OverlayWiringTests` | `test_run_uses_the_log_row_and_confirms_before_clearing` | candidate-delete | 源码串断言；改为 fake widget factory、日志回调和确认取消路径测试。 |
+| `test_version.py::SurfaceTests` | `test_overlay_draws_version_label`, `test_cli_version_flag_uses_module` | replaced (R02C3) | 已由 `test_overlay_renders_version_text_next_to_brand` 与 `test_cli_version_flag_prints_module_label` 通过 fake Label 树和公开 `hsctl.py --version` 子进程替代。 |
+| `test_web_admin_banner.py::AdminWarningBannerTests` | `test_main_prints_the_banner_only_for_non_admins` | replaced (R02C3) | 已由 `test_main_outputs_the_banner_only_for_non_admins` 通过 patch admin bool 并捕获 `main()` stdout 替代。 |
+| `test_web_logs_wiring.py::OverlayWiringTests` | `test_run_uses_the_log_row_and_confirms_before_clearing` | replaced (R02C3) | 已由 `test_run_renders_log_row_and_clears_only_after_confirmation` 通过 fake widget 树、日志回调和确认取消/确认两路径替代。 |
 | `test_web_selfcheck_api.py::SelfcheckCacheTests/SelfcheckApiTests` | `test_result_is_cached_until_forced`, `test_status_carries_the_summary_after_a_run`, `test_api_selfcheck_wraps_the_result` | rewrite | 私有 patch；注入 fake selfcheck runner 并保留 API/cache 行为。 |
 
 ## 发现的主要垃圾测试类型

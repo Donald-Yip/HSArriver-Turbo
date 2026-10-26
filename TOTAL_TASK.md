@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02C2: overlay source-string test replacement (ready for review).
+R02C3: non-overlay source-string test replacement (fix round 1 complete; ready for re-review).
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R02C2-overlay-tests`, based on `develop` at `15ab7f8d99b84537275669d8a92676cb5bfb1512`
+- Current feature branch: `feature/R02C3-non-overlay-tests`, based on `develop` at `55d1be9eea0d5fd7ce0513034499f60a3db86617`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -41,7 +41,7 @@ R02C2: overlay source-string test replacement (ready for review).
 | R02B | done | Architecture, scope, CI and PR gates | R02A |
 | R02C1 | done | Safe click behavior and CLI contract tests | R02B |
 | R02C2 | done | Overlay test replacement | R02C1 |
-| R02C3 | planned | Non-overlay test replacement | R02C2 |
+| R02C3 | done | Non-overlay test replacement | R02C2 |
 | R02C4 | planned | Native and Node isolation | R02C3 |
 | R02C5 | planned | Headless finalization | R02C4 |
 | R03 | planned | Domain contracts | R02C5 |
@@ -118,4 +118,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Controller independently reviews R02C2 overlay test replacement. Commit only after focused, headless, compile, architecture, and scope gates are confirmed.
+Controller re-reviews R02C3 fix round 1. Commit only after focused, headless, compile, architecture, and scope gates are confirmed.

@@ -7,9 +7,11 @@
 乱码），文案重复 3 遍。
 """
 
-import inspect
 import io
 import unittest
+from contextlib import redirect_stdout
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import web_ui
 
@@ -57,13 +59,44 @@ class AdminWarningBannerTests(unittest.TestCase):
         """重定向到文件/管道时不能发转义序列（否则日志里全是乱码）。"""
         self.assertFalse(web_ui._enable_console_ansi(io.StringIO()))
 
-    def test_main_prints_the_banner_only_for_non_admins(self):
-        source = inspect.getsource(web_ui.main)
+    def test_main_outputs_the_banner_only_for_non_admins(self):
+        class _NoopThread:
+            def __init__(self, *_args, **_kwargs):
+                pass
 
-        self.assertIn("if not IS_ADMIN:", source)
-        self.assertIn("_print_admin_warning()", source)
-        # 旧写法（拆成两行 print，且"建议以管理员身份"无条件打印）已移除。
-        self.assertNotIn("当前不是管理员权限，自动化鼠标/键盘操作可能失效，", source)
+            def start(self):
+                return None
+
+        server = SimpleNamespace(serve_forever=lambda: None)
+
+        def run_main(is_admin):
+            output = io.StringIO()
+            with (
+                patch.object(web_ui, "IS_ADMIN", is_admin),
+                patch.object(web_ui.os, "chdir"),
+                patch.object(web_ui.threading, "Thread", _NoopThread),
+                patch.object(web_ui, "_bind_watchdog_restarter"),
+                patch.object(web_ui, "_register_hotkey"),
+                patch.object(web_ui, "load_config", return_value={}),
+                patch.object(web_ui, "_apply_constants"),
+                patch.object(web_ui, "_boot_resume_schedule"),
+                patch.object(web_ui, "start_selfcheck_async"),
+                patch.object(web_ui.update_check, "start_periodic"),
+                patch.object(web_ui, "_ControlServer", return_value=server),
+                patch.object(web_ui, "_write_port_file"),
+                patch.object(web_ui, "_clear_port_file"),
+                patch.object(web_ui.time, "sleep", side_effect=KeyboardInterrupt),
+                patch.object(web_ui.sys, "argv", ["web_ui.py", "--no-browser"]),
+                redirect_stdout(output),
+            ):
+                web_ui.main()
+            return output.getvalue()
+
+        non_admin_output = run_main(False)
+        admin_output = run_main(True)
+
+        self.assertIn(web_ui.ADMIN_WARNING_TITLE, non_admin_output)
+        self.assertNotIn(web_ui.ADMIN_WARNING_TITLE, admin_output)
 
 
 if __name__ == "__main__":

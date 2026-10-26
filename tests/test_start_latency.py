@@ -13,13 +13,13 @@
 结束（含异常）清掉，浮窗据此显示「启动中…」。
 """
 
-import inspect
 import unittest
 from unittest.mock import patch
 
 import FSM_action
 import log_overlay
 import web_ui
+from tests.helpers.fake_tk import overlay_harness
 
 
 class _SyncThread:
@@ -42,21 +42,95 @@ class _SyncThread:
 
 
 # ================================================================ 固定等待
+class _FakeClock:
+    """单调时钟 + 睡眠记录器：让等待成本可测量，而不是锁死调用形状。"""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        seconds = float(seconds)
+        if seconds < 0:
+            raise ValueError(f"negative sleep: {seconds}")
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    @property
+    def elapsed(self):
+        return self.now
+
+
 class NoFixedSleepTests(unittest.TestCase):
-    def test_main_menu_action_does_not_wait_three_seconds(self):
-        source = inspect.getsource(FSM_action.MainMenuAction)
-        self.assertNotIn("time.sleep(3)", source,
-                         "主界面已经认出，enter_battle 自己会等，不能再死等 3 秒")
+    def _run_main_menu(self, milestones):
+        import battle_entry
 
-    def test_choosing_hero_action_does_not_wait_two_seconds(self):
-        source = inspect.getsource(FSM_action.ChoosingHeroAction)
-        self.assertNotIn("time.sleep(2)", source,
-                         "段位读取本来就有重试，不能再死等 2 秒")
+        clock = _FakeClock()
+        with (
+            patch.object(FSM_action, "print_out"),
+            patch.object(FSM_action.time, "sleep", side_effect=clock.sleep),
+            patch.object(FSM_action.time, "monotonic", side_effect=clock.monotonic),
+            patch.object(FSM_action, "_start_milestone", side_effect=milestones.append),
+            patch.object(battle_entry, "enter_battle", return_value={"ok": True}),
+        ):
+            result = FSM_action.MainMenuAction()
+        return result, clock
 
-    def test_both_entry_states_log_a_milestone(self):
-        self.assertIn("_start_milestone", inspect.getsource(FSM_action.MainMenuAction))
-        self.assertIn("_start_milestone",
-                      inspect.getsource(FSM_action.ChoosingHeroAction))
+    def _run_choosing_hero(self, milestones):
+        clock = _FakeClock()
+        saved_count = FSM_action.choose_hero_count
+        try:
+            FSM_action.choose_hero_count = 0
+            with (
+                patch.object(FSM_action, "print_out"),
+                patch.object(FSM_action, "quitting_flag", False),
+                patch.object(FSM_action, "stop_after_current_game", False),
+                patch.object(FSM_action.time, "sleep", side_effect=clock.sleep),
+                patch.object(
+                    FSM_action.time, "monotonic", side_effect=clock.monotonic
+                ),
+                patch.object(FSM_action, "_read_rank_target", return_value=""),
+                patch.object(
+                    FSM_action, "_start_milestone", side_effect=milestones.append
+                ),
+                patch.object(FSM_action.click, "run_hearthstone_action"),
+            ):
+                result = FSM_action.ChoosingHeroAction()
+        finally:
+            FSM_action.choose_hero_count = saved_count
+        return result, clock
+
+    def test_main_menu_action_uses_one_frame_clock_without_long_wait(self):
+        milestones = []
+        result, clock = self._run_main_menu(milestones)
+
+        self.assertEqual(FSM_action.FSM_CHOOSING_HERO, result)
+        self.assertTrue(clock.sleeps)
+        self.assertTrue(all(0 <= wait < 2 for wait in clock.sleeps))
+        self.assertLess(clock.elapsed, 1.0)
+        self.assertIn("已点「传统对战」并认出选套牌界面", milestones)
+
+    def test_choosing_hero_action_uses_one_frame_clock_without_long_wait(self):
+        milestones = []
+        result, clock = self._run_choosing_hero(milestones)
+
+        self.assertEqual(FSM_action.FSM_MATCHING, result)
+        self.assertTrue(any(0.9 <= wait <= 1.1 for wait in clock.sleeps))
+        self.assertTrue(all(0 <= wait < 2 for wait in clock.sleeps))
+        self.assertLess(clock.elapsed, 2.0)
+        self.assertEqual(["段位检测完成", "已点「开始匹配」"], milestones)
+
+    def test_entry_actions_emit_start_milestones(self):
+        main_milestones = []
+        hero_milestones = []
+        self._run_main_menu(main_milestones)
+        self._run_choosing_hero(hero_milestones)
+
+        self.assertIn("已点「传统对战」并认出选套牌界面", main_milestones)
+        self.assertEqual(["段位检测完成", "已点「开始匹配」"], hero_milestones)
 
 
 # ================================================================ 启动里程碑
@@ -219,13 +293,42 @@ class StartingFlagTests(unittest.TestCase):
 
 # ================================================================ 浮窗反馈
 class OverlayStartingFeedbackTests(unittest.TestCase):
-    def test_overlay_renders_starting_text(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("_IS_STARTING", source)
-        self.assertIn("启动中…", source)
+    def test_overlay_renders_starting_button_state(self):
+        with overlay_harness(
+            _IS_RUNNING=lambda: False,
+            _IS_STARTING=lambda: True,
+        ) as ui:
+            button = ui.button("启动中…")
 
-    def test_start_accepts_the_is_starting_callback(self):
-        self.assertIn("is_starting", inspect.getsource(log_overlay.start))
+        self.assertEqual("disabled", button.options["state"])
+        self.assertEqual(log_overlay.DISABLED, button.options["bg"])
+
+    def test_start_installs_the_is_starting_callback(self):
+        callback = lambda: True  # noqa: E731
+        saved = (
+            log_overlay._IS_STARTING,
+            log_overlay._STARTED[0],
+            log_overlay._THREAD,
+        )
+        try:
+            log_overlay._STARTED[0] = False
+            log_overlay._STOP.clear()
+            log_overlay._CLOSING.clear()
+            with (
+                patch.object(log_overlay, "_run"),
+                patch.object(log_overlay.threading, "Thread", _SyncThread),
+            ):
+                status = log_overlay.start(is_starting=callback)
+            self.assertEqual(log_overlay.OPEN_STARTED, status)
+            self.assertIs(callback, log_overlay._IS_STARTING)
+        finally:
+            (
+                log_overlay._IS_STARTING,
+                log_overlay._STARTED[0],
+                log_overlay._THREAD,
+            ) = saved
+            log_overlay._STOP.clear()
+            log_overlay._CLOSING.clear()
 
     def test_web_ui_passes_the_starting_callback_to_the_overlay(self):
         captured = {}

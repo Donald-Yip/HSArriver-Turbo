@@ -121,13 +121,38 @@ class LivenessStopTests(unittest.TestCase):
 class LoopWiringTests(unittest.TestCase):
     """主循环与对局循环都要调用存活检测（否则闪退还是会空转）。"""
 
-    def test_main_loop_and_battling_call_the_check(self):
-        import inspect
+    def test_main_loop_and_battling_call_the_check_once_before_stopping(self):
+        calls = []
+        saved_flag = FSM_action.quitting_flag
 
-        source = inspect.getsource(FSM_action.AutoHS_automata)
-        self.assertIn("check_hearthstone_liveness()", source)
-        battling = inspect.getsource(FSM_action.Battling)
-        self.assertIn("check_hearthstone_liveness()", battling)
+        def stop_after_check():
+            calls.append(1)
+            FSM_action.quitting_flag = True
+
+        try:
+            for entrypoint in (FSM_action.AutoHS_automata, FSM_action.Battling):
+                with self.subTest(entrypoint=entrypoint.__name__):
+                    calls.clear()
+                    FSM_action.quitting_flag = False
+                    with (
+                        patch.object(
+                            FSM_action,
+                            "check_hearthstone_liveness",
+                            side_effect=stop_after_check,
+                        ),
+                        patch.object(FSM_action, "_reset_start_milestones"),
+                        patch.object(
+                            FSM_action.get_screen,
+                            "test_hs_available",
+                            return_value=False,
+                        ),
+                        patch.object(FSM_action, "print_out"),
+                    ):
+                        with self.assertRaises(SystemExit):
+                            entrypoint()
+                    self.assertEqual(1, len(calls))
+        finally:
+            FSM_action.quitting_flag = saved_flag
 
     def test_init_resets_the_monitor(self):
         calls = []

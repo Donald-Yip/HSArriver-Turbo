@@ -16,11 +16,15 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+import log_overlay
 import version
+from tests.helpers.fake_tk import overlay_harness
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -101,15 +105,18 @@ class SurfaceTests(unittest.TestCase):
         self.assertEqual(version.NAME, log_overlay.BRAND_NAME)
         self.assertEqual(version.version_label(), log_overlay.VERSION_TEXT)
 
-    def test_overlay_draws_version_label(self):
-        src = (ROOT / "log_overlay.py").read_text(encoding="utf8")
-        self.assertIn("text=VERSION_TEXT", src)
-        # 品牌名左、版本号右，同一行。263px 宽里「居中品牌名 + 右下角版本」会
-        # 叠在一起（实测把名字压成 "HSLegendAr"），所以锁住左右分栏的写法。
-        # 格式化器可能把 .pack(...) 折成多行，断言前先归一化空白。
-        flat = " ".join(src.split())
-        self.assertIn('font=VERSION_FONT).pack( side="right"', flat)
-        self.assertIn('side="left", padx=(px(10), 0)', src)
+    def test_overlay_renders_version_text_next_to_brand(self):
+        with overlay_harness(_IS_RUNNING=lambda: True) as ui:
+            self.assertTrue(any(
+                label.packed
+                for label in ui.widgets_of("label", text=version.NAME)
+            ))
+            self.assertTrue(any(
+                label.packed
+                for label in ui.widgets_of(
+                    "label", text=log_overlay.VERSION_TEXT
+                )
+            ))
 
     def test_overlay_version_text_fits_brand_row(self):
         """浮窗不加宽，版本串必须短到能和品牌名同排。
@@ -123,12 +130,19 @@ class SurfaceTests(unittest.TestCase):
         self.assertLessEqual(len(log_overlay.VERSION_TEXT), 11,
                              "版本串太长，浮窗品牌行放不下")
 
-    def test_cli_version_flag_uses_module(self):
-        src = (ROOT / "hsctl.py").read_text(encoding="utf8")
-        self.assertIn("version_label()", src)
-        self.assertNotIn('HSCTL_VERSION = "1.0.0"', src,
-                         "hsctl 里不该再有第二份写死的版本号")
+    def test_cli_version_flag_prints_module_label(self):
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "hsctl.py"), "--version"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
 
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual(f"hsctl {version.version_label()}", completed.stdout.strip())
 
 if __name__ == "__main__":
     unittest.main()
