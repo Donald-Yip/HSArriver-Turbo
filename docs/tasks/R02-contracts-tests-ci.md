@@ -105,3 +105,5 @@ test(R02): rationalize tests and add headless contract gates
 
 - Implementer: `docs/agent/reports/R02-implementer.md`
 - Reviewer: `docs/agent/reviews/R02-review.md`
+
+> Superseded by R02A, R02B, and R02C. This umbrella task is retained for traceability only.

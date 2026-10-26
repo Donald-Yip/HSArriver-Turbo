@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R02: contract, golden replay, CI, and test rationalization.
+R02B: architecture, scope, CI, and PR gates.
 
 ## Branch And Environment
 
@@ -37,8 +37,10 @@ R02: contract, golden replay, CI, and test rationalization.
 |---|---|---|---|
 | R00 | done | Governance and branch baseline | - |
 | R01 | done | uv environment baseline | R00 |
-| R02 | planned | Contract, golden replay, CI and architecture gates | R01 |
-| R03 | planned | Domain contracts | R02 |
+| R02A | done | Test inventory and classification | R01 |
+| R02B | planned | Architecture, scope, CI and PR gates | R02A |
+| R02C | planned | Headless test rationalization | R02B |
+| R03 | planned | Domain contracts | R02C |
 | R04 | planned | Application ports and runtime controls | R03 |
 | R05 | planned | Plan and execution pipeline | R04 |
 | R06 | planned | Data adapters | R05 |

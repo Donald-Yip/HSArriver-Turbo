@@ -19,3 +19,7 @@ Ruling: Treat the existing test count as inventory, not value; keep behavior/con
 ## 2026-10-27 - Garbage-Code Handling
 
 Ruling: Refactor garbage code immediately only when it is inside the current task scope and traceable to a root-cause diagnosis; otherwise create a follow-up task instead of mixing unrelated cleanup into the current commit - keeps progress honest while preventing drift.
+
+## 2026-10-27 - Split R02
+
+Ruling: Split R02 into R02A inventory, R02B CI/architecture gates, and R02C test rationalization - the original task combined irreversible test deletion with gate creation and risked coverage loss - if wrong, the three sequential commits can be reverted independently without touching production code.

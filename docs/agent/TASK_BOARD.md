@@ -6,7 +6,9 @@ Updated: 2026-10-27
 |---|---|---|---|---|
 | R00 | done | feature/R00-governance | - | Governance baseline |
 | R01 | done | feature/R01-uv-baseline | R00 | Uv-only environment |
-| R02 | planned | feature/R02-contracts-tests-ci | R01 | Contracts, golden replay, CI, test rationalization |
+| R02A | done | feature/R02A-test-inventory | R01 | Test inventory and classification |
+| R02B | planned | feature/R02B-ci-gates | R02A | Architecture, scope, CI, and PR gates |
+| R02C | planned | feature/R02C-test-rationalization | R02B | Headless test cleanup and replacement |
 | R03 | planned | feature/R03-domain-contracts | R02 | Domain models and rules |
 | R04 | planned | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
 | R05 | planned | feature/R05-plan-execution | R04 | Plan and execution pipeline |
