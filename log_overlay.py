@@ -152,6 +152,28 @@ SLIDER_TRACK_HEIGHT = 6
 SLIDER_TRACK_COLOR = "#333b4d"
 SLIDER_FILL_COLOR = ACCENT
 SLIDER_THUMB_COLOR = "#e8ecf2"
+
+
+def slider_sync_action(enabled: bool, value, current, step: int) -> str:
+    """「炉石窗口宽度」滑条这一拍该做什么（纯函数，方便单测）。
+
+    返回 ``"none"`` / ``"enable"`` / ``"disable"`` / ``"follow"``。
+
+    以前只在**开浮窗那一刻**判断一次炉石在不在：先开浮窗、后启动炉石，滑条就
+    永远灰着（用户 2026-10-26 反馈「炉石已经打开了，这个还是灰的」）。刷新循环
+    每拍调用这个判定，炉石出现/退出都能来回切换。
+    """
+    if not current:
+        # 读不到客户区：已经灰着就保持（别反复重绘闪烁），还亮着就置灰说明。
+        return "none" if not enabled else "disable"
+    if not enabled:
+        return "enable"
+    try:
+        changed = abs(int(value) - int(current)) >= max(1, int(step))
+    except (TypeError, ValueError):
+        changed = False
+    return "follow" if changed else "none"
+
 # 最小化（折叠成标题条）：浮窗是 WS_EX_TOOLWINDOW，没有任务栏条目，
 # 真 iconify() 之后用户没有任何入口还原，所以折叠成标题条 + 「展开」按钮。
 MINIMIZED_HEIGHT = 34
@@ -1939,16 +1961,28 @@ def _run() -> None:
             _draw_slider()
 
         def _sync_size_slider():
-            """刷新循环里同步滑条：炉石窗口被外部改动（如 tools 脚本）时跟上。"""
+            """刷新循环里同步滑条：炉石启动/退出、窗口被外部改动都要跟上。
+
+            以前这里只更新数值、从不再判断「能不能用」：先开浮窗后启动炉石，
+            滑条会一直灰着拖不动（用户 2026-10-26 反馈）。现在每拍按
+            `slider_sync_action()` 在 可用/置灰 之间切换。
+            """
             if slider["dragging"] or _WINDOW_WIDTH is None:
                 return
             try:
                 current = _WINDOW_WIDTH()
             except Exception:
                 current = None
-            if not current:
-                return
-            if abs(int(slider["value"]) - int(current)) >= _sw_step:
+            action = slider_sync_action(
+                slider["enabled"], slider["value"], current, _sw_step)
+            if action == "enable":
+                slider["enabled"] = True
+                _set_value(current)
+            elif action == "disable":
+                slider["enabled"] = False
+                size_value.config(text="炉石未运行")
+                _draw_slider()
+            elif action == "follow":
                 _set_value(current)
 
         # ---- buttons ---------------------------------------------------

@@ -352,6 +352,13 @@ def _log(level: str, msg: str):
 
 
 def _overlay_key(line: str) -> bool:
+    """这一行要不要进浮窗（浮窗地方小，只放跟挂机直接相关的）。
+
+    **环境自检不进浮窗**（用户 2026-10-26 口径）：自检结论在网页「环境自检」
+    卡片里看就够了；浮窗里那几行红字（尤其是「炉石客户区：读不到（炉石未
+    运行）」）既占地方又容易被当成挂机故障。它含「炉石」二字，不单独排除的话
+    会被下面的关键字匹配放进浮窗。
+    """
     keys = (
         "回合",
         "延时",
@@ -383,7 +390,9 @@ def _overlay_key(line: str) -> bool:
         "昵称",
         "用户 ID",
     )
-    return ("[OCR]" not in line) and any(k in line for k in keys)
+    return ("[OCR]" not in line
+            and "环境自检" not in line
+            and any(k in line for k in keys))
 
 
 # ---------------------------------------------------------------- 环境自检

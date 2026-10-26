@@ -107,5 +107,38 @@ class ResizeCallbackTests(unittest.TestCase):
             self.assertIsNone(web_ui._overlay_resize_window(960))
 
 
+class SliderSyncActionTests(unittest.TestCase):
+    """滑条该不该可用/置灰：必须每拍重新判断，不能只在开浮窗时判一次。
+
+    用户 2026-10-26 反馈：先开浮窗、后启动炉石，滑条一直是灰的拖不动。
+    """
+
+    def test_enables_when_hearthstone_shows_up(self):
+        self.assertEqual(
+            "enable",
+            log_overlay.slider_sync_action(False, 960, 2384, 16))
+
+    def test_disables_when_hearthstone_is_gone(self):
+        self.assertEqual(
+            "disable",
+            log_overlay.slider_sync_action(True, 2384, None, 16))
+
+    def test_staying_disabled_does_not_repaint(self):
+        self.assertEqual(
+            "none", log_overlay.slider_sync_action(False, 960, None, 16))
+
+    def test_follows_an_external_resize(self):
+        self.assertEqual(
+            "follow", log_overlay.slider_sync_action(True, 960, 2384, 16))
+
+    def test_small_changes_are_ignored(self):
+        self.assertEqual(
+            "none", log_overlay.slider_sync_action(True, 2384, 2390, 16))
+
+    def test_broken_values_do_not_crash(self):
+        self.assertEqual(
+            "none", log_overlay.slider_sync_action(True, "坏值", 2384, 16))
+
+
 if __name__ == "__main__":
     unittest.main()

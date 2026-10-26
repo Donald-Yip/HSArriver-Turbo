@@ -129,8 +129,18 @@ class SelfcheckLoggingTests(unittest.TestCase):
         self.assertNotIn("numpy", text)      # 通过的项不刷屏
 
     def test_selfcheck_lines_stay_out_of_the_overlay(self):
-        """自检明细不往浮窗里灌，浮窗只留对局关键行。"""
+        """自检明细不往浮窗里灌，浮窗只留对局关键行。
+
+        注意「炉石客户区：读不到（炉石未运行）」这种行本身含「炉石」二字，
+        以前会被关键字匹配放进浮窗（用户 2026-10-26 反馈：浮窗一直红着两条
+        自检，看着像挂机出故障）；自检整类都不该进浮窗。
+        """
         self.assertFalse(web_ui._overlay_key("环境自检 ✅ Python 3.12（64 位）：3.12.14"))
+        self.assertFalse(web_ui._overlay_key(
+            "环境自检 ⚠ 炉石客户区：读不到（炉石未运行）；屏幕 3840×2160"
+            " —— 坐标换算依赖客户区几何；启动炉石后重跑自检即可看到实际客户区。"))
+        # 真正的存活告警仍必须进浮窗（别把「炉石」相关的告警一起过滤掉）。
+        self.assertTrue(web_ui._overlay_key("⚠️ 炉石进程已退出，自动化已自动停止"))
 
 
 class SelfcheckApiTests(unittest.TestCase):
