@@ -6,10 +6,11 @@
 修法：开窗时按 Tk 报告的 DPI 算 UI_SCALE，几何一律经 px() 换算。
 """
 
-import inspect
 import unittest
+from unittest import mock
 
 import log_overlay
+from tests.helpers.fake_tk import overlay_harness
 
 
 class _FakeRoot:
@@ -113,24 +114,68 @@ class MinimizedGeometryTests(unittest.TestCase):
 
 
 class WindowWiringTests(unittest.TestCase):
-    """开窗流程必须真的把 UI_SCALE 算出来、几何走 px()。"""
+    """The window build must apply DPI scaling to both fonts and geometry."""
 
-    def test_run_computes_the_scale_and_pins_tk_font_scaling(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("UI_SCALE = compute_ui_scale(root)", source)
-        # 字体（磅）与几何（px）必须按同一个 DPI 缩放，否则又会压扁。
-        self.assertIn('"tk", "scaling"', source)
-        self.assertIn("UI_SCALE * 96.0 / 72.0", source)
+    def test_window_run_applies_dpi_scale_to_tk_and_geometry(self):
+        with overlay_harness(dpi=144, _IS_RUNNING=lambda: False) as ui:
+            self.assertEqual(1.5, ui.ui_scale)
+            self.assertIn(("tk", "scaling", 2.0), ui.root.calls)
+            width, height, _x, _y = ui.root.geometries[0].replace("+", "x").split("x")
+            self.assertEqual(str(log_overlay.px(log_overlay.WINDOW_WIDTH)), width)
+            self.assertEqual(str(log_overlay.px(log_overlay.WINDOW_HEIGHT)), height)
 
-    def test_run_sizes_the_window_through_px(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("W, H = px(WINDOW_WIDTH), px(WINDOW_HEIGHT)", source)
-        self.assertIn("px(MINIMIZED_HEIGHT)", source)
-        self.assertNotIn("W, H = WINDOW_WIDTH, WINDOW_HEIGHT", source)
+    def test_window_and_minimized_bar_use_scaled_geometry(self):
+        with overlay_harness(dpi=144, _IS_RUNNING=lambda: False) as ui:
+            mini_bar = ui.label(log_overlay.RESTORE_TEXT).parent
+            self.assertEqual(log_overlay.px(log_overlay.MINIMIZED_HEIGHT), mini_bar.options["height"])
 
-    def test_detail_wrap_uses_the_scaled_window_width(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("detail_wrap_px(\n                px(WINDOW_WIDTH),", source)
+            ui.label(log_overlay.RESTORE_TEXT).fire("<Button-1>")
+            expected = log_overlay.minimized_geometry(
+                log_overlay.px(log_overlay.WINDOW_WIDTH),
+                log_overlay.px(log_overlay.WINDOW_HEIGHT),
+                ui.root.winfo_x(),
+                ui.root.winfo_y(),
+                collapsed=True,
+                min_height=log_overlay.px(log_overlay.MINIMIZED_HEIGHT),
+            )
+            self.assertEqual(expected, ui.root.geometries[-1])
+
+    def test_status_detail_wrap_uses_scaled_window_width(self):
+        def detail_wraplengths(dpi):
+            with overlay_harness(
+                dpi=dpi,
+                _IS_RUNNING=lambda: False,
+                _HUMAN_LIKE=lambda: {},
+                _CONCEDE_DETECT=lambda: {},
+                _LIVENESS=lambda: {},
+                _ACCOUNT=lambda: {},
+                _LOGS=lambda: {},
+            ) as ui:
+                lengths = {}
+                for name in ("活人感", "投降检测", "炉石", "账号", "日志"):
+                    row_labels = [
+                        child for child in ui.label(name).parent.children
+                        if child.kind == "label"
+                    ]
+                    lengths[name] = row_labels[3].options["wraplength"]
+                return lengths
+
+        calls = []
+        real = log_overlay.detail_wrap_px
+
+        def record(width, used):
+            calls.append(width)
+            return real(width, used)
+
+        with mock.patch.object(log_overlay, "detail_wrap_px", side_effect=record):
+            scaled = detail_wraplengths(144)
+        base = detail_wraplengths(96)
+
+        expected_width = log_overlay.px(log_overlay.WINDOW_WIDTH, 1.5)
+        self.assertTrue(calls)
+        self.assertTrue(all(width == expected_width for width in calls))
+        for name in ("活人感", "投降检测", "炉石", "账号", "日志"):
+            self.assertGreater(scaled[name], base[name], name)
 
     def test_base_constants_keep_the_design_values(self):
         # 263/802/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。

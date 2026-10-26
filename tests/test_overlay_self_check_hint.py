@@ -6,7 +6,6 @@
 ③ 是否校准过。
 """
 
-import inspect
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -14,6 +13,7 @@ from unittest import mock
 import log_overlay
 import version
 import web_ui
+from tests.helpers.fake_tk import overlay_harness
 
 
 class SelfCheckTextTests(unittest.TestCase):
@@ -73,6 +73,14 @@ class SelfCheckTextTests(unittest.TestCase):
                               log_overlay.self_check_text(payload))
 
 
+class _FakeThread:
+    def __init__(self, target=None, **_kwargs):
+        self.target = target
+
+    def start(self):
+        return None
+
+
 class SelfCheckButtonTests(unittest.TestCase):
     def test_button_sits_on_its_own_full_width_row(self):
         self.assertEqual((7, 0), log_overlay.BTN_LAYOUT["self_check"])
@@ -80,27 +88,66 @@ class SelfCheckButtonTests(unittest.TestCase):
         self.assertEqual("装好没反应？", log_overlay.SELF_CHECK_BUTTON_TEXT)
         self.assertEqual("装好没反应？按顺序自查", log_overlay.SELF_CHECK_TITLE)
 
-    def test_run_builds_the_button_and_the_info_dialog(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("self_check_btn", source)
-        self.assertIn("_place(self_check_btn, \"self_check\")", source)
-        self.assertIn("_info_dialog(", source)
-        self.assertIn("self_check_text(info)", source)
-        # 红色大字已经按用户要求删掉：源码里不应再有红字 Label。
-        self.assertNotIn("SELF_CHECK_HINT_COLOR", source)
-        self.assertNotIn("hint_label", source)
-        self.assertIn("def _info_dialog", inspect.getsource(log_overlay))
+    def test_self_check_button_opens_info_dialog_with_version_payload(self):
+        payload = {
+            "state": "latest",
+            "local_label": "v2026.10.24",
+            "latest_label": "v2026.10.24",
+        }
+        calls = []
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _VERSION_INFO=lambda: calls.append("version") or payload,
+        ) as ui:
+            button = ui.button(log_overlay.SELF_CHECK_BUTTON_TEXT)
+            self.assertEqual(log_overlay.WARN, button.options["bg"])
+            grid = button.grid_calls[-1]
+            self.assertEqual(log_overlay.BTN_LAYOUT["self_check"][0], grid["row"])
+            self.assertEqual(log_overlay.BTN_LAYOUT["self_check"][1], grid["column"])
+            self.assertEqual(log_overlay.BTN_SPAN["self_check"], grid["columnspan"])
+            red_hints = [
+                label for label in ui.widgets_of("label")
+                if label.options.get("fg") == log_overlay.DANGER
+                and "装好没反应" in str(label.options.get("text", ""))
+            ]
+            self.assertEqual([], red_hints)
+
+            with mock.patch.object(log_overlay, "_info_dialog") as dialog:
+                button.invoke()
+
+        self.assertEqual(["version"], calls)
+        dialog.assert_called_once()
+        args = dialog.call_args.args
+        self.assertEqual(log_overlay.SELF_CHECK_TITLE, args[1])
+        self.assertIn("已是最新", args[2])
+        self.assertIn("v2026.10.24", args[2])
 
     def test_height_only_grew_by_the_button_row(self):
         # 772（去掉红字的 880）→ 802：只多了「装好没反应？」按钮行。
         self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
 
-    def test_start_accepts_the_version_callback(self):
-        parameters = inspect.signature(log_overlay.start).parameters
-        self.assertIn("version_callback", parameters)
-        source = inspect.getsource(log_overlay.start)
-        self.assertIn("_VERSION_INFO = version_callback", source)
-        self.assertIn('"version_callback": version_callback', source)
+    def test_start_installs_version_callback_for_self_check(self):
+        callback = lambda: {"state": "latest"}
+        saved = (
+            log_overlay._VERSION_INFO,
+            log_overlay._STARTED[0],
+            log_overlay._THREAD,
+        )
+        try:
+            log_overlay._VERSION_INFO = None
+            log_overlay._STARTED[0] = False
+            log_overlay._THREAD = None
+            with (
+                mock.patch.object(log_overlay, "_join_previous_thread"),
+                mock.patch.object(log_overlay.threading, "Thread", _FakeThread),
+            ):
+                status = log_overlay.start(version_callback=callback)
+            self.assertEqual(log_overlay.OPEN_STARTED, status)
+            self.assertIs(callback, log_overlay._VERSION_INFO)
+        finally:
+            log_overlay._VERSION_INFO, log_overlay._STARTED[0], log_overlay._THREAD = saved
+            log_overlay._STOP.clear()
+            log_overlay._CLOSING.clear()
 
 
 class OverlayWiringTests(unittest.TestCase):

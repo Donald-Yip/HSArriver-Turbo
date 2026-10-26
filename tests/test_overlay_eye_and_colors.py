@@ -6,7 +6,6 @@
 3. 正文日志按标签着色，颜色只用浮窗现有调色板里的。
 """
 
-import inspect
 import json
 import tempfile
 import unittest
@@ -16,6 +15,7 @@ from unittest.mock import patch
 import config
 import log_overlay
 import web_ui
+from tests.helpers.fake_tk import FakeEvent, overlay_harness
 
 
 class _FakeThread:
@@ -133,14 +133,25 @@ class AccountEyeToggleTests(unittest.TestCase):
         )
         self.assertEqual("TestUser#12345", visible["detail"])
 
-    def test_eye_is_rendered_and_clickable(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("toggle_account_visibility()", source)
-        self.assertIn('bind("<Button-1>"', source)
-        # 眼睛放在「账号」行最右侧（pack side="right" 的第一个就是最右）
-        self.assertIn("with_eye=True", source)
-        self.assertIn('eye_box.pack(side="right"', source)
-
+    def test_eye_widget_toggles_visibility_on_click(self):
+        saved = log_overlay._ACCOUNT_VISIBLE[0]
+        toggles = []
+        try:
+            log_overlay._ACCOUNT_VISIBLE[0] = True
+            with overlay_harness(
+                _IS_RUNNING=lambda: True,
+                _ON_TOGGLE_ACCOUNT=toggles.append,
+            ) as ui:
+                eye = ui.label(log_overlay.EYE_ICON)
+                self.assertTrue(eye.placed)
+                self.assertEqual("right", eye.parent.pack_calls[-1]["side"])
+                self.assertEqual(log_overlay.EYE_COLOR_ON, eye.options["fg"])
+                self.assertEqual("break", eye.fire("<Button-1>", FakeEvent(eye)))
+                self.assertFalse(log_overlay.account_visible())
+                self.assertEqual([False], toggles)
+                self.assertEqual(log_overlay.EYE_COLOR_OFF, eye.options["fg"])
+        finally:
+            log_overlay._ACCOUNT_VISIBLE[0] = saved
 
 class AccountPreferencePersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -256,14 +267,19 @@ class LogColorTests(unittest.TestCase):
         ):
             self.assertEqual("alert", log_overlay.log_line_tag(line), line)
 
-    def test_renderer_uses_the_tag_function_and_configures_every_tag(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("log_line_tag(ln)", source)
-        self.assertIn("for tag_name, color in LOG_TAG_COLORS.items()", source)
-        for tag in log_overlay.LOG_TAG_COLORS:
-            self.assertIn(tag, source.replace("tag_name", tag))
-        self.assertNotIn('"act"', source)
-
+    def test_log_renderer_applies_alert_tag_and_every_palette_tag(self):
+        lines = log_overlay.deque([
+            ("[12:04:57 ERROR] 自动化线程异常退出", 1),
+        ], maxlen=2000)
+        with overlay_harness(_IS_RUNNING=lambda: True, lines=lines) as ui:
+            text = ui.one("text")
+            self.assertEqual(set(log_overlay.LOG_TAG_COLORS), set(text.tag_configs))
+            for tag, color in log_overlay.LOG_TAG_COLORS.items():
+                self.assertEqual(color, text.tag_configs[tag]["foreground"], tag)
+            self.assertIn("bold", text.tag_configs["alert"]["font"])
+            inserts = [op for op in text.operations if op[0] == "insert"]
+            self.assertTrue(inserts)
+            self.assertEqual(("alert",), inserts[-1][3])
 
 class ButtonLayoutTests(unittest.TestCase):
     def test_two_buttons_per_row_and_stop_after_alone(self):
@@ -297,64 +313,56 @@ class ButtonLayoutTests(unittest.TestCase):
         slots = list(log_overlay.BTN_LAYOUT.values())
         self.assertEqual(len(slots), len(set(slots)))
 
-    def test_destructive_buttons_guard_themselves(self):
-        """退出浮窗 ≠ 退出脚本；重启炉石/清理日志都必须先确认。"""
-        self.assertNotEqual(
-            log_overlay.BTN_LAYOUT["exit_overlay"], log_overlay.BTN_LAYOUT["exit"]
-        )
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn('_make_btn(btn_frame, "退出浮窗", NEUTRAL', source)
-        self.assertIn('_make_btn(btn_frame, "退出脚本", DANGER', source)
-        self.assertIn('_make_btn(btn_frame, "重启炉石", WARN', source)
-
-        body = source.split("def _call_exit_overlay", 1)[1]
-        body = body.split("exit_overlay_btn = ", 1)[0]
-        self.assertIn("_ON_EXIT_OVERLAY", body)
-        self.assertIn("stop", body)
-        self.assertNotIn("_ON_EXIT(", body)
-
-        restart = source.split("def _call_restart", 1)[1]
-        restart = restart.split("restart_btn = ", 1)[0]
-        self.assertIn("_confirm_restart(root)", restart)
-        self.assertIn("_ON_RESTART", restart)
-        self.assertIn("已取消重启炉石", restart)
-
-        # 确认小窗的实现（浮窗置顶，不用 messagebox），两个危险操作共用。
-        confirm = inspect.getsource(log_overlay._confirm_dialog)
-        self.assertIn('attributes("-topmost", True)', confirm)
-        self.assertIn("Hearthstone.exe", log_overlay.CONFIRM_RESTART_DETAIL)
-        self.assertIn("Log.config", log_overlay.CONFIRM_RESTART_DETAIL)
-        self.assertEqual("⚠  中止炉石并清空日志？", log_overlay.CONFIRM_RESTART_TITLE)
-
-        clear = source.split("def _call_clear_logs", 1)[1]
-        clear = clear.split("clear_logs_btn = ", 1)[0]
-        self.assertIn("_confirm_clear_logs(root, info)", clear)
-        self.assertIn("_ON_CLEAR_LOGS", clear)
-        self.assertIn("已取消清理脚本日志", clear)
-
-    def test_button_labels_have_no_tofu_glyphs(self):
-        """▶/⏹/⏸/💾/♻/🚪/✖/📊 这些字形在雅黑里没有，实机是方框（用户截图）。
-
-        「排版美观」的一部分：按钮/标题/延时行一律纯文字，别再放这些图标。
-        """
-        source = inspect.getsource(log_overlay._run)
-        for glyph in (
-            "▶",
-            "⏹",
-            "⏸",
-            "💾",
-            "♻",
-            "🚪",
-            "✖",
-            "📊",
-            "⏳",
-            "▁",
-            "▣",
-            "✓",
-            "✗",
+    def test_destructive_buttons_confirm_before_callbacks(self):
+        calls = []
+        with (
+            patch.object(log_overlay, "_confirm_restart", return_value=False) as confirm_restart,
+            patch.object(log_overlay, "_confirm_clear_logs", return_value=False) as confirm_clear,
         ):
-            self.assertNotIn(glyph, source)
+            with overlay_harness(
+                _IS_RUNNING=lambda: True,
+                _LOGS=lambda: {"files": 2},
+                _ON_RESTART=lambda: calls.append("restart"),
+                _ON_CLEAR_LOGS=lambda: calls.append("clear"),
+                _ON_EXIT_OVERLAY=lambda: calls.append("exit_overlay"),
+                _ON_EXIT=lambda: calls.append("exit"),
+            ) as ui:
+                restart = ui.button("重启炉石")
+                clear = ui.button("清理日志")
+                exit_overlay = ui.button("退出浮窗")
+                self.assertEqual(log_overlay.WARN, restart.options["bg"])
+                self.assertEqual(log_overlay.DANGER, ui.button("退出脚本").options["bg"])
+                self.assertEqual(log_overlay.NEUTRAL, exit_overlay.options["bg"])
 
+                restart.invoke()
+                clear.invoke()
+                self.assertEqual([], calls)
+
+                confirm_restart.return_value = True
+                confirm_clear.return_value = True
+                restart.invoke()
+                clear.invoke()
+                self.assertEqual(["restart", "clear"], calls)
+
+                exit_overlay.invoke()
+                self.assertTrue(any(delay == 150 for delay, _callback in ui.root.after_calls))
+
+        self.assertEqual(["restart", "clear", "exit_overlay"], calls)
+    def test_rendered_button_labels_are_plain_text(self):
+        glyphs = ("▶", "⏹", "⏸", "💾", "♻", "🚪", "✖", "📊", "⏳", "▁", "▣", "✓", "✗")
+        with overlay_harness(_IS_RUNNING=lambda: True) as ui:
+            labels = [str(w.options.get("text", "")) for w in ui.widgets_of("button")]
+            self.assertEqual(
+                {
+                    "开始对战", "中止", "本局结束后停止", "保存日志", "校准",
+                    "打开日志", "清理日志", "导出本次出错截屏与日志", "重启炉石",
+                    "退出浮窗", "退出脚本", "装好没反应？",
+                },
+                set(labels),
+            )
+            for label in labels:
+                for glyph in glyphs:
+                    self.assertNotIn(glyph, label)
     def test_spanning_rows(self):
         self.assertEqual(2, log_overlay.BTN_SPAN["exit"])
         self.assertEqual(6, log_overlay.BTN_LAYOUT["exit"][0])
@@ -377,43 +385,57 @@ class ButtonLayoutTests(unittest.TestCase):
                 if key != "self_check"]
         self.assertEqual(max(rows) + 1, row)
 
-    def test_window_metrics_and_grid_helpers(self):
-        # 旧版是 5 行、字号 10、pady 5；现在必须更小，否则省不出日志高度。
+    def test_button_grid_matches_layout_contract(self):
+        expected = {
+            "start": "开始对战", "halt": "中止", "stop_after": "本局结束后停止",
+            "save": "保存日志", "calibrate": "校准", "open_logs": "打开日志",
+            "clear_logs": "清理日志", "export_feedback": "导出本次出错截屏与日志",
+            "restart": "重启炉石", "exit_overlay": "退出浮窗",
+            "exit": "退出脚本", "self_check": "装好没反应？",
+        }
         self.assertLessEqual(log_overlay.BTN_FONT_SIZE, 9)
         self.assertLessEqual(log_overlay.BTN_PADY, 4)
-        # 用户要求收窄 10%（292 → 263）：说明放不下靠换行，不许再靠加宽窗口
-        # （加宽到 300 被用户打回："整个浮窗又变宽了"）。
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertLessEqual(log_overlay.WINDOW_WIDTH, int(292 * 0.9) + 1)
-        # 654 - 17（删副标题）→ 637；再 +56 给「日志」状态行与「打开日志/
-        # 清理日志」按钮行，+30 给「导出反馈」按钮行，+49 给「窗口宽度」滑条行，
-        # +30 给「装好没反应？」按钮行（自查弹窗入口；顶部红字已按用户要求删除）。
         self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
-
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("def _place(btn, key)", source)
-        for key in log_overlay.BTN_LAYOUT:
-            self.assertIn(f'_place({key}_btn, "{key}")', source)
-
-    def test_status_rows_put_name_and_value_next_to_each_other(self):
-        """说明列绝不能右对齐：名称和数值之间不能空出一大块。"""
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn('marker.pack(side="left", padx=_marker_pad()', source)
-        self.assertIn('name.pack(side="left"', source)
-        self.assertIn('value.pack(side="left"', source)
-        # 说明列可能被格式化器折成多行，先把空白归一化再断言（换行不该让测试挂掉）。
-        flat = " ".join(source.split())
-        self.assertIn('detail.pack( side="left", fill="x", expand=True', flat)
-        self.assertNotIn('detail.pack(side="right"', source)
-        self.assertNotIn('justify="right"', source)
-
-    def test_status_rows_wrap_instead_of_being_clipped(self):
-        """说明列按 wraplength 换行：绝不再被窗口右边缘切掉。"""
+        with overlay_harness(_IS_RUNNING=lambda: True) as ui:
+            for key, label in expected.items():
+                button = ui.button(label)
+                actual = button.grid_calls[-1]
+                self.assertEqual(log_overlay.BTN_LAYOUT[key][0], actual["row"], key)
+                self.assertEqual(log_overlay.BTN_LAYOUT[key][1], actual["column"], key)
+                self.assertEqual(log_overlay.BTN_SPAN.get(key, 1), actual["columnspan"], key)
+    def test_status_widgets_pack_left_to_right(self):
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _HUMAN_LIKE=lambda: {}, _CONCEDE_DETECT=lambda: {},
+            _LIVENESS=lambda: {}, _ACCOUNT=lambda: {}, _LOGS=lambda: {},
+        ) as ui:
+            for name in ("活人感", "投降检测", "炉石", "账号", "日志"):
+                row = ui.label(name).parent
+                labels = [child for child in row.children if child.kind == "label"]
+                self.assertEqual(4, len(labels), name)
+                marker, value, detail = labels[0], labels[2], labels[3]
+                self.assertEqual("●", marker.options["text"])
+                self.assertEqual("left", marker.pack_calls[-1]["side"])
+                self.assertEqual("left", ui.label(name).pack_calls[-1]["side"])
+                self.assertEqual("left", value.pack_calls[-1]["side"])
+                self.assertEqual("left", detail.pack_calls[-1]["side"])
+                self.assertTrue(detail.pack_calls[-1]["expand"])
+                self.assertEqual("left", detail.options["justify"])
+    def test_status_detail_widgets_have_wrap_budget(self):
         self.assertGreaterEqual(log_overlay._DETAIL_MAX_LINES, 2)
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("wraplength=wrap_px", source)
-        self.assertIn("detail_wrap_px(", source)
-
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _HUMAN_LIKE=lambda: {}, _CONCEDE_DETECT=lambda: {},
+            _LIVENESS=lambda: {}, _ACCOUNT=lambda: {}, _LOGS=lambda: {},
+        ) as ui:
+            details = [
+                widget for widget in ui.widgets_of("label")
+                if widget.options.get("wraplength")
+            ]
+            self.assertTrue(details)
+            for detail in details:
+                self.assertGreaterEqual(detail.options["wraplength"], log_overlay._DETAIL_MIN_PX)
     def test_detail_wrap_budget_never_goes_below_the_minimum(self):
         # 263 宽、圆点 25 + 名称 50 + 间距/内边距 22、数值 39 → 127
         self.assertEqual(127, log_overlay.detail_wrap_px(263, 136))
@@ -423,36 +445,23 @@ class ButtonLayoutTests(unittest.TestCase):
         )
         self.assertEqual(log_overlay._DETAIL_MIN_PX, log_overlay.detail_wrap_px(10, 0))
 
-    def test_overlay_can_be_minimized_to_a_title_bar(self):
-        """最小化 = 折叠成标题条（浮窗是 TOOLWINDOW，iconify 之后无法还原）。"""
-        self.assertLess(log_overlay.MINIMIZED_HEIGHT, log_overlay.WINDOW_HEIGHT)
-        self.assertEqual(
-            f"{log_overlay.WINDOW_WIDTH}x{log_overlay.MINIMIZED_HEIGHT}+8+9",
-            log_overlay.minimized_geometry(
-                log_overlay.WINDOW_WIDTH,
-                log_overlay.WINDOW_HEIGHT,
-                8,
-                9,
-                collapsed=True,
-            ),
-        )
-        self.assertEqual(
-            f"{log_overlay.WINDOW_WIDTH}x{log_overlay.WINDOW_HEIGHT}+8+9",
-            log_overlay.minimized_geometry(
-                log_overlay.WINDOW_WIDTH,
-                log_overlay.WINDOW_HEIGHT,
-                8,
-                9,
-                collapsed=False,
-            ),
-        )
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("def _set_collapsed(flag)", source)
-        self.assertIn("MINIMIZE_TEXT", source)
-        self.assertIn("RESTORE_TEXT", source)
-        self.assertIn("content.pack_forget()", source)
-        self.assertIn('mini_bar.pack(fill="x")', source)
-
+    def test_minimize_event_collapses_and_restores_window(self):
+        with overlay_harness(_IS_RUNNING=lambda: True) as ui:
+            mini_bar = ui.label(log_overlay.RESTORE_TEXT).parent
+            content = ui.label("自动化日志").parent.parent
+            self.assertTrue(content.packed)
+            self.assertFalse(mini_bar.packed)
+            ui.label(log_overlay.MINIMIZE_TEXT).fire("<Button-1>")
+            self.assertFalse(content.packed)
+            self.assertTrue(mini_bar.packed)
+            self.assertEqual("x", mini_bar.pack_calls[-1]["fill"])
+            collapsed_geometry = ui.root.geometries[-1]
+            ui.label(log_overlay.RESTORE_TEXT).fire("<Button-1>")
+            self.assertTrue(content.packed)
+            self.assertFalse(mini_bar.packed)
+            self.assertNotEqual(collapsed_geometry, ui.root.geometries[-1])
+            self.assertEqual("最小化", log_overlay.MINIMIZE_TEXT)
+            self.assertEqual("展开", log_overlay.RESTORE_TEXT)
     def test_minimize_button_is_plain_text_not_a_stray_glyph(self):
         """用户反馈「▁ 最小化」太丑：别再拿块状字形当按钮。"""
         self.assertEqual("最小化", log_overlay.MINIMIZE_TEXT)

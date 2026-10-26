@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""浮窗「炉石窗口宽度」滑条：回调接线 + 构建代码存在 + web_ui 传参。
+"""浮窗「炉石窗口宽度」滑条：事件行为、回调接线与 web_ui 传参。
 
-不真的开 Tk 窗口：只从源码/签名断言接线，和现有的浮窗接线测试同一套路。
+使用记录型 fake Tk 树，不打开真实窗口。
 """
 
 from __future__ import annotations
@@ -12,8 +12,10 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import hs_window
 import log_overlay
 import web_ui
+from tests.helpers.fake_tk import FakeEvent, overlay_harness
 
 
 class SliderWiringTests(unittest.TestCase):
@@ -22,23 +24,57 @@ class SliderWiringTests(unittest.TestCase):
         for name in ("window_width_callback", "on_resize_window"):
             self.assertIn(name, params)
 
-    def test_run_builds_a_custom_canvas_slider(self):
-        source = inspect.getsource(log_overlay._run)
-        # 自绘 Canvas 滑条（不用 tk.Scale：方钮丑 + 按下会连浮窗一起拖）。
-        self.assertIn("tk.Canvas(", source)
-        self.assertNotIn("tk.Scale(", source)
-        self.assertIn("SIZE_ROW_TITLE", source)
-        self.assertIn("_ON_RESIZE_WINDOW", source)
-        # 滑条在 widget 级吃掉事件（return "break"），别冒泡到 root 的拖窗 handler。
-        self.assertIn('return "break"', source)
-        self.assertIn('slider_canvas.bind("<B1-Motion>"', source)
-        self.assertIn('slider_canvas.bind("<ButtonRelease-1>"', source)
+    def test_slider_canvas_events_update_value_and_apply_on_release(self):
+        resized = []
 
-    def test_root_drag_ignores_events_from_the_slider(self):
-        source = inspect.getsource(log_overlay._run)
-        self.assertIn("def _from_slider(event)", source)
-        self.assertIn("_from_slider(event)", source)
-        self.assertIn('_drag["active"]', source)
+        def resize(width):
+            resized.append(width)
+            return [2300, 1294]
+
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _WINDOW_WIDTH=lambda: 1280,
+            _ON_RESIZE_WINDOW=resize,
+        ) as ui:
+            self.assertEqual(0, ui.tk.scale_calls)
+            canvas = next(
+                widget for widget in ui.widgets_of("canvas")
+                if ("<B1-Motion>", False) in widget.bindings
+            )
+            self.assertIn(("<Configure>", False), canvas.bindings)
+            self.assertIn(("<ButtonRelease-1>", False), canvas.bindings)
+            self.assertIn(log_overlay.SIZE_ROW_TITLE, [w.options.get("text") for w in ui.widgets_of("label")])
+
+            self.assertEqual("break", canvas.fire("<Button-1>", FakeEvent(canvas, x=0, y=5)))
+            self.assertEqual("960×540", next(
+                w.options["text"] for w in ui.widgets_of("label")
+                if w.options.get("text") == "960×540"
+            ))
+            self.assertEqual("break", canvas.fire("<B1-Motion>", FakeEvent(canvas, x=9999, y=5)))
+            max_size = f"{int(hs_window.MAX_16_9_WIDTH)}×{int(round(hs_window.MAX_16_9_WIDTH * 9 / 16))}"
+            self.assertIn(max_size, [w.options.get("text") for w in ui.widgets_of("label")])
+            self.assertEqual("break", canvas.fire("<ButtonRelease-1>", FakeEvent(canvas, x=9999, y=5)))
+
+        self.assertEqual([int(hs_window.MAX_16_9_WIDTH)], resized)
+
+    def test_root_drag_ignores_slider_events(self):
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _WINDOW_WIDTH=lambda: 1280,
+        ) as ui:
+            canvas = next(
+                widget for widget in ui.widgets_of("canvas")
+                if ("<B1-Motion>", False) in widget.bindings
+            )
+            original_geometry = list(ui.root.geometries)
+
+            ui.root.fire("<Button-1>", FakeEvent(canvas, x=10, y=10))
+            ui.root.fire("<B1-Motion>", FakeEvent(canvas, x=100, y=100))
+            self.assertEqual(original_geometry, ui.root.geometries)
+
+            ui.root.fire("<Button-1>", FakeEvent(ui.root, x=10, y=10))
+            ui.root.fire("<B1-Motion>", FakeEvent(ui.root, x=30, y=20))
+            self.assertNotEqual(original_geometry, ui.root.geometries)
 
     def test_slider_range_constants_exist_and_are_sane(self):
         self.assertLess(log_overlay.SIZE_SLIDER_MIN, log_overlay.SIZE_SLIDER_MAX)

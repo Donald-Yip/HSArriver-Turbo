@@ -9,7 +9,7 @@ Updated: 2026-10-27
 | R02A | done | feature/R02A-test-inventory | R01 | Test inventory and classification |
 | R02B | done | feature/R02B-ci-gates | R02A | Architecture, scope, CI, and PR gates |
 | R02C1 | done | feature/R02C1-safe-click-contracts | R02B | Safe click behavior and CLI contracts |
-| R02C2 | planned | feature/R02C2-overlay-tests | R02C1 | Overlay source-string replacement |
+| R02C2 | done | feature/R02C2-overlay-tests | R02C1 | Overlay source-string replacement |
 | R02C3 | planned | feature/R02C3-non-overlay-tests | R02C2 | Non-overlay source-string replacement |
 | R02C4 | planned | feature/R02C4-native-node | R02C3 | Native and Node isolation |
 | R02C5 | planned | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |

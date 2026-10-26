@@ -128,6 +128,14 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 - 一次只替换一个文件组，删除前运行新旧测试对照。
 - 门槛：fake widget tree/callback 测试证明文案、布局、回调和生命周期。
 
+#### R02C2 实现记录
+
+- 状态：已实现，待独立 review 与 commit。
+- 删除：Batch 2 台账中的精确 19 个方法；未删除其他测试。
+- 替代：`tests/helpers/fake_tk.py` 提供记录型 Tk/widget/event/geometry harness；19 个新测试通过点击、回调、grid/pack、wraplength、最小化/展开、滑条事件、线程 wrapper 与 teardown 顺序验证行为。
+- 生产代码：无改动；未改变浮窗用户可见行为。
+- 验证：7 个 focused 模块 `155 tests OK`；headless suite `1523 run / 1522 passed / 0 failures / 0 errors / 1 skipped`。
+
 ### Batch 3：非浮窗源码串（11）
 
 - 覆盖 `test_fsm_liveness_stop`、`test_human_like_scope`、`test_start_latency`、`test_web_admin_banner`、`test_web_logs_wiring`、`test_version`。

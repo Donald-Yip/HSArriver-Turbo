@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import log_overlay
+from tests.helpers.fake_tk import overlay_harness
 
 
 class _FakeThread:
@@ -20,13 +21,14 @@ class _FakeThread:
 class BrandHeaderTests(unittest.TestCase):
     """浮窗顶部品牌行：只留本项目大名（副标题按用户要求删掉了）。"""
 
-    def test_brand_name_has_no_subtitle(self):
+    def test_rendered_brand_header_has_no_subtitle_widget(self):
         self.assertEqual("HSLegendArriver", log_overlay.BRAND_NAME)
         self.assertFalse(hasattr(log_overlay, "BRAND_SUB"))
-        source = inspect.getsource(log_overlay._run)
-        self.assertNotIn("BRAND_SUB", source)
-        self.assertNotIn('text="炉石传说', source)      # 副标题那一行已删除
         self.assertTrue(log_overlay.GOLD.startswith("#"))
+        with overlay_harness(_IS_RUNNING=lambda: True) as ui:
+            rendered = [str(w.options.get("text", "")) for w in ui.widgets_of("label")]
+            self.assertIn(log_overlay.BRAND_NAME, rendered)
+            self.assertFalse(any(text.startswith("炉石传说") for text in rendered))
 
     def test_marker_colors_are_green_red_gray(self):
         self.assertEqual(log_overlay.GREEN, log_overlay.MARKER_ON)

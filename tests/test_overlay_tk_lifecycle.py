@@ -11,7 +11,6 @@
 线程真正结束再建新的 Tk。
 """
 
-import inspect
 import unittest
 from unittest.mock import patch
 
@@ -106,37 +105,81 @@ class OverlayStateTestCase(unittest.TestCase):
         return _ThreadFactory(cls=cls, on_exit=_release_started)
 
 
-class RunTeardownSourceTests(unittest.TestCase):
-    """Tk 回收必须在 _run 的帧释放之后（回收顺序：先 _run 返回，再 gc，再放 _STARTED）。
-
-    真开一个 Tk 窗口来做单测太重，这里按仓库里既有的 inspect.getsource 风格
-    锁住结构；行为部分由下面的 start()/join 用例覆盖。
-    """
-
-    def setUp(self):
-        self.source = inspect.getsource(log_overlay._run_overlay_thread)
+class RunTeardownSourceTests(OverlayStateTestCase):
+    """Tk teardown must collect only after _run has returned and released its frame."""
 
     def test_wraps_run_in_a_finally_block(self):
-        self.assertIn("_run()", self.source)
-        self.assertIn("finally:", self.source)
-        self.assertIn("gc.collect()", self.source)
-        self.assertIn("_STARTED[0] = False", self.source)
+        events = []
+        log_overlay._STARTED[0] = True
+
+        def broken_run():
+            events.append("run")
+            raise RuntimeError("tk failed")
+
+        def collect():
+            events.append(("gc", log_overlay._STARTED[0]))
+
+        with (
+            patch.object(log_overlay, "_run", side_effect=broken_run),
+            patch.object(log_overlay.gc, "collect", side_effect=collect),
+        ):
+            with self.assertRaises(RuntimeError):
+                log_overlay._run_overlay_thread()
+
+        self.assertEqual(["run", ("gc", True)], events)
+        self.assertFalse(log_overlay._STARTED[0])
 
     def test_collects_before_releasing_started(self):
-        self.assertLess(self.source.index("gc.collect()"),
-                        self.source.index("_STARTED[0] = False"))
+        events = []
+        log_overlay._STARTED[0] = True
+        with (
+            patch.object(log_overlay, "_run", side_effect=lambda: events.append("run")),
+            patch.object(
+                log_overlay.gc,
+                "collect",
+                side_effect=lambda: events.append(("gc", log_overlay._STARTED[0])),
+            ),
+        ):
+            log_overlay._run_overlay_thread()
 
-    def test_frame_must_be_released_before_collecting(self):
-        """回收必须包在 _run() 外面：_run 的帧钉着整张 Tk 图，帧内回收等于没回收。"""
-        run_source = inspect.getsource(log_overlay._run)
-        self.assertNotIn("gc.collect()", run_source)
+        self.assertEqual(["run", ("gc", True)], events)
+        self.assertFalse(log_overlay._STARTED[0])
 
-    def test_start_threads_the_wrapper_not_run(self):
-        source = inspect.getsource(log_overlay.start)
-        self.assertIn("target=_run_overlay_thread", source)
+    def test_wrapper_collects_after_run_returns(self):
+        state = {"returned": False, "collected_after_return": False}
+        log_overlay._STARTED[0] = True
+
+        def run():
+            state["returned"] = True
+
+        def collect():
+            state["collected_after_return"] = state["returned"]
+            state["started_still_true"] = log_overlay._STARTED[0]
+
+        with (
+            patch.object(log_overlay, "_run", side_effect=run),
+            patch.object(log_overlay.gc, "collect", side_effect=collect),
+        ):
+            log_overlay._run_overlay_thread()
+
+        self.assertTrue(state["collected_after_return"])
+        self.assertTrue(state["started_still_true"])
+        self.assertFalse(log_overlay._STARTED[0])
+
+    def test_start_records_wrapper_as_thread_target(self):
+        factory = self._factory()
+        with (
+            patch.object(log_overlay, "_run") as run,
+            patch.object(log_overlay.threading, "Thread", factory),
+        ):
+            self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
+
+        self.assertEqual(1, len(factory.created))
+        self.assertIs(log_overlay._run_overlay_thread, factory.created[0].target)
+        run.assert_not_called()
 
     def test_gc_is_imported(self):
-        self.assertIn("gc", dir(log_overlay))
+        self.assertIsNotNone(log_overlay.gc.collect)
 
 
 class JoinPreviousThreadTests(OverlayStateTestCase):

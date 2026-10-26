@@ -10,6 +10,7 @@ import display_mapping
 import log_overlay
 import region_overlay
 import web_ui
+from tests.helpers.fake_tk import overlay_harness
 
 
 class FakeOverlay:
@@ -245,12 +246,26 @@ class AutoMappingTests(unittest.TestCase):
 
 
 class OverlayButtonTests(unittest.TestCase):
-    def test_calibrate_button_exists_and_is_short(self):
-        source = __import__("inspect").getsource(log_overlay._run)
+    def test_calibrate_button_dispatches_callback(self):
+        calls = []
 
-        self.assertIn('_make_btn(btn_frame, "校准"', source)
-        self.assertIn('_place(calibrate_btn, "calibrate")', source)
-        self.assertIn("_ON_CALIBRATE", source)
+        def toggle_calibration():
+            calls.append("toggle")
+            return True
+
+        with overlay_harness(
+            _IS_RUNNING=lambda: True,
+            _ON_CALIBRATE=toggle_calibration,
+        ) as ui:
+            button = ui.button("校准")
+            self.assertEqual(log_overlay.ACCENT, button.options["bg"])
+            self.assertEqual(
+                (log_overlay.BTN_LAYOUT["calibrate"][0], log_overlay.BTN_LAYOUT["calibrate"][1]),
+                (button.grid_calls[-1]["row"], button.grid_calls[-1]["column"]),
+            )
+            button.invoke()
+
+        self.assertEqual(["toggle"], calls)
 
     def test_callback_is_stored_by_start(self):
         saved = log_overlay._ON_CALIBRATE
