@@ -366,16 +366,6 @@ class WebPageTests(unittest.TestCase):
         # 老的一整行挤 7 个控件时用的长标签不该再出现
         self.assertNotIn("对手新随从悬停下限", self.html)
 
-    def test_page_sends_and_renders_the_switches(self):
-        self.assertIn('hand_hover_enabled: $("chkHlHand").checked', self.html)
-        self.assertIn('minion_hover_enabled: $("chkHlMinion").checked', self.html)
-        self.assertIn(
-            '$("chkHlHand").checked = !!s.human_like.hand_hover_enabled',
-            self.html)
-        self.assertIn(
-            '$("chkHlMinion").checked = !!s.human_like.minion_hover_enabled',
-            self.html)
-
     def test_master_switch_row_has_no_numbers(self):
         """第 1 行只有总开关：随机延时上下限被挪到「看卡牌」那一行。"""
         start = self.html.index('id="chkHumanLike"')

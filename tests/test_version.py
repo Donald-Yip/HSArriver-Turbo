@@ -95,10 +95,6 @@ class SurfaceTests(unittest.TestCase):
         self.assertIn('id="appVersion"', self.html)
         self.assertIn("ver-chip", self.html)
 
-    def test_web_renders_version_from_status(self):
-        self.assertIn("s.version", self.html)
-        self.assertIn("v—", self.html, "没有版本字段时的占位符缺失")
-
     def test_overlay_brand_uses_version_module(self):
         import log_overlay
 

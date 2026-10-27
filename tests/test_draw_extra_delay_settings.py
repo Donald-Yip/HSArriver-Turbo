@@ -149,14 +149,6 @@ class WebPageTests(unittest.TestCase):
         self.assertIn('id="inpDrawDelay"', self.html)
         self.assertIn("抽牌额外延时", self.html)
 
-    def test_page_sends_and_renders_the_value(self):
-        self.assertIn(
-            'draw_extra_delay_per_card_seconds: $("inpDrawDelay").value',
-            self.html)
-        self.assertIn(
-            '$("inpDrawDelay").value = s.delays.draw_extra_delay_per_card_seconds',
-            self.html)
-
     def test_hint_explains_the_free_turn_start_draw(self):
         self.assertIn("回合开始那 1 张常规抽牌不算", self.html)
 

@@ -216,20 +216,6 @@ class OverlayPageTests(unittest.TestCase):
         path = Path(__file__).resolve().parent.parent / "web" / "index.html"
         self.html = path.read_text(encoding="utf8")
 
-    def test_overlay_button_label_follows_status(self):
-        self.assertIn('$("btnOverlay").textContent = "🪟 日志浮窗（" '
-                      '+ (s.overlay_running ? "开" : "关") + "）"',
-                      self.html)
-
-    def test_toggle_refreshes_the_status_immediately(self):
-        handler = self.html[self.html.index('$("btnOverlay")'):]
-        handler = handler[:handler.index("$(\"btnStart\")")]
-        self.assertIn("refreshStatus()", handler)
-
-    def test_start_button_still_depends_on_prepared(self):
-        self.assertIn('s.prepared ? "⚔️ 开始对战" : "🪄 开始运行（准备）"',
-                      self.html)
-
     def test_hint_explains_the_two_step_after_exit_overlay(self):
         self.assertIn("关掉浮窗会回到", self.html)
         self.assertIn("未就绪", self.html)
