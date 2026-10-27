@@ -2,27 +2,29 @@
 
 ## Current Phase
 
-R02E - test cleanup stage 1 (B1/B2/B5).
+R02E stage 1 independent review.
 
 ## Current Task
 
-R02E (`in_progress`)
+R02E (`ready_for_review`)
 
-## Scope
+## Commits
 
-- B1: remove two private table-drift tests and rewrite two in place.
-- B2: merge one duplicate DTO boundary method.
-- B5: rewrite two mock-only tests in place.
-- Deferred: B3/B4/B6-B9.
+- B1 `a990515`
+- B2 `cf4ab44`
+- B5 `HEAD` `test(R02E-B5): replace mock-only web test assertions`
 
-## Expected Counts
+## Verified State
 
-- Default: `1,525 -> 1,522`.
-- Opt-in: `3 -> 3`.
+- default headless: 1,523 run / 1,522 pass / 1 explicit skip.
+- discover: 1,685 run / 1,684 pass / 1 explicit skip.
+- opt-in: 3/3 pass.
+- B1/B2/B5 exact identities and count deltas recorded in the inventory and cleanup plan.
+- No production code changed.
 
 ## Exact Next Action
 
-1. Implement B1 with replacement evidence and commit.
-2. Implement B2 and commit.
-3. Implement B5 and commit.
-4. Independent reviewer validates all three commits and count deltas.
+1. Fresh reviewer validates all three commits and the corrected default/discover/opt-in accounting.
+2. Fix any findings.
+3. Mark R02E stage 1 approved/committed.
+4. Defer B3/B4/B6-B9 to later increments.

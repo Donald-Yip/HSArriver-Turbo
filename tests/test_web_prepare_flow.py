@@ -310,11 +310,15 @@ class OverlayVerificationTests(unittest.TestCase):
         self.assertTrue(web_ui.CTRL.prepared)
 
     def test_verification_skips_unknown_statuses(self):
-        """测试里的假浮窗 start() 返回 None：不参与校验（也不起线程）。"""
-        with patch.object(web_ui.threading, "Thread") as thread_cls:
-            web_ui._verify_overlay_opened_async(None)
+        """未知状态不改变 prepared，也不替换当前自动化线程。"""
+        current_thread = object()
+        web_ui.CTRL.prepared = True
+        web_ui.CTRL.automation_thread = current_thread
 
-        thread_cls.assert_not_called()
+        web_ui._verify_overlay_opened_async(None)
+
+        self.assertTrue(web_ui.CTRL.prepared)
+        self.assertIs(current_thread, web_ui.CTRL.automation_thread)
 
 
 class StartAfterPrepareTests(unittest.TestCase):

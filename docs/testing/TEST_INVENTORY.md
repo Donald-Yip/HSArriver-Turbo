@@ -235,3 +235,10 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - Reused the existing `test_max_turns_requires_an_exact_positive_int` assertion for `max_turns=0`.
 - Removed the duplicate `test_invalid_confidence_and_status_are_rejected`.
 - `tests.application.test_dto`: 7 -> 6 methods, all pass; default remains 1,523, discover target 1,685.
+
+### B5 private seam / mock-call-only
+
+- Status: implemented, pending independent review and commit.
+- R08 now uses a temporary runtime log and asserts preserved content, appended line, bounded size, and absence of a temp file.
+- R09 now asserts observable control state instead of `Thread.assert_not_called()`.
+- Method count and both suite counts remain unchanged.

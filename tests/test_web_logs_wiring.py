@@ -335,13 +335,17 @@ class LogTrimTests(TempLogsCase):
         self.assertEqual(1, len(calls))
 
     def test_small_runtime_log_is_left_alone(self):
-        with (
-            patch.object(web_ui, "_overlay_key", return_value=False),
-            patch.object(web_ui.os, "replace") as replace,
-        ):
+        original = "旧日志\n旧日志\n"
+        self.runtime.write_text(original, encoding="utf-8")
+
+        with patch.object(web_ui, "_overlay_key", return_value=False):
             web_ui._log("SYS", "小日志")
 
-        replace.assert_not_called()
+        written = self.runtime.read_text(encoding="utf-8")
+        self.assertTrue(written.startswith(original), written)
+        self.assertIn("[SYS] 小日志", written)
+        self.assertLess(len(written), web_ui.LOG_TRIM_BYTES)
+        self.assertFalse(self.runtime.with_suffix(".txt.tmp").exists())
 
     def test_trim_helper_returns_false_for_a_missing_file(self):
         self.assertFalse(web_ui._trim_runtime_log(self.tmp / "nope.txt", time.time()))
