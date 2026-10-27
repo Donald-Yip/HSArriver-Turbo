@@ -2,20 +2,22 @@
 
 ## Current Phase
 
-R08 - enter-battle use case and bootstrap
+R08 approved; commit pending.
 
 ## Current Task
 
-R08 (`planned`)
+R08 (`approved`)
 
-## Completed
+## Review Outcome
 
-- R00-R07 complete.
-- Core layers and injected external adapters are committed and reviewed.
+- Hard adapter deadline verified.
+- Nonpositive executor budget dispatch prevention verified.
+- Prior result-integrity fixes verified.
+- Staged scope and diff checks pass.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R07.
-2. Create feature/R08-enter-battle.
-3. Implement composition root and EnterBattleUseCase using lobby and action ports.
-4. Add fake end-to-end main-menu -> deck-select verification without real desktop.
+1. Stage the independent review and lifecycle updates.
+2. Re-run R08 scope and staged diff checks.
+3. Commit `feat(R08): add enter-battle vertical slice`.
+4. Fast-forward `develop`, then create the test-suite redesign task branch.

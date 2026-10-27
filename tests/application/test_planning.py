@@ -62,9 +62,17 @@ class ScriptedDispatch:
     def __init__(self, results: list[DispatchResult | Exception]) -> None:
         self._results = list(results)
         self.calls: list[tuple[PlanStep, GameSnapshot]] = []
+        self.timeout_calls: list[float] = []
 
-    def dispatch(self, step: PlanStep, snapshot: GameSnapshot) -> DispatchResult:
+    def dispatch(
+        self,
+        step: PlanStep,
+        snapshot: GameSnapshot,
+        *,
+        timeout_seconds: float,
+    ) -> DispatchResult:
         self.calls.append((step, snapshot))
+        self.timeout_calls.append(timeout_seconds)
         result = self._results.pop(0)
         if isinstance(result, Exception):
             raise result
@@ -610,6 +618,40 @@ class PlanningExecutionTests(unittest.TestCase):
         self.assertEqual("plan_timeout", record.error_code)
         self.assertEqual([], dispatch.calls)
         self.assertEqual(ExecutionStatus.FAILED, ledger.last_attempt(action_key_for_plan(plan)).status)
+
+    def test_budget_expiry_after_guard_and_before_dispatch_calc_is_unconfirmed(self) -> None:
+        base_plan = self.end_turn_plan()
+        plan = replace(
+            base_plan,
+            plan_id="dispatch-calc-timeout-plan",
+            timeout_seconds=1.0,
+            steps=(replace(base_plan.steps[0], timeout_seconds=10.0),),
+        )
+        dispatch = ScriptedDispatch([])
+        state = ScriptedGameState([self.observation(self.before)])
+        journal = RunJournalFake()
+        ledger = ExecutionLedger()
+        clock = SequenceClock([0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+
+        record = self.executor(
+            dispatch,
+            state,
+            journal,
+            ledger,
+            clock=clock,
+        ).execute(
+            plan,
+            stop_token=StopToken(),
+            action_gate=ActionGate(),
+        )
+
+        self.assertEqual(ExecutionStatus.EXECUTED_UNCONFIRMED, record.status)
+        self.assertEqual("plan_timeout", record.error_code)
+        self.assertEqual([], dispatch.calls)
+        self.assertEqual(
+            ExecutionStatus.EXECUTED_UNCONFIRMED,
+            ledger.last_attempt(action_key_for_plan(plan)).status,
+        )
 
     def test_journal_failure_propagates_after_one_ledger_completion(self) -> None:
         plan = self.end_turn_plan()

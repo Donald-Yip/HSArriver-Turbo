@@ -65,7 +65,7 @@ class GameStateSourcePort(Protocol):
 class LobbyStatePort(Protocol):
     """Read the normalized current lobby phase."""
 
-    def get_state(self) -> LobbyState:
+    def get_state(self, *, timeout_seconds: float) -> LobbyState:
         ...
 
 
@@ -77,6 +77,8 @@ class ActionDispatchPort(Protocol):
         self,
         step: PlanStep,
         snapshot: GameSnapshot,
+        *,
+        timeout_seconds: float,
     ) -> DispatchResult:
         ...
 

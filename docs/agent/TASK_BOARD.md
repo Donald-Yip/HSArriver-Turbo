@@ -18,7 +18,7 @@ Updated: 2026-10-27
 | R05 | done | feature/R05-plan-execution | R04 | Plan and execution pipeline fix round 2 complete |
 | R06 | done | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |
 | R07 | done | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input; fix round 1 ready |
-| R08 | planned | feature/R08-enter-battle | R07 | Enter battle slice |
+| R08 | done | feature/R08-enter-battle | R07 | Enter-battle slice approved |
 | R09 | planned | feature/R09-mulligan | R08 | Mulligan slice |
 | R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |
 | R11 | planned | feature/R11-settlement-stop | R10 | Settlement and stop |

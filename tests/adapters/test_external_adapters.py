@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 import unittest
 from types import SimpleNamespace
 
+from hslegend.adapters.deadline import run_with_deadline
 from hslegend.adapters.hsang import (
     HsangAdapterError,
     HsangCaptureError,
@@ -350,6 +352,15 @@ class PowerLogGameStateAdapterTests(unittest.TestCase):
         self.assertEqual("invalid_log_revision", raised.exception.reason_code)
 
 
+class AdapterDeadlineTests(unittest.TestCase):
+    def test_worker_exception_propagates(self) -> None:
+        def callback():
+            raise ValueError("worker failed")
+
+        with self.assertRaisesRegex(ValueError, "worker failed"):
+            run_with_deadline(callback, timeout_seconds=0.25)
+
+
 class LegacyLobbyStateAdapterTests(unittest.TestCase):
     def test_known_aliases_map_deterministically(self) -> None:
         expected = {
@@ -365,7 +376,7 @@ class LegacyLobbyStateAdapterTests(unittest.TestCase):
                     lambda raw=raw: {"state": raw, "confidence": 0.5, "evidence_id": "frame-1"},
                     clock=lambda: 12.0,
                 )
-                state = adapter.get_state()
+                state = adapter.get_state(timeout_seconds=1.0)
                 self.assertEqual(phase, state.phase)
                 self.assertEqual(0.5, state.confidence)
                 self.assertEqual("frame-1", state.evidence_id)
@@ -374,7 +385,7 @@ class LegacyLobbyStateAdapterTests(unittest.TestCase):
     def test_unknown_state_fails_closed_to_unknown(self) -> None:
         adapter = LegacyLobbyStateAdapter(lambda: "new_unrecognized_screen", clock=lambda: 1.0)
 
-        state = adapter.get_state()
+        state = adapter.get_state(timeout_seconds=1.0)
 
         self.assertEqual(LobbyPhase.UNKNOWN, state.phase)
         self.assertEqual(0.0, state.confidence)
@@ -386,7 +397,7 @@ class LegacyLobbyStateAdapterTests(unittest.TestCase):
         adapter = LegacyLobbyStateAdapter(recognizer)
 
         with self.assertRaises(LobbyStateAdapterError) as raised:
-            adapter.get_state()
+            adapter.get_state(timeout_seconds=1.0)
 
         self.assertEqual("recognition_failed", raised.exception.reason_code)
 
@@ -396,9 +407,36 @@ class LegacyLobbyStateAdapterTests(unittest.TestCase):
         )
 
         with self.assertRaises(LobbyStateAdapterError) as raised:
-            adapter.get_state()
+            adapter.get_state(timeout_seconds=1.0)
 
         self.assertEqual("invalid_confidence", raised.exception.reason_code)
+
+    def test_timeout_budget_is_forwarded_and_timeout_error_propagates(self) -> None:
+        budgets: list[float] = []
+
+        def recognizer(*, timeout_seconds: float):
+            budgets.append(timeout_seconds)
+            raise TimeoutError("capture timed out")
+
+        adapter = LegacyLobbyStateAdapter(recognizer)
+
+        with self.assertRaises(TimeoutError):
+            adapter.get_state(timeout_seconds=0.25)
+
+        self.assertEqual([0.25], budgets)
+
+    def test_slow_recognizer_returns_within_deadline_budget(self) -> None:
+        def recognizer(*, timeout_seconds: float):
+            time.sleep(0.3)
+            return "main_menu"
+
+        adapter = LegacyLobbyStateAdapter(recognizer)
+        started_at = time.monotonic()
+
+        with self.assertRaises(TimeoutError):
+            adapter.get_state(timeout_seconds=0.05)
+
+        self.assertLess(time.monotonic() - started_at, 0.15)
 
 
 class LegacyActionDispatchTests(unittest.TestCase):
@@ -416,7 +454,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
             dispatch_id_factory=lambda: "dispatch-1",
         )
 
-        result = adapter.dispatch(step, current_snapshot)
+        result = adapter.dispatch(step, current_snapshot, timeout_seconds=1.0)
 
         self.assertEqual(DispatchStatus.SENT, result.status)
         self.assertEqual("dispatch-1", result.dispatch_id)
@@ -431,7 +469,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
 
         adapter = LegacyActionDispatch({"play_card": handler})
 
-        result = adapter.dispatch(plan_step("unknown_action"), snapshot())
+        result = adapter.dispatch(plan_step("unknown_action"), snapshot(), timeout_seconds=1.0)
 
         self.assertEqual(DispatchStatus.REJECTED, result.status)
         self.assertEqual("unknown_action", result.reason_code)
@@ -443,7 +481,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
 
         adapter = LegacyActionDispatch({"play_card": handler})
 
-        result = adapter.dispatch(plan_step(), snapshot())
+        result = adapter.dispatch(plan_step(), snapshot(), timeout_seconds=1.0)
 
         self.assertEqual(DispatchStatus.FAILED, result.status)
         self.assertEqual("handler_exception", result.reason_code)
@@ -459,7 +497,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
             dispatch_id_factory=lambda: "dispatch-2",
         )
 
-        result = adapter.dispatch(plan_step("end_turn"), snapshot())
+        result = adapter.dispatch(plan_step("end_turn"), snapshot(), timeout_seconds=1.0)
 
         self.assertEqual(DispatchStatus.SENT, result.status)
         self.assertEqual("dispatch-2", result.dispatch_id)
@@ -474,7 +512,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
             dispatch_id_factory=factory,
         )
 
-        result = adapter.dispatch(plan_step(), snapshot())
+        result = adapter.dispatch(plan_step(), snapshot(), timeout_seconds=1.0)
 
         self.assertEqual(DispatchStatus.REJECTED, result.status)
         self.assertEqual("not_ready", result.reason_code)
@@ -485,7 +523,7 @@ class LegacyActionDispatchTests(unittest.TestCase):
         )
 
         with self.assertRaises(LegacyActionDispatchError) as raised:
-            adapter.dispatch(plan_step(), snapshot())
+            adapter.dispatch(plan_step(), snapshot(), timeout_seconds=1.0)
 
         self.assertEqual("invalid_handler_result", raised.exception.reason_code)
 
@@ -499,6 +537,33 @@ class LegacyActionDispatchTests(unittest.TestCase):
             )
 
         self.assertEqual("duplicate_action_type", raised.exception.reason_code)
+
+    def test_timeout_budget_is_forwarded_and_timeout_error_propagates(self) -> None:
+        budgets: list[float] = []
+
+        def handler(step, current_snapshot, *, timeout_seconds: float):
+            budgets.append(timeout_seconds)
+            raise TimeoutError("input timed out")
+
+        adapter = LegacyActionDispatch({"play_card": handler})
+
+        with self.assertRaises(TimeoutError):
+            adapter.dispatch(plan_step(), snapshot(), timeout_seconds=0.25)
+
+        self.assertEqual([0.25], budgets)
+
+    def test_slow_handler_returns_within_deadline_budget(self) -> None:
+        def handler(step, current_snapshot, *, timeout_seconds: float):
+            time.sleep(0.3)
+            return None
+
+        adapter = LegacyActionDispatch({"play_card": handler})
+        started_at = time.monotonic()
+
+        with self.assertRaises(TimeoutError):
+            adapter.dispatch(plan_step(), snapshot(), timeout_seconds=0.05)
+
+        self.assertLess(time.monotonic() - started_at, 0.15)
 
 
 class ExternalAdapterPortConformanceTests(unittest.TestCase):

@@ -100,7 +100,7 @@ class PortContractTests(unittest.TestCase):
         dispatch_fake = ActionDispatchFake(
             (DispatchResult.sent("dispatch-1", "evidence-1"),)
         )
-        result = dispatch_fake.dispatch(step, game)
+        result = dispatch_fake.dispatch(step, game, timeout_seconds=0.5)
         self.assertEqual("dispatch-1", result.dispatch_id)
         self.assertEqual([(step, game)], dispatch_fake.calls)
 

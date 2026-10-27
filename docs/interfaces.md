@@ -88,11 +88,11 @@ The authoritative revision is `snapshot.log_revision`. `None` means the timeout 
 
 ### LobbyStatePort
 
-`get_state() -> LobbyState`. Lobby phases are normalized to main menu, deck select, matching, in game, result, or unknown.
+`get_state(*, timeout_seconds: float) -> LobbyState`. The adapter owns bounded recognition for the supplied remaining budget; a `TimeoutError` means the observation could not be produced before that budget expired. Lobby phases are normalized to main menu, deck select, matching, in game, result, or unknown.
 
 ### ActionDispatchPort
 
-`dispatch(step: PlanStep, snapshot: GameSnapshot) -> DispatchResult`. It reports only whether the input was sent, rejected, or failed; it does not decide the overall business result.
+`dispatch(step: PlanStep, snapshot: GameSnapshot, *, timeout_seconds: float) -> DispatchResult`. The adapter owns bounded dispatch for the supplied remaining budget; a `TimeoutError` means the transport did not complete before that budget expired. It reports only whether the input was sent, rejected, or failed; it does not decide the overall business result.
 
 ### RunJournalPort
 
@@ -192,8 +192,8 @@ preconditions against the current snapshot, dispatches each approved step
 through `ActionDispatchPort`, waits for a later `log_revision`, and evaluates
 step/plan postconditions with the domain `PostconditionEvaluator`.
 `plan.timeout_seconds` is a total execution budget measured by the injected
-monotonic clock; each wait is clamped to the smaller of the step timeout and
-remaining plan budget.
+monotonic clock; each wait and dispatch receives the remaining plan budget, and
+waits are clamped to the smaller of the step timeout and remaining plan budget.
 
 It appends exactly one `ExecutionRecord` to `RunJournalPort` per ledger attempt,
 including confirmed, unconfirmed, rejected, failed, and cancelled outcomes. The
@@ -206,6 +206,43 @@ validation and immediately before dispatch. Cancellation before any dispatch
 records `cancelled`; any exception, postcondition failure, timeout, or
 cancellation after dispatch records `executed_unconfirmed` with the original
 reason code, so immediate replay remains blocked.
+
+### EnterBattleUseCase
+
+`EnterBattleUseCase` is the first end-to-end application slice. It is constructed
+only from `LobbyStatePort`, `ActionDispatchPort`, `ActionGate`, `StopToken`, and
+an injected monotonic `clock` plus deterministic `sleep`. Semantic lobby actions
+are `enter_traditional`, `select_deck(index)`, and `start_match`. Every lobby
+read and dispatch receives the remaining total budget as `timeout_seconds`; the
+use case translates `TimeoutError` into a terminal `TIMED_OUT` result instead of
+making an unbounded call.
+
+Execution order is fixed:
+
+1. Acquire the action gate; contention returns `GATE_BUSY` with
+   `action_gate_busy` before any lobby read.
+2. Poll for `MAIN_MENU` until the total command deadline.
+3. Dispatch `enter_traditional`.
+4. Poll for `DECK_SELECT`.
+5. Dispatch `select_deck` with the command's `choice_index`.
+6. Optionally dispatch `start_match`.
+7. Return a typed `EnterBattleResult`.
+
+`UNKNOWN` lobby observations fail immediately with `lobby_unknown` and no
+dispatch. Dispatch rejection, failure, exception, invalid output, cancellation,
+lobby-read failure, clock failure, and timeouts stop the sequence. No action is
+dispatched after cancellation or after the total deadline. If cancellation is
+observed after a dispatch result has been returned, that dispatch and its
+evidence remain in the cancelled result with `detail_code =
+"cancelled_after_dispatch"` and `failed_action` set to the affected action.
+Gate release failures are reported in `release_error` while preserving the
+primary terminal status and reason. Queueing is treated as command success
+immediately after a sent `start_match`; the use case does not claim an observed
+`MATCHING` or `IN_GAME` state without another lobby read.
+
+`bootstrap.build_container(lobby, dispatch, ...)` is a composition helper that
+constructs this use case from injected adapters and optional runtime controls. It
+does not import or construct legacy root-module adapters.
 
 ## External Adapter Contracts
 
@@ -236,6 +273,11 @@ callables into these constructors.
 ### LegacyLobbyStateAdapter
 
 - Constructor: `recognizer()`, optional monotonic `clock()`.
+- `get_state(timeout_seconds=...)` runs the recognizer on a daemon worker with a
+  bounded join. Timeout-aware recognizers also receive the remaining budget.
+  `TimeoutError` propagates unchanged without waiting for an ignoring callback;
+  other recognizer failures propagate through the worker and become typed adapter
+  errors. Two-argument legacy recognizers remain supported.
 - Recognizer output may be a normalized phase string, `LobbyPhase`, `LobbyState`,
   or a mapping/object with `phase`/`state` plus optional confidence/evidence.
 - Unknown aliases fail closed to `LobbyPhase.UNKNOWN` with default confidence
@@ -245,8 +287,14 @@ callables into these constructors.
 
 - Constructor: semantic-name mapping to `handler(step, snapshot)` callables plus
   an optional deterministic dispatch ID factory.
+- `dispatch(step, snapshot, timeout_seconds=...)` runs the handler on a daemon
+  worker with a bounded join. Timeout-aware handlers also receive the remaining
+  budget. `TimeoutError` propagates unchanged without waiting for an ignoring
+  callback; workers capture handler exceptions for the caller. A timed-out
+  dispatch is ambiguous: the application records no automatic retry and stops.
+  Legacy two-argument handlers remain supported.
 - A handler may return `DispatchResult`, a mapping with dispatch fields, or
-  `None` (legacy success). Handler exceptions become failed dispatch results.
+  `None` (legacy success).
 - Unknown action names return `DispatchResult.rejected("unknown_action")` before
   a handler is invoked. No adapter path clicks directly or stores coordinates.
 

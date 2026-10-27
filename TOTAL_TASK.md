@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R07: external-system adapters fix round 1 complete; ready for re-review.
+R08: enter-battle vertical slice approved and ready to commit.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R07-external-adapters`, based on `develop` at `25a0ce1`
+- Current feature branch: `feature/R08-enter-battle`, based on `develop` at `082255e`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -49,7 +49,7 @@ R07: external-system adapters fix round 1 complete; ready for re-review.
 | R05 | done | Plan and execution pipeline | R04 |
 | R06 | done | Data adapters | R05 |
 | R07 | done | External-system adapters | R06 |
-| R08 | planned | Enter-battle vertical slice | R07 |
+| R08 | done | Enter-battle vertical slice | R07 |
 | R09 | planned | Mulligan vertical slice | R08 |
 | R10 | planned | Turn loop and reconciliation | R09 |
 | R11 | planned | Settlement and stop | R10 |
@@ -122,4 +122,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Fresh R07 reviewer verifies fix round 1 and the complete staged file set; Controller commits only after adapters, domain, application, plugins, headless, compile, architecture, and scope gates are confirmed.
+Commit R08 as one verified increment, fast-forward `develop`, then create R02D to redesign the test suite around behavior and layer boundaries before R09.

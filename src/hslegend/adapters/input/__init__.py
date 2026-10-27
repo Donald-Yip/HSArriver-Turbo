@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
+import math
 import uuid
 from collections.abc import Callable, Mapping
 from typing import Any
 
 from hslegend.application import DispatchResult, DispatchStatus
 from hslegend.domain import GameSnapshot, PlanStep
+
+from ..deadline import run_with_deadline
 
 
 class LegacyActionDispatchError(RuntimeError):
@@ -24,13 +28,48 @@ def _normalize_action(value: str) -> str:
     return value.strip().lower().replace("-", "_").replace(" ", "_")
 
 
+def _timeout_seconds(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LegacyActionDispatchError(
+            "invalid_timeout_seconds",
+            "timeout_seconds must be a number",
+        )
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0.0:
+        raise LegacyActionDispatchError(
+            "invalid_timeout_seconds",
+            "timeout_seconds must be finite and positive",
+        )
+    return normalized
+
+
+def _accepts_timeout_seconds(callback: Callable[..., Any]) -> bool:
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get("timeout_seconds")
+    if parameter is not None:
+        return parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(
+        item.kind is inspect.Parameter.VAR_KEYWORD
+        for item in parameters.values()
+    )
+
+
 class LegacyActionDispatch:
     """Route semantic action names to injected handlers.
 
     Handlers are called as ``handler(step, snapshot)``. A handler may return a
     ``DispatchResult``, a mapping with dispatch fields, or ``None`` for legacy
-    click functions that report success by returning nothing. Unknown action
-    names are rejected before any handler is consulted.
+    click functions that report success by returning nothing. Timeout-aware
+    handlers receive the caller's remaining budget as ``timeout_seconds``;
+    legacy two-argument handlers remain supported. A handler-raised
+    ``TimeoutError`` is propagated so the application owns the terminal timeout
+    result. Unknown action names are rejected before any handler is consulted.
     """
 
     def __init__(
@@ -69,7 +108,10 @@ class LegacyActionDispatch:
         self,
         step: PlanStep,
         snapshot: GameSnapshot,
+        *,
+        timeout_seconds: float,
     ) -> DispatchResult:
+        timeout_seconds = _timeout_seconds(timeout_seconds)
         if not isinstance(step, PlanStep):
             raise LegacyActionDispatchError("invalid_step", "step must be a PlanStep")
         if not isinstance(snapshot, GameSnapshot):
@@ -88,7 +130,22 @@ class LegacyActionDispatch:
             return DispatchResult.rejected("unknown_action")
 
         try:
-            raw = handler(step, snapshot)
+            if _accepts_timeout_seconds(handler):
+                raw = run_with_deadline(
+                    lambda: handler(
+                        step,
+                        snapshot,
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                raw = run_with_deadline(
+                    lambda: handler(step, snapshot),
+                    timeout_seconds=timeout_seconds,
+                )
+        except TimeoutError:
+            raise
         except Exception:
             return DispatchResult.failed("handler_exception")
         return self._normalize_result(raw)

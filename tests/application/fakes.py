@@ -84,8 +84,10 @@ class LobbyStateSourceFake:
         if not states:
             raise ValueError("at least one lobby state is required")
         self._states = list(states)
+        self.timeout_calls: list[float] = []
 
-    def get_state(self) -> LobbyState:
+    def get_state(self, *, timeout_seconds: float) -> LobbyState:
+        self.timeout_calls.append(timeout_seconds)
         return self._states[-1]
 
     def push(self, state: LobbyState) -> None:
@@ -96,9 +98,17 @@ class ActionDispatchFake:
     def __init__(self, results: Iterable[DispatchResult] = ()) -> None:
         self._results = list(results)
         self.calls: list[tuple[PlanStep, GameSnapshot]] = []
+        self.timeout_calls: list[float] = []
 
-    def dispatch(self, step: PlanStep, snapshot: GameSnapshot) -> DispatchResult:
+    def dispatch(
+        self,
+        step: PlanStep,
+        snapshot: GameSnapshot,
+        *,
+        timeout_seconds: float,
+    ) -> DispatchResult:
         self.calls.append((step, snapshot))
+        self.timeout_calls.append(timeout_seconds)
         if not self._results:
             raise LookupError("no dispatch result queued")
         return self._results.pop(0)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -9,6 +10,8 @@ from enum import Enum
 from typing import Any
 
 from hslegend.application import LobbyPhase, LobbyState
+
+from ..deadline import run_with_deadline
 
 
 class LobbyStateAdapterError(RuntimeError):
@@ -50,6 +53,38 @@ _PHASE_ALIASES = {
     "结算": LobbyPhase.RESULT,
     "unknown": LobbyPhase.UNKNOWN,
 }
+
+
+def _timeout_seconds(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise LobbyStateAdapterError(
+            "invalid_timeout_seconds",
+            "timeout_seconds must be a number",
+        )
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized <= 0.0:
+        raise LobbyStateAdapterError(
+            "invalid_timeout_seconds",
+            "timeout_seconds must be finite and positive",
+        )
+    return normalized
+
+
+def _accepts_timeout_seconds(callback: Callable[..., Any]) -> bool:
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return False
+    parameter = parameters.get("timeout_seconds")
+    if parameter is not None:
+        return parameter.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    return any(
+        item.kind is inspect.Parameter.VAR_KEYWORD
+        for item in parameters.values()
+    )
 
 
 def _field(source: Any, name: str) -> Any:
@@ -113,7 +148,7 @@ class LegacyLobbyStateAdapter:
 
     def __init__(
         self,
-        recognizer: Callable[[], Any],
+        recognizer: Callable[..., Any],
         *,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -124,9 +159,23 @@ class LegacyLobbyStateAdapter:
         self._recognizer = recognizer
         self._clock = clock
 
-    def get_state(self) -> LobbyState:
+    def get_state(self, *, timeout_seconds: float) -> LobbyState:
+        timeout_seconds = _timeout_seconds(timeout_seconds)
         try:
-            raw = self._recognizer()
+            if _accepts_timeout_seconds(self._recognizer):
+                raw = run_with_deadline(
+                    lambda: self._recognizer(
+                        timeout_seconds=timeout_seconds,
+                    ),
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                raw = run_with_deadline(
+                    self._recognizer,
+                    timeout_seconds=timeout_seconds,
+                )
+        except TimeoutError:
+            raise
         except Exception as exc:
             raise LobbyStateAdapterError("recognition_failed", str(exc)) from exc
 

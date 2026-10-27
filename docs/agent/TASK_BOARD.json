@@ -270,9 +270,9 @@
     },
     {
       "id": "R08",
-      "status": "planned",
-      "owner": null,
-      "review_round": 0,
+      "status": "done",
+      "owner": "implementer",
+      "review_round": 2,
       "branch": "feature/R08-enter-battle",
       "depends_on": [
         "R07"
@@ -280,10 +280,10 @@
       "task_book": "docs/tasks/R08-enter-battle.md",
       "implementer_report": "docs/agent/reports/R08-implementer.md",
       "review_report": "docs/agent/reviews/R08-review.md",
-      "base_sha": null,
+      "base_sha": "082255e",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R08 approved; staged scope 21 files; adapters 52; application 60; headless 1525"
     },
     {
       "id": "R09",

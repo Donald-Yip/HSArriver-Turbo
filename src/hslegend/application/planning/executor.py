@@ -220,13 +220,26 @@ class PlanExecutor:
                 guarded = guard_before_dispatch()
                 if guarded is not None:
                     return guarded
-                guarded = guard_before_dispatch()
-                if guarded is not None:
-                    return guarded
+                dispatch_timeout = remaining_budget()
+                if not math.isfinite(dispatch_timeout) or dispatch_timeout <= 0.0:
+                    return outcome(
+                        ExecutionStatus.EXECUTED_UNCONFIRMED,
+                        "plan_timeout",
+                    )
 
                 dispatch_snapshot = current
                 try:
-                    dispatch_result = self._dispatch_port.dispatch(step, current)
+                    dispatch_result = self._dispatch_port.dispatch(
+                        step,
+                        current,
+                        timeout_seconds=dispatch_timeout,
+                    )
+                except TimeoutError:
+                    step_results.append(f"{step.step_id}:dispatch_timeout")
+                    return outcome(
+                        ExecutionStatus.EXECUTED_UNCONFIRMED,
+                        "plan_timeout",
+                    )
                 except OperationCancelled as exc:
                     step_results.append(f"{step.step_id}:cancelled:{exc.reason}")
                     return outcome(
