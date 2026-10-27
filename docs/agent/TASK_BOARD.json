@@ -202,9 +202,9 @@
     },
     {
       "id": "R04",
-      "status": "planned",
+      "status": "done",
       "owner": null,
-      "review_round": 0,
+      "review_round": 2,
       "branch": "feature/R04-application-ports",
       "depends_on": [
         "R03"
@@ -215,7 +215,7 @@
       "base_sha": null,
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R04 committed; application 22; headless 1524"
     },
     {
       "id": "R05",

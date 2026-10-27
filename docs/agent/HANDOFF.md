@@ -2,20 +2,20 @@
 
 ## Current Phase
 
-R04 - application ports and runtime controls
+R05 - planning and execution pipeline
 
 ## Current Task
 
-R04 (`planned`)
+R05 (`planned`)
 
 ## Completed
 
-- R00-R03 complete.
-- Domain contracts are committed and independently reviewed.
-- Headless baseline: 1524 run, 1523 passed, 1 explicit skip.
+- R00-R04 complete.
+- Domain contracts and application ports/runtime controls committed.
+- Headless baseline remains deterministic.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R03.
-2. Create feature/R04-application-ports.
-3. Define application ports, fakes, StopToken, ActionGate, RunContext, commands/results.
+1. Fast-forward develop to R04.
+2. Create feature/R05-plan-execution.
+3. Implement PlanPlugin contract, PluginRegistry, PlanBuilder, PlanValidator, ExecutionLedger, PlanExecutor, default declarative plugins, and journal integration.

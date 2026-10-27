@@ -45,7 +45,7 @@ R03: domain contracts fix round 1 complete; ready for review.
 | R02C4 | done | Native and Node isolation | R02C3 |
 | R02C5 | done | Headless finalization | R02C4 |
 | R03 | done | Domain contracts | R02C5 |
-| R04 | planned | Application ports and runtime controls | R03 |
+| R04 | done | Application ports and runtime controls | R03 |
 | R05 | planned | Plan and execution pipeline | R04 |
 | R06 | planned | Data adapters | R05 |
 | R07 | planned | External-system adapters | R06 |

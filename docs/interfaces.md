@@ -51,65 +51,80 @@ Stable semantic identity:
 - `PostconditionResult`: confirmed/unconfirmed/failed plus evidence references.
 - `ActionVerdict`: domain-level action verdict.
 
+## Application DTOs
+
+All application DTOs are frozen slots dataclasses, normalize collections to tuples, and serialize deterministically through `to_primitive()` / `to_json()`.
+
+- `ConfigSnapshot`: canonical immutable config values plus schema version; nested non-finite floats are rejected at construction.
+- `RecommendationObservation`: recommendation mode, normalized instruction, confidence, evidence ID, and source snapshot ID.
+- `GameObservation`: `GameSnapshot` plus source confidence; the authoritative revision remains `snapshot.log_revision`.
+- `LobbyState`: normalized lobby phase, observation time, confidence, and evidence ID.
+- `DispatchResult`: `sent`, `rejected`, or `failed`; this is not the overall business result.
+- `ExecutionRecord`: correlation/session/game/intent/plan/action IDs, before/after snapshot IDs, execution status, step results, error code, elapsed time, and evidence IDs.
+- `JournalAppendResult`: durable journal record ID, durability flag, duplicate flag, and evidence IDs.
+- `OneGameCommand`: command ID, deck ID, mode, and an optional maximum turn count that must be an exact positive `int` when provided.
+- `OneGameResult`: command/session IDs, terminal run status, reason code, game ID, journal record ID, and evidence IDs.
+
 ## Application Ports
 
 ### ConfigRepositoryPort
 
-Input: none. Output: typed immutable application config snapshot.
+`load() -> ConfigSnapshot`. The adapter owns environment-specific loading; the application receives only canonical immutable values.
 
 ### CardCatalogPort
 
-Input: `card_id`. Output: `CardDefinition` and `CardCapabilitySet`.
+`get_card(card_id) -> CardDefinition | None`. `CardDefinition.capabilities` carries the normalized `CardCapabilitySet`.
 
 ### RecommendationSourcePort
 
-Input: `GameSnapshot` and recommendation mode (`mulligan` or `turn`).
-Output: `RecommendationObservation` with normalized instruction, confidence, and evidence ID. It must not return click objects.
+`recommend(snapshot: GameSnapshot, mode: RecommendationMode) -> RecommendationObservation`. Modes are `mulligan` and `turn`. Results must not contain click objects, coordinates, or callbacks.
 
 ### GameStateSourcePort
 
-Output: `GameObservation = { snapshot: GameSnapshot, source_confidence }`.
-The authoritative revision is `snapshot.log_revision`. It must not be duplicated in the wrapper.
-Must support waiting for a revision change with timeout.
+- `current() -> GameObservation`
+- `wait_for_revision_change(after_revision, timeout_seconds) -> GameObservation | None`
+
+The authoritative revision is `snapshot.log_revision`. `None` means the timeout elapsed without a later revision.
 
 ### LobbyStatePort
 
-Output: lobby state such as main menu, deck select, matching, or unknown.
+`get_state() -> LobbyState`. Lobby phases are normalized to main menu, deck select, matching, in game, result, or unknown.
 
 ### ActionDispatchPort
 
-Input: one `PlanStep` and the current `GameSnapshot`.
-Output: `DispatchResult` describing whether the input was sent, rejected, or failed. It must not decide the overall business result.
+`dispatch(step: PlanStep, snapshot: GameSnapshot) -> DispatchResult`. It reports only whether the input was sent, rejected, or failed; it does not decide the overall business result.
 
 ### RunJournalPort
 
-Input: typed `RunRecord` / `ExecutionRecord`. Output: durable append result.
+`append(record: ExecutionRecord) -> JournalAppendResult`. The adapter is responsible for durable storage.
 
 ### ArtifactStorePort
 
-Input: frame/evidence reference. Output: durable artifact reference.
+`store(source_ref, *, kind="evidence") -> str`. The returned string is the durable artifact reference.
 
 ## Runtime Contracts
 
 ### StopToken
 
-- `cancel(reason)`
+- `cancel(reason)` is thread-safe and idempotent; the first reason wins exactly once under concurrent calls.
 - `is_cancelled()`
-- `wait(timeout)`
-- `raise_if_cancelled()`
+- `wait(timeout) -> bool` returns `True` on cancellation and `False` on timeout.
+- `raise_if_cancelled()` raises `OperationCancelled`.
 
-All waits and side effects check the same token.
+A synchronization lock protects cancellation state. Waiters are cooperative and poll the token without creating application threads or using I/O devices.
 
 ### ActionGate
 
-- `acquire(owner, operation_id) -> ActionLease`
+- `acquire(owner, operation_id, *, timeout_seconds=None, now=None) -> ActionLease`
 - `release(lease)`
+- `reap_expired(now) -> bool`
+- `current_lease(*, now=None) -> ActionLease | None`
 
-Only one action plan may hold execution ownership at a time.
+A reentrant synchronization lock protects all gate state. Only one action plan may hold execution ownership at a time. A held gate rejects a second acquire. Release requires the exact live lease; wrong owners raise `WrongLeaseOwner`, stale/forged leases raise `StaleActionLease`, and releasing without an active lease raises `NoActiveLease`. Expired leases are reaped before a new acquisition or explicitly through `reap_expired`.
 
 ### RunContext
 
-Owns one run's session ID, StopToken, ActionGate, typed config snapshot, plugin registry, and correlation context.
+Owns one run's session ID, StopToken, ActionGate, `ConfigSnapshot`, correlation ID, and an immutable plugin-registry placeholder. Concrete port/service wiring belongs to bootstrap in later tasks.
 
 ### ExecutionRecord
 

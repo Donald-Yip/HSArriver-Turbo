@@ -14,7 +14,7 @@ Updated: 2026-10-27
 | R02C4 | done | feature/R02C4-native-node | R02C3 | Native and Node isolation |
 | R02C5 | done | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |
 | R03 | done | feature/R03-domain-contracts | R02C5 | Domain models and rules |
-| R04 | planned | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
+| R04 | done | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
 | R05 | planned | feature/R05-plan-execution | R04 | Plan and execution pipeline |
 | R06 | planned | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |
 | R07 | planned | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input |
