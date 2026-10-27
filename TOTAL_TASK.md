@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R13A is complete and independently approved. R13 now performs the controlled live one-game smoke, resolves any native integration defects, and decides the main cutover.
+R13 is in progress. Native execution is blocked behind explicit `--allow-live` and read-only preflight; the live one-game smoke starts only after user authorization.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R13A-native-bridge`, based on `develop` at `8981413`
+- Current feature branch: `feature/R13-native-cutover`, based on `develop` at `32a9e04`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -57,7 +57,7 @@ R13A is complete and independently approved. R13 now performs the controlled liv
 | R11 | done | Settlement and one-game stop | R10 |
 | R12 | done | CLI and fake one-game E2E | R11 |
 | R13A | done | Native anti-corruption adapter bridge | R12 |
-| R13 | planned | Native one-game smoke and main cutover | R13A |
+| R13 | in_progress | Native one-game smoke and main cutover | R13A |
 | R14 | planned | Static plugin registry expansion | R05 |
 | R15 | planned | Control-plane security | R13 |
 | R16 | planned | Legacy migration and cleanup | R15 |
@@ -125,4 +125,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Fast-forward `develop` to R13A and create R13. Define live-game authorization, preflight, evidence capture, stop conditions and rollback in the R13 task book before any native click. The first live run must be a bounded single game and must stop at RESULT without starting another.
+Execute R13 Phase A from `docs/tasks/R13-native-cutover.md`: add the native `--allow-live` gate and read-only `--preflight --json`, test both headlessly, and leave the live game untouched. Ask the user for explicit authorization, deck index, and starting-state confirmation before Phase B.

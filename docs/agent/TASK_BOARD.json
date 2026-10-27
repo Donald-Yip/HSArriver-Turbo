@@ -371,8 +371,8 @@
       "last_verified_command": null
     },    {
       "id": "R13",
-      "status": "planned",
-      "owner": null,
+      "status": "in_progress",
+      "owner": "controller",
       "review_round": 0,
       "branch": "feature/R13-native-cutover",
       "depends_on": [
@@ -381,7 +381,7 @@
       "task_book": "docs/tasks/R13-native-cutover.md",
       "implementer_report": "docs/agent/reports/R13-implementer.md",
       "review_report": "docs/agent/reviews/R13-review.md",
-      "base_sha": null,
+      "base_sha": "32a9e04",
       "head_sha": null,
       "blockers": [],
       "last_verified_command": null

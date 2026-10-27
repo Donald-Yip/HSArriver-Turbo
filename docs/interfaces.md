@@ -327,7 +327,7 @@ uv run hslegend-onegame --help
 uv run hslegend-onegame --fake --json
 ```
 
-`--fake` is required until R13 supplies native adapters. A completed game exits 0, other terminal results exit 1, and CLI usage errors exit 2. The entrypoint may import only the standard library, `hslegend.application`, and `hslegend.bootstrap`; adapter/plugin composition belongs in bootstrap.
+`--fake` remains the deterministic headless path. Native execution requires the explicit `--allow-live` gate added by R13; omitted consent exits 2 before constructing the native runtime or clicking. A completed game exits 0, other terminal results exit 1, and CLI usage errors exit 2. The entrypoint may import only the standard library, `hslegend.application`, and `hslegend.bootstrap`; adapter/plugin composition belongs in bootstrap.
 
 ### Native Adapter Bridge
 
@@ -381,6 +381,29 @@ The default CLI selects `build_native_one_game`; `--fake` selects the
 deterministic demo builder. Tests inject both builders and never populate the
 real game graph.
 
+### Native Live Gate And Preflight
+
+R13 native execution is a separate, explicitly authorized operation:
+
+```text
+uv run hslegend-onegame --preflight --json
+uv run hslegend-onegame --preflight --deck-index N --json
+uv run hslegend-onegame --allow-live --deck-index N --max-turns M --json
+```
+
+Native execution without `--allow-live` is a usage error and must not construct
+the native runtime or click. `--fake` does not require the live gate.
+
+`--preflight` is read-only. It reports stable readiness fields for legacy runtime,
+config identity/log root, Power.log discovery, Hearthstone/HSAng process presence,
+foreground/UI evidence, admin status, and deck-index validity. It may use injected
+read-only probes but must not launch, click, save screenshots, run OCR inference,
+or mutate game state. Preflight exits 0 only when all required checks pass and
+otherwise exits 1 with machine-readable reasons.
+
+The live command is run only after explicit user authorization, a user-selected
+deck index, and a confirmed safe starting state. It must stop at authoritative
+`RESULT` and must never dismiss into or start a second game.
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New

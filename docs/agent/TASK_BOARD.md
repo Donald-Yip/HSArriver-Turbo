@@ -26,7 +26,7 @@ Updated: 2026-10-28
 | R11 | done | feature/R11-settlement-stop | R10 | Settlement observation and one-game stop approved |
 | R12 | done | feature/R12-one-game-cli | R11 | One-game orchestration, package, CLI, and fake E2E approved |
 | R13A | done | feature/R13A-native-bridge | R12 | Native anti-corruption adapter bridge approved |
-| R13 | planned | feature/R13-native-cutover | R13A | Native one game smoke and main cutover |
+| R13 | in_progress | feature/R13-native-cutover | R13A | Native safety gate, preflight, live smoke and cutover |
 | R14 | planned | feature/R14-plugin-registry | R05 | Static plugin expansion |
 | R15 | planned | feature/R15-control-security | R13 | Control-plane security |
 | R16 | planned | feature/R16-legacy-retirement | R15 | Legacy cleanup |
