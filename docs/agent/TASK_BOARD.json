@@ -349,18 +349,34 @@
       "implementer_report": "docs/agent/reports/R12-implementer.md",
       "review_report": "docs/agent/reviews/R12-review.md",
       "base_sha": "2426366",
-      "head_sha": null,
+      "head_sha": "8981413",
       "blockers": [],
       "last_verified_command": "R12 approved: focused 23; default 1500; discover 1745; opt-in 19; import/CLI/architecture/scope/compile pass"
     },
     {
+      "id": "R13A",
+      "status": "in_progress",
+      "owner": "controller",
+      "review_round": 0,
+      "branch": "feature/R13A-native-bridge",
+      "depends_on": [
+        "R12"
+      ],
+      "task_book": "docs/tasks/R13A-native-bridge.md",
+      "implementer_report": "docs/agent/reports/R13A-implementer.md",
+      "review_report": "docs/agent/reviews/R13A-review.md",
+      "base_sha": "8981413",
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": null
+    },    {
       "id": "R13",
       "status": "planned",
       "owner": null,
       "review_round": 0,
       "branch": "feature/R13-native-cutover",
       "depends_on": [
-        "R12"
+        "R13A"
       ],
       "task_book": "docs/tasks/R13-native-cutover.md",
       "implementer_report": "docs/agent/reports/R13-implementer.md",

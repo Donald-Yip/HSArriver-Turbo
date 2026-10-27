@@ -329,6 +329,29 @@ uv run hslegend-onegame --fake --json
 
 `--fake` is required until R13 supplies native adapters. A completed game exits 0, other terminal results exit 1, and CLI usage errors exit 2. The entrypoint may import only the standard library, `hslegend.application`, and `hslegend.bootstrap`; adapter/plugin composition belongs in bootstrap.
 
+### Native Adapter Bridge
+
+R13A introduces `hslegend.adapters.legacy` as the sole anti-corruption package
+allowed to import stable root legacy and legacy `src.*` systems. It exposes a
+`NativePorts` bundle containing only application ports: config, cards, mulligan
+and turn recommendation sources, game state, lobby state, action dispatch,
+journal, and artifact store. The bundle must not contain use cases, bootstrap
+objects, plugins, or entrypoints.
+
+`build_native_ports(...)` lives in the anti-corruption package; bootstrap's
+`build_native_one_game()` imports that public factory, constructs the same real
+R08-R11 use cases as the fake path, and returns `OneGameUseCase`. Root legacy
+imports are forbidden in every other `hslegend` package and in the three legacy
+god modules `FSM_action.py`, `manual_controller.py`, and `web_ui.py`.
+
+The Power.log bridge maps mutable legacy `LogState` into immutable
+`GameSnapshot`; complete game state is authoritative `RESULT`. The lobby bridge
+combines that authoritative state with injected UI recognition. The HSAng bridge
+preserves stable multi-frame OCR and then calls the existing recommendation
+parser. The action bridge maps only the existing declarative action families to
+injected legacy click primitives and rejects unknown actions without blind
+clicks. R13A performs no live click or native smoke; R13 owns that controlled
+cutover.
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New

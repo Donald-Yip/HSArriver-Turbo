@@ -52,3 +52,6 @@ Ruling: R05 may modify `window_tracker.py` only for deterministic shutdown clean
 - Decision: frontend behavior is exercised through the real `web/index.html` script in Node with a fake DOM.
 - Decision: overlay teardown is exercised through public `start()` lifecycle behavior with fake Tk, including a failed-mainloop path.
 - Final bounds: default 1,495; discover 1,657; CI opt-in 19; native-live 1.
+## 2026-10-27 R13 Split And Legacy Boundary
+
+Ruling: Split native work into R13A offline anti-corruption bridge and R13 live smoke/cutover. Only modules under `hslegend.adapters.legacy` may import stable root/src legacy systems; application, bootstrap, plugins, and entrypoints remain legacy-free, and `FSM_action.py`, `manual_controller.py`, and `web_ui.py` remain forbidden. Reason: the adapter layer owns external-system translation while bootstrap owns composition; mixing those concerns would recreate the original god-object problem. Cost if wrong: the native bridge may need one additional adapter export, reversible within R13A.\n

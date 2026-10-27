@@ -25,7 +25,8 @@ Updated: 2026-10-27
 | R10 | done | feature/R10-turn-loop | R09 | One-turn action loop approved |
 | R11 | done | feature/R11-settlement-stop | R10 | Settlement observation and one-game stop approved |
 | R12 | done | feature/R12-one-game-cli | R11 | One-game orchestration, package, CLI, and fake E2E approved |
-| R13 | planned | feature/R13-native-cutover | R12 | Native one game and main cutover |
+| R13A | in_progress | feature/R13A-native-bridge | R12 | Native anti-corruption adapter bridge, offline only |
+| R13 | planned | feature/R13-native-cutover | R13A | Native one game smoke and main cutover |
 | R14 | planned | feature/R14-plugin-registry | R05 | Static plugin expansion |
 | R15 | planned | feature/R15-control-security | R13 | Control-plane security |
 | R16 | planned | feature/R16-legacy-retirement | R15 | Legacy cleanup |

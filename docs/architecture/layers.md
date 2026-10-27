@@ -76,3 +76,21 @@ uv run hslegend-onegame --fake
 
 The fake adapter path uses real application use cases and deterministic ports.
 Native adapter composition remains an explicit R13 cutover.
+## Native Anti-Corruption Boundary
+
+`hslegend.adapters.legacy` is the only package allowed to import stable root
+legacy modules or legacy `src.*` packages. It translates them into existing
+application ports and exposes a port bundle only.
+
+```text
+legacy root/src systems
+  -> hslegend.adapters.legacy
+  -> NativePorts
+  -> hslegend.bootstrap.native
+  -> application use cases
+```
+
+Application, domain, plugins, bootstrap, and entrypoints must not import root
+legacy modules. `FSM_action`, `manual_controller`, and `web_ui` remain forbidden
+even inside the anti-corruption package. Native live smoke and cutover remain a
+separate R13 task because R13A is fully headless.\n

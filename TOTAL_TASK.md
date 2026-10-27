@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R12 is complete and independently approved. R13 now wires the existing R06/R07 adapters into a native one-game composition, validates the real Windows path, and decides the main cutover.
+R13A is in progress: build the adapter-local legacy anti-corruption bridge and native composition headlessly. R13 then performs the controlled live one-game smoke and cutover.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R12-one-game-cli`, based on `develop` at `2426366`
+- Current feature branch: `feature/R13A-native-bridge`, based on `develop` at `8981413`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -56,7 +56,8 @@ R12 is complete and independently approved. R13 now wires the existing R06/R07 a
 | R10 | done | Turn loop and reconciliation | R09 |
 | R11 | done | Settlement and one-game stop | R10 |
 | R12 | done | CLI and fake one-game E2E | R11 |
-| R13 | planned | Native one-game and main cutover | R12 |
+| R13A | in_progress | Native anti-corruption adapter bridge | R12 |
+| R13 | planned | Native one-game smoke and main cutover | R13A |
 | R14 | planned | Static plugin registry expansion | R05 |
 | R15 | planned | Control-plane security | R13 |
 | R16 | planned | Legacy migration and cleanup | R15 |
@@ -124,4 +125,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Fast-forward `develop` to R12 and execute R13: build the native adapter composition exclusively in bootstrap, add contract/native-smoke gates, preserve fail-closed recommendation handling, and cut over to `main` only after controlled one-game acceptance.
+Execute R13A from `docs/tasks/R13A-native-bridge.md`: build the adapter-local legacy bridge, Power.log snapshot mapping, authoritative lobby result, stable HSAng bridge, click dispatcher, native port bundle, and headless composition tests. Do not touch the live game until R13.
