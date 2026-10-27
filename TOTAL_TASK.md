@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02C5: headless finalization fix round 1 complete; ready for review.
+R03: domain contracts fix round 1 complete; ready for review.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R02C5-headless-final`, based on `develop` at `aee522e`
+- Current feature branch: `feature/R03-domain-contracts`, based on `develop` at `468b598`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -44,7 +44,7 @@ R02C5: headless finalization fix round 1 complete; ready for review.
 | R02C3 | done | Non-overlay test replacement | R02C2 |
 | R02C4 | done | Native and Node isolation | R02C3 |
 | R02C5 | done | Headless finalization | R02C4 |
-| R03 | planned | Domain contracts | R02C5 |
+| R03 | done | Domain contracts | R02C5 |
 | R04 | planned | Application ports and runtime controls | R03 |
 | R05 | planned | Plan and execution pipeline | R04 |
 | R06 | planned | Data adapters | R05 |
@@ -99,7 +99,7 @@ uv sync --locked --all-groups
 uv run python -m compileall -q src tests tools
 uv run python tools/check_architecture.py
 uv run python tools/check_architecture.py --self-test
-uv run python tools/check_task_scope.py --task R02C5
+uv run python tools/check_task_scope.py --task R03
 uv run python tools/check_task_scope.py --self-test
 uv run python tools/run_headless_tests.py
 ```
@@ -122,4 +122,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Reviewer verifies R02C5 fix round 1 and the complete staged file set; Controller commits only after focused, headless, opt-in, compile, architecture, and scope gates are confirmed.
+Fresh R03 reviewer verifies fix round 1 and the complete staged file set; Controller commits only after domain, headless, compile, architecture, and scope gates are confirmed.
