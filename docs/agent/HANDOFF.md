@@ -2,19 +2,16 @@
 
 ## Current Phase
 
-R02E final independent review.
+R09 mulligan vertical slice.
 
-## Result
+## Completed
 
-- Default: 1,495 tests, all pass.
-- Discover: 1,657 tests, all pass.
-- CI opt-in: 19/19 pass.
-- Native-live: 1 required real-window check, never run by CI.
-- B3/B4 completed and individually reverse-applicable.
+- R02E final portfolio APPROVED.
+- Default 1,495; discover 1,657; CI opt-in 19; native-live 1; all real tests 1,677.
+- Test gates are deterministic, independently rollbackable, and CI-enforced.
 
 ## Exact Next Action
 
-1. Independent reviewer validates final B4/B3 and portfolio totals.
-2. Fix findings.
-3. Mark R02E done and fast-forward `develop`.
-4. Start R09 mulligan vertical slice.
+1. Read R09 task book and current application ports/use cases.
+2. Implement the minimal mulligan slice with recommendation, validation, confirmation, cancellation, and evidence.
+3. Request independent review before commit.
