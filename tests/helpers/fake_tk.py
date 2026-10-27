@@ -307,9 +307,9 @@ _CALLBACK_NAMES = (
 
 
 @contextmanager
-def overlay_harness(dpi=96, lines=None, **callbacks):
-    """Run ``log_overlay._run`` against recording widgets."""
-    fake_tk = FakeTkModule(dpi=dpi)
+def overlay_environment(dpi=96, lines=None, tk_module=None, allow_reports=False, **callbacks):
+    """Apply fake Tk and overlay callback state without running the window."""
+    fake_tk = tk_module or FakeTkModule(dpi=dpi)
     saved = {name: getattr(log_overlay, name) for name in _CALLBACK_NAMES}
     saved.update(
         {
@@ -334,13 +334,8 @@ def overlay_harness(dpi=96, lines=None, **callbacks):
             mock.patch.object(log_overlay, "_raise_hearthstone", lambda: None),
             mock.patch.object(log_overlay, "_report", reports.append),
         ):
-            log_overlay._run()
-        if reports:
-            raise AssertionError(f"overlay reported errors: {reports}")
-        ui = OverlayUI(fake_tk)
-        ui.ui_scale = log_overlay.UI_SCALE
-        yield ui
-        if reports:
+            yield fake_tk, reports
+        if reports and not allow_reports:
             raise AssertionError(f"overlay reported errors: {reports}")
     finally:
         for name, value in saved.items():
@@ -350,3 +345,17 @@ def overlay_harness(dpi=96, lines=None, **callbacks):
                 log_overlay._CLOSING.set() if value else log_overlay._CLOSING.clear()
             else:
                 setattr(log_overlay, name, value)
+
+
+@contextmanager
+def overlay_harness(dpi=96, lines=None, **callbacks):
+    """Run ``log_overlay._run`` against recording widgets."""
+    with overlay_environment(dpi=dpi, lines=lines, **callbacks) as (fake_tk, reports):
+        log_overlay._run()
+        if reports:
+            raise AssertionError(f"overlay reported errors: {reports}")
+        ui = OverlayUI(fake_tk)
+        ui.ui_scale = log_overlay.UI_SCALE
+        yield ui
+        if reports:
+            raise AssertionError(f"overlay reported errors: {reports}")

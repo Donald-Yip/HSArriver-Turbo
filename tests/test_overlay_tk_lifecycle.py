@@ -11,10 +11,12 @@
 线程真正结束再建新的 Tk。
 """
 
+import gc
 import unittest
 from unittest.mock import patch
 
 import log_overlay
+from tests.helpers.fake_tk import FakeTkModule, overlay_environment
 
 
 class _Thread:
@@ -105,81 +107,83 @@ class OverlayStateTestCase(unittest.TestCase):
         return _ThreadFactory(cls=cls, on_exit=_release_started)
 
 
-class RunTeardownSourceTests(OverlayStateTestCase):
-    """Tk teardown must collect only after _run has returned and released its frame."""
+class _ExecutingThread:
+    """Thread double that runs the target synchronously with the fake Tk environment."""
 
-    def test_wraps_run_in_a_finally_block(self):
-        events = []
-        log_overlay._STARTED[0] = True
+    def __init__(self, target=None, **_ignored):
+        self.target = target
+        self._alive = False
+        self.joined = []
+        self.exception = None
 
-        def broken_run():
-            events.append("run")
-            raise RuntimeError("tk failed")
+    def start(self):
+        self._alive = True
+        try:
+            self.target()
+        except BaseException as exc:
+            self.exception = exc
+        finally:
+            self._alive = False
 
-        def collect():
-            events.append(("gc", log_overlay._STARTED[0]))
+    def is_alive(self):
+        return self._alive
 
-        with (
-            patch.object(log_overlay, "_run", side_effect=broken_run),
-            patch.object(log_overlay.gc, "collect", side_effect=collect),
-        ):
-            with self.assertRaises(RuntimeError):
-                log_overlay._run_overlay_thread()
+    def join(self, timeout=None):
+        self.joined.append(timeout)
+        self._alive = False
 
-        self.assertEqual(["run", ("gc", True)], events)
-        self.assertFalse(log_overlay._STARTED[0])
 
-    def test_collects_before_releasing_started(self):
-        events = []
-        log_overlay._STARTED[0] = True
-        with (
-            patch.object(log_overlay, "_run", side_effect=lambda: events.append("run")),
-            patch.object(
-                log_overlay.gc,
-                "collect",
-                side_effect=lambda: events.append(("gc", log_overlay._STARTED[0])),
-            ),
-        ):
-            log_overlay._run_overlay_thread()
+class _FirstMainloopFailsTk(FakeTkModule):
+    def __init__(self):
+        super().__init__(dpi=96)
+        self.mainloop_calls = 0
+        self.root.mainloop = self._mainloop
 
-        self.assertEqual(["run", ("gc", True)], events)
-        self.assertFalse(log_overlay._STARTED[0])
+    def _mainloop(self):
+        self.mainloop_calls += 1
+        if self.mainloop_calls == 1:
+            raise RuntimeError("fake mainloop failed")
+        return None
 
-    def test_wrapper_collects_after_run_returns(self):
-        state = {"returned": False, "collected_after_return": False}
-        log_overlay._STARTED[0] = True
 
-        def run():
-            state["returned"] = True
+class RunTeardownBehaviorTests(OverlayStateTestCase):
+    def test_public_start_cleanup_covers_normal_and_failure_paths(self):
+        def run_twice(tk_module=None, allow_reports=False):
+            created = []
 
-        def collect():
-            state["collected_after_return"] = state["returned"]
-            state["started_still_true"] = log_overlay._STARTED[0]
+            def factory(target=None, **_ignored):
+                thread = _ExecutingThread(target)
+                created.append(thread)
+                return thread
 
-        with (
-            patch.object(log_overlay, "_run", side_effect=run),
-            patch.object(log_overlay.gc, "collect", side_effect=collect),
-        ):
-            log_overlay._run_overlay_thread()
+            with overlay_environment(
+                _IS_RUNNING=lambda: False,
+                tk_module=tk_module,
+                allow_reports=allow_reports,
+            ) as (fake_tk, reports):
+                with (
+                    patch.object(log_overlay.threading, "Thread", factory),
+                    patch.object(log_overlay.gc, "collect", wraps=gc.collect) as collect,
+                ):
+                    self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
+                    self.assertFalse(log_overlay._STARTED[0])
+                    self.assertFalse(log_overlay._CLOSING.is_set())
+                    self.assertGreaterEqual(collect.call_count, 1)
 
-        self.assertTrue(state["collected_after_return"])
-        self.assertTrue(state["started_still_true"])
-        self.assertFalse(log_overlay._STARTED[0])
+                    self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
 
-    def test_start_records_wrapper_as_thread_target(self):
-        factory = self._factory()
-        with (
-            patch.object(log_overlay, "_run") as run,
-            patch.object(log_overlay.threading, "Thread", factory),
-        ):
-            self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
+            self.assertEqual(2, len(created))
+            self.assertTrue(all(not thread.is_alive() for thread in created))
+            self.assertTrue(all(thread.exception is None for thread in created))
+            return reports
 
-        self.assertEqual(1, len(factory.created))
-        self.assertIs(log_overlay._run_overlay_thread, factory.created[0].target)
-        run.assert_not_called()
+        normal_reports = run_twice()
+        self.assertFalse(normal_reports)
 
-    def test_gc_is_imported(self):
-        self.assertIsNotNone(log_overlay.gc.collect)
+        failing_tk = _FirstMainloopFailsTk()
+        failure_reports = run_twice(tk_module=failing_tk, allow_reports=True)
+        self.assertEqual(2, failing_tk.mainloop_calls)
+        self.assertTrue(any("窗口没能打开" in report for report in failure_reports), failure_reports)
 
 
 class JoinPreviousThreadTests(OverlayStateTestCase):
