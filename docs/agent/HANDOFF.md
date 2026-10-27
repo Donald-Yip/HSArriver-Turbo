@@ -2,33 +2,26 @@
 
 ## Current Phase
 
-R13 Phase A is complete and independently APPROVED. Phase B, the controlled native one-game run, is blocked pending explicit user authorization and a ready live environment.
+R15 UI parity is now the active priority: keep the complete pre-refactor Web UI and make its startup reliable on Chinese Windows and through the existing highest-privilege scheduled task.
 
 ## Completed
 
-- Native CLI requires `--allow-live` before importing/building the native graph.
-- `--preflight --json` is read-only, tracker-free, exact-command aware, and fail-closed on malformed reports/probes.
-- `--fake`, help, and native-without-consent remain isolated from legacy imports.
-- Phase A gates: focused 33/33; default 1,501; discover 1,816; opt-in 19/19; architecture 54 files and 23/23 self-tests.
-- No live Hearthstone command, click, screenshot save, OCR inference, or game mutation was performed.
+- R12 fake one-game flow and R13A native adapter bridge are approved.
+- R13 Phase A live gate/preflight and focus-before-live are committed.
+- The existing `web_ui.py` + `web/index.html` remain the full-feature UI.
+- Root startup defect found: `web_ui.py` crashes on Chinese Windows because the admin warning uses characters not encodable by GBK stdout.
 
-## Live Readiness Blockers
+## Current Task
 
-The current worktree preflight reports:
-
-- BattleTag identity is not configured.
-- Log root/Power.log are not configured in this worktree.
-- Hearthstone is not foreground/input-ready.
-- The agent process is not elevated.
-- Hearthstone and HSAng processes are present; legacy runtime and deck slot mapping work.
+- Task book: `docs/tasks/R15-ui-parity.md`.
+- Branch: `feature/R15-ui-parity`.
+- Force UTF-8 for Web UI stdio, `hsctl serve start`, elevated launch and the scheduled-task launcher.
+- Regenerate the ignored launcher and verify `/api/status`.
+- Preserve every existing UI control and workflow.
 
 ## Exact Next Action
 
-Before Phase B, the user must explicitly authorize one native game and provide:
-
-1. The controlled deck index.
-2. A configured BattleTag and existing Hearthstone log root for the elevated process.
-3. Hearthstone and HSAng running, with Hearthstone at a confirmed safe starting state.
-4. An elevated terminal that will execute only the bounded `--allow-live` command.
-
-Until then, keep R13 in progress and do not run a command that can click.
+1. Implement UTF-8-safe startup without changing UI features.
+2. Start the full Web UI through the highest-privilege task.
+3. Verify the browser UI and `/api/status`.
+4. Run tests, independent review and one R15 commit.

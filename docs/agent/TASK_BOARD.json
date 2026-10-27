@@ -407,14 +407,14 @@
     },
     {
       "id": "R15",
-      "status": "planned",
-      "owner": null,
+      "status": "in_progress",
+      "owner": "controller",
       "review_round": 0,
-      "branch": "feature/R15-control-security",
+      "branch": "feature/R15-ui-parity",
       "depends_on": [
-        "R13"
+        "R13A"
       ],
-      "task_book": "docs/tasks/R15-control-security.md",
+      "task_book": "docs/tasks/R15-ui-parity.md",
       "implementer_report": "docs/agent/reports/R15-implementer.md",
       "review_report": "docs/agent/reviews/R15-review.md",
       "base_sha": null,

@@ -28,7 +28,7 @@ Updated: 2026-10-28
 | R13A | done | feature/R13A-native-bridge | R12 | Native anti-corruption adapter bridge approved |
 | R13 | in_progress | feature/R13-native-cutover | R13A | Phase A safety/preflight approved; live smoke awaits user authorization |
 | R14 | planned | feature/R14-plugin-registry | R05 | Static plugin expansion |
-| R15 | planned | feature/R15-control-security | R13 | Control-plane security |
+| R15 | in_progress | feature/R15-ui-parity | R13A | Full-feature UI parity and reliable startup |
 | R16 | planned | feature/R16-legacy-retirement | R15 | Legacy cleanup |
 
 ## WIP Limit

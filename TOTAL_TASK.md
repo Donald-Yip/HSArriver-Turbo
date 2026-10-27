@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R13 Phase A is complete and approved. The controlled Phase B native game remains blocked pending explicit user authorization, live configuration/foreground readiness, and an elevated process.
+R15 UI parity is the active priority. The full pre-refactor Web UI must remain the operating surface and start reliably on Chinese Windows.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R13-native-cutover`, based on `develop` at `32a9e04`
+- Current feature branch: `feature/R15-ui-parity`, based on `develop` at `8662eea`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -59,7 +59,7 @@ R13 Phase A is complete and approved. The controlled Phase B native game remains
 | R13A | done | Native anti-corruption adapter bridge | R12 |
 | R13 | in_progress | Native one-game smoke and main cutover | R13A |
 | R14 | planned | Static plugin registry expansion | R05 |
-| R15 | planned | Control-plane security | R13 |
+| R15 | in_progress | Full-feature UI parity and reliable startup | R13A |
 | R16 | planned | Legacy migration and cleanup | R15 |
 
 ## Key Interfaces
@@ -125,4 +125,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Obtain explicit user authorization for one native game, the controlled deck index, a valid BattleTag/log root in an elevated context, and a confirmed safe Hearthstone starting state. Run the full read-only preflight first; only an all-pass report authorizes Phase B.
+Restore reliable startup of the complete existing Web UI: force UTF-8 in direct, elevated and scheduled-task launch paths, verify `/api/status`, and keep all existing controls and behavior unchanged. R13 live Phase B remains deferred.
