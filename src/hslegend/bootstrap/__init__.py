@@ -67,11 +67,12 @@ from .fake import FakeOneGameHarness, build_fake_one_game
 
 
 def __getattr__(name: str):
-    if name == "build_native_one_game":
-        from .native import build_native_one_game
+    if name in {"build_native_one_game", "build_native_preflight"}:
+        from . import native
 
-        globals()[name] = build_native_one_game
-        return build_native_one_game
+        value = getattr(native, name)
+        globals()[name] = value
+        return value
     raise AttributeError(name)
 
 
@@ -80,4 +81,5 @@ __all__ = [
     "FakeOneGameHarness",
     "build_fake_one_game",
     "build_native_one_game",
+    "build_native_preflight",
 ]

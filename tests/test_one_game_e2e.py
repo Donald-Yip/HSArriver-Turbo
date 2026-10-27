@@ -8,7 +8,9 @@ import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
+from hslegend.adapters.legacy.preflight import PreflightCheck, PreflightReport
 from hslegend.application import LobbyPhase, OneGameCommand, OneGameStatus
 from hslegend.application.use_cases.enter_battle import LobbyAction
 from hslegend.application.use_cases.finish_battle import FinishBattleStatus
@@ -116,7 +118,26 @@ class OneGameCliTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode)
         self.assertIn("hslegend-onegame", completed.stdout)
         self.assertIn("--fake", completed.stdout)
+        self.assertIn("--preflight", completed.stdout)
+        self.assertIn("--allow-live", completed.stdout)
         self.assertEqual("", completed.stderr)
+
+    def test_native_without_allow_live_is_usage_error_without_builder_call(self) -> None:
+        calls: list[str] = []
+
+        def native_builder():
+            calls.append("native")
+            return build_fake_one_game()
+
+        with self.assertRaises(SystemExit) as raised:
+            cli_main(["--json"], native_builder=native_builder)
+        self.assertEqual(2, raised.exception.code)
+        self.assertEqual([], calls)
+
+    def test_fake_and_preflight_modes_conflict(self) -> None:
+        completed = run_cli("--fake", "--preflight", "--json")
+        self.assertEqual(2, completed.returncode)
+        self.assertIn("not allowed with argument", completed.stderr)
 
     def test_default_selects_native_builder(self) -> None:
         calls: list[str] = []
@@ -132,7 +153,7 @@ class OneGameCliTests(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             code = cli_main(
-                ["--json"],
+                ["--allow-live", "--json"],
                 native_builder=native_builder,
                 fake_builder=fake_builder,
             )
@@ -140,6 +161,173 @@ class OneGameCliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual(["native"], calls)
         self.assertEqual("completed", json.loads(output.getvalue())["status"])
+
+    def test_preflight_uses_injected_read_only_builder(self) -> None:
+        calls: list[int] = []
+        report = PreflightReport(
+            ok=True,
+            deck_index=2,
+            ui_phase="main_menu",
+            checks=(PreflightCheck("legacy_runtime", True),),
+            live_command="uv run hslegend-onegame --allow-live --deck-index 2 --json",
+        )
+
+        def preflight_builder(deck_index: int, **kwargs):
+            calls.append(deck_index)
+            return report
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--preflight", "--deck-index", "2", "--json"],
+                preflight_builder=preflight_builder,
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual([2], calls)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(2, payload["deck_index"])
+
+    def test_preflight_not_ready_returns_one(self) -> None:
+        report = PreflightReport(
+            ok=False,
+            deck_index=0,
+            ui_phase="unknown",
+            checks=(PreflightCheck("admin", False, "admin_required", "elevate"),),
+            live_command="uv run hslegend-onegame --allow-live --deck-index 0 --json",
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--preflight", "--json"],
+                preflight_builder=lambda _index, **_kwargs: report,
+            )
+        self.assertEqual(1, code)
+        self.assertEqual("admin_required", json.loads(output.getvalue())["checks"][0]["reason_code"])
+
+    def test_preflight_rejects_allow_live_conflict(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            cli_main(["--preflight", "--allow-live", "--json"])
+        self.assertEqual(2, raised.exception.code)
+
+    def test_preflight_preserves_non_default_live_command(self) -> None:
+        captured: dict[str, object] = {}
+        def preflight_builder(deck_index: int, *, live_command: str):
+            captured["deck_index"] = deck_index
+            captured["live_command"] = live_command
+            return PreflightReport(
+                ok=True,
+                deck_index=deck_index,
+                ui_phase="deck_select",
+                checks=(PreflightCheck("legacy_runtime", True),),
+                live_command=live_command,
+            )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                [
+                    "--preflight",
+                    "--deck-index",
+                    "1",
+                    "--command-id",
+                    "custom-command",
+                    "--max-turns",
+                    "3",
+                    "--timeout-seconds",
+                    "45",
+                    "--json",
+                ],
+                preflight_builder=preflight_builder,
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, captured["deck_index"])
+        command = str(captured["live_command"])
+        self.assertIn("--command-id custom-command", command)
+        self.assertIn("--max-turns 3", command)
+        self.assertIn("--timeout-seconds 45.0", command)
+        self.assertEqual(command, json.loads(output.getvalue())["live_command"])
+
+    def test_malformed_preflight_report_fails_closed(self) -> None:
+        malformed = SimpleNamespace(
+            ok=True,
+            checks=(SimpleNamespace(ok=True, check_id="legacy_runtime"),),
+            deck_index=0,
+            ui_phase="main_menu",
+            to_primitive=lambda: {"ok": True},
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--preflight", "--json"],
+                preflight_builder=lambda _index, **_kwargs: malformed,
+            )
+        self.assertEqual(1, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual("preflight_report_invalid", payload["reason_code"])
+        self.assertFalse(payload["ok"])
+
+    def test_preflight_ignores_malformed_to_primitive_payload(self) -> None:
+        report = SimpleNamespace(
+            ok=True,
+            checks=(
+                SimpleNamespace(
+                    ok=True,
+                    check_id="legacy_runtime",
+                    reason_code="",
+                    detail="source-checkout",
+                ),
+            ),
+            deck_index=0,
+            ui_phase="main_menu",
+            live_command="uv run hslegend-onegame --allow-live --json",
+            to_primitive=lambda: {},
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--preflight", "--json"],
+                preflight_builder=lambda _index, **_kwargs: report,
+            )
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, len(payload["checks"]))
+        self.assertEqual("legacy_runtime", payload["checks"][0]["check_id"])
+
+    def test_preflight_builder_exception_is_json_failure(self) -> None:
+        def failing_builder(_deck_index: int, **_kwargs):
+            raise RuntimeError("probe setup failed")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--preflight", "--json"],
+                preflight_builder=failing_builder,
+            )
+        self.assertEqual(1, code)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["ok"])
+        self.assertEqual("preflight_error", payload["reason_code"])
+
+    def test_native_builder_typed_reason_is_preserved(self) -> None:
+        class NativeFailure(RuntimeError):
+            reason_code = "legacy_runtime_unavailable"
+
+        def native_builder():
+            raise NativeFailure("missing legacy runtime")
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--allow-live", "--json"],
+                native_builder=native_builder,
+            )
+        self.assertEqual(1, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual("legacy_runtime_unavailable", payload["reason_code"])
 
     def test_fake_selects_fake_builder(self) -> None:
         calls: list[str] = []

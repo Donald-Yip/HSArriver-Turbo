@@ -373,7 +373,7 @@
       "id": "R13",
       "status": "in_progress",
       "owner": "controller",
-      "review_round": 0,
+      "review_round": 4,
       "branch": "feature/R13-native-cutover",
       "depends_on": [
         "R13A"
@@ -383,8 +383,10 @@
       "review_report": "docs/agent/reviews/R13-review.md",
       "base_sha": "32a9e04",
       "head_sha": null,
-      "blockers": [],
-      "last_verified_command": null
+      "blockers": [
+        "Phase B requires user authorization, configured BattleTag/log root, safe foreground state, and elevated process"
+      ],
+      "last_verified_command": "R13 Phase A approved: focused 33; default 1501; discover 1816; opt-in 19; architecture 54 files + 23/23 self-tests; scope/compile/import/CLI/preflight/diff pass"
     },
     {
       "id": "R14",

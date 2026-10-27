@@ -2,27 +2,33 @@
 
 ## Current Phase
 
-R13 native one-game acceptance and cutover is in progress. Implement the live safety gate and read-only preflight before any real click.
+R13 Phase A is complete and independently APPROVED. Phase B, the controlled native one-game run, is blocked pending explicit user authorization and a ready live environment.
 
 ## Completed
 
-- R13A anti-corruption bridge is approved and committed at `32a9e04`.
-- Native action dispatch covers enter/select/start, mulligan, card, target, attack, skill, location and end-turn.
-- Power.log errors invalidate lobby and game-state authority until a successful later revision.
-- `--help` and `--fake` remain isolated from native legacy imports.
-- R13A gates: focused 53/53; default 1,501; discover 1,793; opt-in 19/19.
+- Native CLI requires `--allow-live` before importing/building the native graph.
+- `--preflight --json` is read-only, tracker-free, exact-command aware, and fail-closed on malformed reports/probes.
+- `--fake`, help, and native-without-consent remain isolated from legacy imports.
+- Phase A gates: focused 33/33; default 1,501; discover 1,816; opt-in 19/19; architecture 54 files and 23/23 self-tests.
+- No live Hearthstone command, click, screenshot save, OCR inference, or game mutation was performed.
 
-## Current Task
+## Live Readiness Blockers
 
-- Task book: `docs/tasks/R13-native-cutover.md`.
-- Implement `--allow-live` and `--preflight --json` without any live clicks.
-- Build and test a read-only readiness report covering runtime/config/log/process/UI/admin/deck.
-- Keep `--fake` independent from the live gate.
-- Do not perform the native game until the user explicitly authorizes it and supplies the controlled deck index/start state.
+The current worktree preflight reports:
+
+- BattleTag identity is not configured.
+- Log root/Power.log are not configured in this worktree.
+- Hearthstone is not foreground/input-ready.
+- The agent process is not elevated.
+- Hearthstone and HSAng processes are present; legacy runtime and deck slot mapping work.
 
 ## Exact Next Action
 
-1. Dispatch one R13 implementer for Phase A only.
-2. Review/commit the safety gate and preflight headlessly.
-3. Ask the user for explicit live-run authorization, deck index, and confirmed starting state.
-4. Run one bounded native game and record acceptance evidence.
+Before Phase B, the user must explicitly authorize one native game and provide:
+
+1. The controlled deck index.
+2. A configured BattleTag and existing Hearthstone log root for the elevated process.
+3. Hearthstone and HSAng running, with Hearthstone at a confirmed safe starting state.
+4. An elevated terminal that will execute only the bounded `--allow-live` command.
+
+Until then, keep R13 in progress and do not run a command that can click.

@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R13 is in progress. Native execution is blocked behind explicit `--allow-live` and read-only preflight; the live one-game smoke starts only after user authorization.
+R13 Phase A is complete and approved. The controlled Phase B native game remains blocked pending explicit user authorization, live configuration/foreground readiness, and an elevated process.
 
 ## Branch And Environment
 
@@ -125,4 +125,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Execute R13 Phase A from `docs/tasks/R13-native-cutover.md`: add the native `--allow-live` gate and read-only `--preflight --json`, test both headlessly, and leave the live game untouched. Ask the user for explicit authorization, deck index, and starting-state confirmation before Phase B.
+Obtain explicit user authorization for one native game, the controlled deck index, a valid BattleTag/log root in an elevated context, and a confirmed safe Hearthstone starting state. Run the full read-only preflight first; only an all-pass report authorizes Phase B.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -53,15 +54,26 @@ def build_parser() -> argparse.ArgumentParser:
         prog="hslegend-onegame",
         description="Run exactly one Hearthstone game.",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--fake",
         action="store_true",
         help="use deterministic demo adapters instead of the native bridge",
     )
+    mode.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run read-only native readiness checks without playing",
+    )
+    parser.add_argument(
+        "--allow-live",
+        action="store_true",
+        help="explicitly authorize native Hearthstone input",
+    )
     parser.add_argument(
         "--json",
         action="store_true",
-        help="write exactly one machine-readable result object to stdout",
+        help="write exactly one machine-readable object to stdout",
     )
     parser.add_argument("--command-id", type=_non_empty_text, default="cli-onegame")
     parser.add_argument("--deck-index", type=_non_negative_int, default=0)
@@ -100,14 +112,161 @@ def _use_case_from_builder(builder: Callable[[], Any]) -> Any:
     return getattr(built, "use_case", built)
 
 
+def _reason_code(exc: Exception) -> str:
+    value = getattr(exc, "reason_code", "")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "cli_error"
+
+
+def _live_command(args: argparse.Namespace) -> str:
+    return subprocess.list2cmdline(
+        [
+            "uv",
+            "run",
+            "hslegend-onegame",
+            "--allow-live",
+            "--command-id",
+            args.command_id,
+            "--deck-index",
+            str(args.deck_index),
+            "--max-turns",
+            str(args.max_turns),
+            "--timeout-seconds",
+            str(args.timeout_seconds),
+            "--enter-battle-timeout-seconds",
+            str(args.enter_battle_timeout_seconds),
+            "--mulligan-timeout-seconds",
+            str(args.mulligan_timeout_seconds),
+            "--turn-timeout-seconds",
+            str(args.turn_timeout_seconds),
+            "--max-actions-per-turn",
+            str(args.max_actions_per_turn),
+            "--poll-interval-seconds",
+            str(args.poll_interval_seconds),
+            "--json",
+        ]
+    )
+
+
+def _validate_preflight_report(report: Any) -> tuple[bool, str]:
+    checks = getattr(report, "checks", None)
+    if not isinstance(checks, (tuple, list)) or not checks:
+        return False, "preflight checks are missing"
+    report_ok = getattr(report, "ok", None)
+    if type(report_ok) is not bool:
+        return False, "preflight ok must be an exact bool"
+    if type(getattr(report, "deck_index", None)) is not int:
+        return False, "preflight deck_index must be an int"
+    if int(report.deck_index) < 0:
+        return False, "preflight deck_index must be non-negative"
+    phase = getattr(report, "ui_phase", None)
+    if not isinstance(phase, str) or not phase.strip():
+        return False, "preflight ui_phase must be non-empty text"
+    command = getattr(report, "live_command", None)
+    if not isinstance(command, str) or not command.strip():
+        return False, "preflight live_command must be non-empty text"
+    for check in checks:
+        if type(getattr(check, "ok", None)) is not bool:
+            return False, "preflight check ok must be an exact bool"
+        check_id = getattr(check, "check_id", None)
+        if not isinstance(check_id, str) or not check_id.strip():
+            return False, "preflight check_id must be non-empty text"
+        reason = getattr(check, "reason_code", None)
+        detail = getattr(check, "detail", None)
+        if not isinstance(reason, str) or not isinstance(detail, str):
+            return False, "preflight check reason/detail must be text"
+        if check.ok is False and not reason.strip():
+            return False, "failed preflight check requires reason_code"
+    if report_ok != all(check.ok for check in checks):
+        return False, "preflight ok contradicts its checks"
+    return True, ""
+
+
+def _preflight_exit(*, json_output: bool, report: Any) -> int:
+    valid, invalid_reason = _validate_preflight_report(report)
+    if not valid:
+        error = {
+            "ok": False,
+            "reason_code": "preflight_report_invalid",
+            "message": invalid_reason,
+        }
+        if json_output:
+            print(json.dumps(error, ensure_ascii=False, sort_keys=True))
+        else:
+            print("preflight report invalid: " + invalid_reason, file=sys.stderr)
+        return 1
+    payload = {
+        "ok": report.ok,
+        "deck_index": report.deck_index,
+        "ui_phase": report.ui_phase,
+        "checks": [
+            {
+                "check_id": check.check_id,
+                "ok": check.ok,
+                "reason_code": check.reason_code,
+                "detail": check.detail,
+            }
+            for check in report.checks
+        ],
+        "live_command": report.live_command,
+    }
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    else:
+        for check in report.checks:
+            state = "ok" if check.ok else "fail"
+            reason = getattr(check, "reason_code", "")
+            detail = getattr(check, "detail", "")
+            suffix = " (" + reason + ": " + detail + ")" if reason or detail else ""
+            print("[{}] {}{}".format(state, check.check_id, suffix))
+    return 0 if report.ok else 1
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
     native_builder: Callable[[], Any] | None = None,
     fake_builder: Callable[[], Any] | None = None,
+    preflight_builder: Callable[..., Any] | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.fake and args.allow_live:
+        parser.error("--allow-live is only valid for native execution")
+    if args.preflight and args.allow_live:
+        parser.error("--preflight is read-only and does not accept --allow-live")
+
+    if args.preflight:
+        if preflight_builder is None:
+            from hslegend.bootstrap.native import build_native_preflight
+
+            preflight_builder = build_native_preflight
+        try:
+            report = preflight_builder(
+                args.deck_index,
+                live_command=_live_command(args),
+            )
+        except Exception as exc:
+            error = {
+                "ok": False,
+                "deck_index": args.deck_index,
+                "reason_code": "preflight_error",
+                "message": str(exc) or type(exc).__name__,
+            }
+            if args.json:
+                print(json.dumps(error, ensure_ascii=False, sort_keys=True))
+            else:
+                print("preflight failed: " + error["message"], file=sys.stderr)
+            return 1
+        return _preflight_exit(
+            json_output=args.json,
+            report=report,
+        )
+
+    if not args.fake and not args.allow_live:
+        parser.error("--allow-live is required for native Hearthstone input")
 
     try:
         command = OneGameCommand(
@@ -140,7 +299,7 @@ def main(
             "command_id": command.command_id,
             "session_id": command.command_id,
             "status": OneGameStatus.FAILED.value,
-            "reason_code": "cli_error",
+            "reason_code": _reason_code(exc),
             "message": str(exc) or type(exc).__name__,
         }
         if args.json:

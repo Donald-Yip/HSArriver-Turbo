@@ -19,9 +19,12 @@ from pathlib import Path
 
 FORBIDDEN_EXACT = {
     "battle_entry",
+    "get_screen",
     "hslegend.adapters.legacy.factory",
+    "hslegend.adapters.legacy.preflight",
     "log_op",
     "log_state",
+    "power_log",
     "src.recommendation_models",
 }
 FORBIDDEN_PREFIXES = (
@@ -89,6 +92,19 @@ class ImportIsolationTests(unittest.TestCase):
             "    exit_code = int(exc.code or 0)\n"
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual([], loaded)
+
+    def test_native_without_allow_live_does_not_load_legacy_runtime(self) -> None:
+        completed, loaded = run_script(
+            "import runpy, sys\n"
+            "sys.argv = ['hslegend-onegame', '--json']\n"
+            "try:\n"
+            "    runpy.run_module('hslegend.entrypoints.onegame', run_name='__main__')\n"
+            "except SystemExit as exc:\n"
+            "    exit_code = int(exc.code or 0)\n"
+        )
+        self.assertEqual(0, completed.returncode)
+        self.assertIn("--allow-live is required", completed.stderr)
         self.assertEqual([], loaded)
 
     def test_fake_does_not_load_legacy_runtime(self) -> None:

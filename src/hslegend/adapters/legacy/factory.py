@@ -39,8 +39,11 @@ _REQUIRED_LEGACY_PATHS = (
     "cards.json",
     "click.py",
     "config.py",
+    "display_mapping.py",
+    "get_screen.py",
     "log_op.py",
     "log_state.py",
+    "power_log.py",
     "src/capture/desktop_capture.py",
     "src/ocr/paddle_adapter.py",
     "src/ocr/stable_reader.py",
@@ -109,7 +112,10 @@ def _load_legacy_runtime(root_path: str | Path | None = None) -> SimpleNamespace
     try:
         battle_entry = importlib.import_module("battle_entry")
         config = importlib.import_module("config")
+        display_mapping = importlib.import_module("display_mapping")
+        get_screen = importlib.import_module("get_screen")
         log_op = importlib.import_module("log_op")
+        power_log = importlib.import_module("power_log")
         desktop_capture = importlib.import_module("src.capture.desktop_capture")
         paddle_adapter = importlib.import_module("src.ocr.paddle_adapter")
         stable_reader = importlib.import_module("src.ocr.stable_reader")
@@ -130,7 +136,10 @@ def _load_legacy_runtime(root_path: str | Path | None = None) -> SimpleNamespace
         battle_entry=battle_entry,
         click=legacy_click,
         config=config,
+        display_mapping=display_mapping,
+        get_screen=get_screen,
         log_op=log_op,
+        power_log=power_log,
         DesktopCapture=desktop_capture.DesktopCapture,
         PaddleOcrAdapter=paddle_adapter.PaddleOcrAdapter,
         StableRecommendationReader=stable_reader.StableRecommendationReader,

@@ -17,8 +17,13 @@ _LAZY_EXPORTS = {
     "LegacyPowerLogError": (".powerlog", "LegacyPowerLogError"),
     "LegacyPowerLogPump": (".powerlog", "LegacyPowerLogPump"),
     "LegacyRuntimeUnavailable": (".factory", "LegacyRuntimeUnavailable"),
+    "PreflightCheck": (".preflight", "PreflightCheck"),
+    "PreflightProbes": (".preflight", "PreflightProbes"),
+    "PreflightReport": (".preflight", "PreflightReport"),
     "StableHsangRecommendationSource": (".hsang", "StableHsangRecommendationSource"),
     "build_native_ports": (".factory", "build_native_ports"),
+    "build_native_preflight": (".preflight", "build_native_preflight"),
+    "run_preflight": (".preflight", "run_preflight"),
     "legacy_paths": (".paths", "legacy_paths"),
     "resolve_legacy_root": (".factory", "resolve_legacy_root"),
 }
