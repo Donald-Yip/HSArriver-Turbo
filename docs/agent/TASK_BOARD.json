@@ -304,8 +304,8 @@
     },
     {
       "id": "R10",
-      "status": "planned",
-      "owner": null,
+      "status": "in_progress",
+      "owner": "implementer",
       "review_round": 0,
       "branch": "feature/R10-turn-loop",
       "depends_on": [
@@ -314,7 +314,7 @@
       "task_book": "docs/tasks/R10-turn-loop.md",
       "implementer_report": "docs/agent/reports/R10-implementer.md",
       "review_report": "docs/agent/reviews/R10-review.md",
-      "base_sha": null,
+      "base_sha": "34a9d08",
       "head_sha": null,
       "blockers": [],
       "last_verified_command": null

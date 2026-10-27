@@ -22,7 +22,7 @@ Updated: 2026-10-27
 | R02D | done | feature/R02D-test-portfolio | R08 | Test portfolio audit committed |
 | R02E | done | feature/R02E-test-cleanup | R02D | Final portfolio approved and committed |
 | R09 | done | feature/R09-mulligan | R02E | Mulligan slice approved |
-| R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |
+| R10 | in_progress | feature/R10-turn-loop | R09 | Minimal one-turn action loop |
 | R11 | planned | feature/R11-settlement-stop | R10 | Settlement and stop |
 | R12 | planned | feature/R12-one-game-cli | R11 | CLI and fake full game |
 | R13 | planned | feature/R13-native-cutover | R12 | Native one game and main cutover |
