@@ -58,6 +58,16 @@ class DtoContractTests(unittest.TestCase):
 
         with self.assertRaises(dataclasses.FrozenInstanceError):
             observation.source_confidence = 1.0  # type: ignore[misc]
+        with self.assertRaises(ValueError):
+            GameObservation(snapshot(), 1.1)
+        with self.assertRaises(ValueError):
+            RecommendationObservation(
+                RecommendationMode.MULLIGAN,
+                "keep",
+                -0.1,
+                "evidence",
+                "snapshot",
+            )
 
         for value in (observation, recommendation, lobby):
             with self.subTest(value=type(value).__name__):
@@ -129,21 +139,6 @@ class DtoContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             OneGameCommand("command", "deck", max_turns=0)
         self.assertEqual(3, OneGameCommand("command", "deck", max_turns=3).max_turns)
-
-    def test_invalid_confidence_and_status_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            GameObservation(snapshot(), 1.1)
-        with self.assertRaises(ValueError):
-            RecommendationObservation(
-                RecommendationMode.MULLIGAN,
-                "keep",
-                -0.1,
-                "evidence",
-                "snapshot",
-            )
-        with self.assertRaises(ValueError):
-            OneGameCommand("command", "deck", max_turns=0)
-
 
 if __name__ == "__main__":
     unittest.main()

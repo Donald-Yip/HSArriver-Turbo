@@ -227,3 +227,11 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - Rewrote R06 in place as a fixed-frame `screen_regions -> battle_entry.identify` behavior check.
 - Rewrote R07 in place as a default-coordinate plus save/load roundtrip check.
 - Public equivalent gate: 31/31 pass; `HotChannelTests` 19 -> 18; `ConfigTests` 3 -> 2.
+
+### B2 DTO duplicate boundary assertion
+
+- Status: implemented, pending independent review and commit.
+- Merged M01 confidence assertions into `test_observations_are_immutable_and_serializable`.
+- Reused the existing `test_max_turns_requires_an_exact_positive_int` assertion for `max_turns=0`.
+- Removed the duplicate `test_invalid_confidence_and_status_are_rejected`.
+- `tests.application.test_dto`: 7 -> 6 methods, all pass; default remains 1,523, discover target 1,685.

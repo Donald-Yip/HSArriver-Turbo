@@ -22,7 +22,7 @@ Stage 1 executes only B1, B2, and B5 from `docs/testing/TEST_CLEANUP_PLAN.md`:
 - B1: remove A01/A02 and rewrite R06/R07 in place.
 - B2: merge M01 into existing DTO contract tests.
 - B5: rewrite R08/R09 in place.
-- Exact target: default `1,525 -> 1,522`; opt-in remains `3`.
+- Exact target: default `1,525 -> 1,523`; discover `1,688 -> 1,685`; opt-in remains `3`.
 
 B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
 
@@ -70,6 +70,8 @@ B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
 - `docs/testing/TEST_CLEANUP_PLAN.md`
 - `docs/tasks/R02E-*.md`
 - `docs/agent/reports/R02E-*.md`
+- `docs/agent/reports/R02D-implementer.md`
+- `docs/agent/DECISIONS.md`
 - `docs/agent/reviews/R02E-*.md`
 - `docs/agent/TASK_BOARD.md`
 - `docs/agent/TASK_BOARD.json`

@@ -31,3 +31,9 @@ Ruling: Execute test rationalization as R02C1-R02C5 by replacement batch - preve
 ## 2026-10-27 - R05 Window Tracker Scope
 
 Ruling: R05 may modify `window_tracker.py` only for deterministic shutdown cleanup - the full headless gate exposed an unrelated timing flake, and the fix is isolated to lifecycle cleanup - if wrong, revert that hunk and the corresponding tracker test with the rest of R05.
+
+## 2026-10-27 R02E Count Accounting
+
+- Decision: cleanup count gates must report `default`, `discover`, and `opt-in` separately.
+- Reason: `tests/application`, `tests/domain`, `tests/adapters`, and `tests/plugins` are not collected by the default top-level headless runner.
+- Consequence: B2 reduces `discover` but not `default`; corrected final targets are default 1,495, discover 1,657, opt-in 20.

@@ -70,7 +70,7 @@ The independent review identified four Important findings and two Minor findings
 - Added O14 for the environment-bound `test_running_interpreter_is_the_recommended_one`.
 - Added R10-R15 for six missed implementation-string tests.
 - Removed R03 after confirming `starship_card_ids` is a public seam and the claimed private-patch evidence was false.
-- Added an exact cumulative method-count ledger for the recommended B1/B2/B5/B9/B8/B7/B6/B4/B3 order: default `1,525 -> 1,494`, opt-in `3 -> 20`.
+- Added an exact cumulative method-count ledger for the recommended B1/B2/B5/B9/B8/B7/B6/B4/B3 order. Later R02E execution corrected the suite-membership assumption: the final targets are default `1,525 -> 1,495`, discover `1,688 -> 1,657`, opt-in `3 -> 20`.
 - Expanded opaque `...::Class.method` shorthand to full identities.
 - Fixed the O12 identity typo.
 - Validated all 40 candidate identities against the current AST: 40 rows, 40 unique, 0 missing.

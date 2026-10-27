@@ -20,6 +20,7 @@
 - 全树 AST：108 文件 / 29,240 行 / 366 类 / 1,691 方法。
 - 默认 runner：1,525 run / 1,524 pass / 0 fail / 0 error / 1 skip。
 - 普通 discover：1,688 run / 1,687 pass / 0 fail / 0 error / 1 skip。
+- 默认 runner 与 discover 的差异：分层 `tests/domain`、`tests/application`、`tests/adapters`、`tests/plugins` 共 163 方法不在默认 runner 中；因此分层测试删除只影响 discover，不影响 default。
 - 显式 opt-in：3 run / 3 pass / 0 fail / 0 error / 0 skip。
 - 清理候选：40 个方法 = A 类 MUST-REMOVE 4 + M 类 MERGE 8 + R 类 REWRITE 14 + O 类 MOVE-OPT-IN 14。
 
@@ -43,20 +44,20 @@
 
 ### 3.1 按推荐顺序的精确数量账本
 
-| 步骤 | 默认 remove | 默认 add | 默认累计 | opt-in remove | opt-in add | opt-in 累计 |
-|---|---:|---:|---:|---:|---:|---:|
-| baseline | 0 | 0 | 1,525 | 0 | 0 | 3 |
-| B1 | 2 | 0 | 1,523 | 0 | 0 | 3 |
-| B2 | 1 | 0 | 1,522 | 0 | 0 | 3 |
-| B5 | 0 | 0 | 1,522 | 0 | 0 | 3 |
-| B9 | 1 | 0 | 1,521 | 0 | 1 | 4 |
-| B8 | 9 | 1 | 1,513 | 0 | 9 | 13 |
-| B7 | 4 | 1 | 1,510 | 0 | 4 | 17 |
-| B6 | 0 | 0 | 1,510 | 0 | 0 | 17 |
-| B4 | 5 | 1 | 1,506 | 0 | 0 | 17 |
-| B3 | 12 | 0 | 1,494 | 0 | 3 | 20 |
+| 步骤 | default 累计 | discover 累计 | opt-in 累计 | 净变化说明 |
+|---|---:|---:|---:|---|
+| baseline | 1,525 | 1,688 | 3 | 分层 163 方法属于 discover、不在 default |
+| B1 | 1,523 | 1,686 | 3 | 删除 2 个 top-level 方法 |
+| B2 | 1,523 | 1,685 | 3 | 合并 1 个 application 方法，只减少 discover |
+| B5 | 1,523 | 1,685 | 3 | 原位改写，不改变方法数 |
+| B9 | 1,522 | 1,684 | 4 | O12 从 top-level 移入 opt-in |
+| B8 | 1,514 | 1,676 | 13 | 9 个环境方法移入 opt-in，新增 1 个静态默认方法 |
+| B7 | 1,511 | 1,673 | 17 | 4 个环境方法移入 opt-in，新增 1 个静态默认方法 |
+| B6 | 1,511 | 1,673 | 17 | 2 个 adapter 方法原位改写 |
+| B4 | 1,507 | 1,669 | 17 | 5 个 top-level 方法合并为 1 个默认场景 |
+| B3 | 1,495 | 1,657 | 20 | 12 个 top-level 方法由 3 个 opt-in JS 方法取代 |
 
-最终目标：默认 **1,494** 方法，opt-in **20** 方法。任何 `run` 数与账本不一致都必须解释，或回滚该 batch。
+最终目标：default **1,495**，discover **1,657**，opt-in **20**，全树 **1,677** 个真实 TestCase 方法。任何 `run` 数与账本不一致都必须解释，或回滚该 batch。
 
 ## 4. 批次明细
 
@@ -87,7 +88,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 uv run python -m unittest discover -s tests -t .
 ```
 
-B1 的公开等效门为 31 个方法，R06/R07 在现有方法内改写，所以改写前后都应是 31/31 通过。A01 所在 `HotChannelTests` 从 19 改为 18，A02 所在 `ConfigTests` 从 3 改为 2；B1 分组总数从 53 改为 51。相对 baseline 默认 `1,525 -> 1,523`，opt-in `3 -> 3`。
+B1 的公开等效门为 31 个方法，R06/R07 在现有方法内改写，所以改写前后都应是 31/31 通过。A01 所在 `HotChannelTests` 从 19 改为 18，A02 所在 `ConfigTests` 从 3 改为 2；B1 分组总数从 53 改为 51。相对 baseline：default `1,525 -> 1,523`，discover `1,688 -> 1,686`，opt-in 保持 `3`。
 
 **Rollback**
 
@@ -116,7 +117,7 @@ $env:PYTHONUTF8='1'; uv run python -m unittest tests.application.test_dto
 $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 ```
 
-Expected：`tests.application.test_dto` 从 7 个方法变为 6 个，全部通过；默认 suite 精确减少 1。
+Expected：`tests.application.test_dto` 从 7 个方法变为 6 个，全部通过；default 仍为 `1,523`，discover 精确 `1,686 -> 1,685`，opt-in 保持 `3`。
 
 **Rollback**
 
@@ -159,7 +160,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py --opt-in
 ```
 
-Expected：默认移除 12 个旧方法、增加 0；opt-in 新增 3 个行为方法。最终累计默认 `1,506 -> 1,494`，opt-in `17 -> 20`。
+Expected：默认移除 12 个旧方法、增加 0；opt-in 新增 3 个行为方法。最终累计 default `1,507 -> 1,495`，discover `1,669 -> 1,657`，opt-in `17 -> 20`。
 
 **Rollback**
 
@@ -192,7 +193,7 @@ $env:PYTHONUTF8='1'; uv run python -m unittest tests.test_overlay_tk_lifecycle
 $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 ```
 
-Expected：默认移除 5 个旧方法、增加 1 个场景方法。最终累计默认 `1,510 -> 1,506`，opt-in 保持 `17`。
+Expected：默认移除 5 个旧方法、增加 1 个场景方法。最终累计 default `1,511 -> 1,507`，discover `1,673 -> 1,669`，opt-in 保持 `17`。
 
 **Rollback**
 
@@ -252,7 +253,7 @@ $env:PYTHONUTF8='1'; uv run python -m unittest tests.adapters.test_external_adap
 $env:PYTHONUTF8='1'; uv run python -m unittest discover -s tests -t .
 ```
 
-Expected：两模块全绿；重复 3 次无不稳定失败；无遗留 worker thread；两个方法原位改写，默认 `1,510 -> 1,510`，opt-in `17 -> 17`。
+Expected：两模块全绿；重复 3 次无不稳定失败；无遗留 worker thread；两个 adapter 方法原位改写，default 保持 `1,511`，discover 保持 `1,673`，opt-in 保持 `17`。
 
 **Rollback**
 
@@ -286,7 +287,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py --opt-in
 uv run python -m unittest discover -s tests -t .
 ```
 
-Expected：默认移除 4 个旧方法、增加 1 个静态 schema 方法，累计默认 `1,513 -> 1,510`；opt-in 增加 4 个方法，累计 `13 -> 17`。required skip=failure。
+Expected：默认移除 4 个旧方法、增加 1 个静态 schema 方法，累计 default `1,514 -> 1,511`、discover `1,676 -> 1,673`；opt-in 增加 4 个方法，累计 `13 -> 17`。required skip=failure。
 
 **Rollback**
 
@@ -319,7 +320,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py --opt-in
 ```
 
-Expected：默认移除 9 个旧方法、增加 1 个静态 manifest 方法，累计默认 `1,521 -> 1,513`；tooling opt-in 增加 9 个环境方法，累计 `4 -> 13`。
+Expected：默认移除 9 个旧方法、增加 1 个静态 manifest 方法，累计 default `1,522 -> 1,514`、discover `1,684 -> 1,676`；tooling opt-in 增加 9 个环境方法，累计 `4 -> 13`。
 
 **Rollback**
 
@@ -348,7 +349,7 @@ $env:PYTHONUTF8='1'; uv run python -m unittest tests.test_env_provision
 $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 ```
 
-Expected：`git check-ignore` 为 1（not ignored），模板路径检查通过；默认移除 1 个方法、增加 0，累计 `1,522 -> 1,521`；opt-in 增加 1 个 repository-hygiene 方法，累计 `3 -> 4`。
+Expected：`git check-ignore` 为 1（not ignored），模板路径检查通过；默认移除 1 个方法、增加 0，累计 default `1,523 -> 1,522`、discover `1,685 -> 1,684`；opt-in 增加 1 个 repository-hygiene 方法，累计 `3 -> 4`。
 
 **Rollback**
 
