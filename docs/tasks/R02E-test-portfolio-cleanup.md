@@ -15,6 +15,17 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 - Update the test inventory and CI documentation with the final portfolio.
 - Keep each cleanup batch independently verifiable and reversible.
 
+## Current Increment
+
+Stage 1 executes only B1, B2, and B5 from `docs/testing/TEST_CLEANUP_PLAN.md`:
+
+- B1: remove A01/A02 and rewrite R06/R07 in place.
+- B2: merge M01 into existing DTO contract tests.
+- B5: rewrite R08/R09 in place.
+- Exact target: default `1,525 -> 1,522`; opt-in remains `3`.
+
+B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
+
 ## Non-Goals
 
 - No production behavior changes.
@@ -42,6 +53,37 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 - Prohibited-pattern checks run through uv and use AST/text checks only where false positives are controlled.
 - The default test suite remains headless, deterministic, and opt-in free.
 - CI still runs the full retained headless suite.
+
+## Allowed Files
+
+- `tests/test_web_hot_control.py`
+- `tests/test_draw_extra_delay_settings.py`
+- `tests/test_screen_regions.py`
+- `tests/test_roi_config_frame.py`
+- `tests/application/test_dto.py`
+- `tests/test_web_logs_wiring.py`
+- `tests/test_web_prepare_flow.py`
+- `tests/helpers/**`
+- `docs/testing/TEST_INVENTORY.md`
+- `docs/testing/TEST_RATIONALIZATION_PLAN.md`
+- `docs/testing/TEST_PORTFOLIO_AUDIT.md`
+- `docs/testing/TEST_CLEANUP_PLAN.md`
+- `docs/tasks/R02E-*.md`
+- `docs/agent/reports/R02E-*.md`
+- `docs/agent/reviews/R02E-*.md`
+- `docs/agent/TASK_BOARD.md`
+- `docs/agent/TASK_BOARD.json`
+- `docs/agent/HANDOFF.md`
+- `TOTAL_TASK.md`
+
+## Forbidden Files
+
+- Any production module under `src/` or legacy root modules
+- Any test file not listed above
+- `.github/**`
+- `tools/**`
+- `pyproject.toml`, `uv.lock`
+- Runtime configs, logs, screenshots, and native Hearthstone interactions
 
 ## Dependencies And Impact
 
@@ -73,7 +115,9 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 ## Git Requirement
 
 ```text
-test(R02E): rationalize the test portfolio
+test(R02E-B1): remove private table drift checks
+test(R02E-B2): merge duplicate DTO boundary assertions
+test(R02E-B5): replace mock-only web test assertions
 ```
 
 ## Report Paths
