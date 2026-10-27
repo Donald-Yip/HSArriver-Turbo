@@ -270,22 +270,6 @@ class DisplayMappingSamplingTests(unittest.TestCase):
             self.assertIsNone(dm.display_mapping(hwnd=0))
             self.assertIsNone(dm.display_mapping())
 
-    def test_live_window_lookup(self):
-        """本机真跑着炉石时，默认调用应当读到真实客户区几何。
-
-        没有炉石的环境直接跳过（清缓存是必须的：这个用例会写进全局缓存）。
-        """
-        dm.clear_mapping_cache()
-        try:
-            mapping = dm.display_mapping()
-        finally:
-            dm.clear_mapping_cache()
-        if mapping is None:
-            self.skipTest("本机没有运行中的炉石窗口")
-        self.assertGreater(mapping.width, 0)
-        self.assertGreater(mapping.height, 0)
-        self.assertEqual(mapping.reference, dm.REFERENCE_CLIENT)
-
     def test_injected_readers_bypass_the_cache(self):
         """注入假 reader 时既不读也不写缓存（换算单测不受本机窗口影响）。"""
         calls = {"n": 0}

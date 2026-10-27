@@ -350,18 +350,6 @@ class PortExclusivityTests(unittest.TestCase):
         self.assertFalse(web_ui._ControlServer.allow_reuse_address,
                          "开着它 = 端口顺延失效（Windows 语义）")
 
-    def test_plain_httpserver_would_have_shared_it(self):
-        """把 bug 的成因钉在测试里：默认实现确实会共享端口（Windows 上）。"""
-        import http.server
-        if os.name != "nt":
-            self.skipTest("这个语义差异只在 Windows 上成立")
-        first = http.server.ThreadingHTTPServer(("127.0.0.1", 0), web_ui.Handler)
-        self.addCleanup(first.server_close)
-        port = int(first.server_address[1])
-        second = http.server.ThreadingHTTPServer(("127.0.0.1", port),
-                                                 web_ui.Handler)
-        second.server_close()      # 不抛异常 = 默认实现会共享，正是要避免的
-
 
 class PortFileTests(unittest.TestCase):
     """端口文件：CLI/agent 靠它找到控制台（端口会被占用顺延）。

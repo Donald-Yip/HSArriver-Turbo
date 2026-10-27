@@ -58,8 +58,16 @@ class ModePointMarkerTests(unittest.TestCase):
     def test_points_without_marks_use_client_coordinates(self):
         image = self.blank(1920, 1080)
 
-        drawn = web_ui._draw_mode_points(image, {"kind": "client"},
-                                         {"wild": (617, 380)})
+        with mock.patch.object(
+            web_ui,
+            "_target_frame_size",
+            return_value=(1920, 1080),
+        ):
+            drawn = web_ui._draw_mode_points(
+                image,
+                {"kind": "client"},
+                {"wild": (617, 380)},
+            )
 
         self.assertEqual([617, 380], drawn[0]["image"])
         self.assertEqual([617, 380], drawn[0]["client"])
