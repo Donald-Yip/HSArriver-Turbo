@@ -31,6 +31,7 @@ Implement one bounded in-game turn loop that repeatedly reads a normalized TURN 
 - No settlement/result-screen handling, second game, mulligan, OCR/capture/Win32, Web/CLI/MCP, native loop, or dynamic plugin loading.
 - No combat AI or hidden card inference.
 - No expansion of unsupported parser grammar beyond the listed MVP instructions.
+- Target-only/two-phase recommendations are deferred to R13/R14 dispatch integration; R10 accepts action+target in one recommendation.
 - No changes to coordinates, delays, configuration, or legacy root modules.
 
 ## Inputs

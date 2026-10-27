@@ -40,6 +40,14 @@ from .runtime import (
     WrongLeaseOwner,
 )
 
+from .use_cases.turn import (
+    PlayTurnCommand,
+    PlayTurnResult,
+    PlayTurnStatus,
+    PlayTurnUseCase,
+)
+from .use_cases.turn_intent import TurnIntentError, TurnIntentParser, parse_turn_intent
+
 __all__ = [
     "ActionDispatchPort",
     "ActionGate",
@@ -74,4 +82,11 @@ __all__ = [
     "StaleActionLease",
     "StopToken",
     "WrongLeaseOwner",
+    "PlayTurnCommand",
+    "PlayTurnResult",
+    "PlayTurnStatus",
+    "PlayTurnUseCase",
+    "TurnIntentError",
+    "TurnIntentParser",
+    "parse_turn_intent",
 ]

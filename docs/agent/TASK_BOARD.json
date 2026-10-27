@@ -304,9 +304,9 @@
     },
     {
       "id": "R10",
-      "status": "in_progress",
-      "owner": "implementer",
-      "review_round": 0,
+      "status": "done",
+      "owner": "controller",
+      "review_round": 2,
       "branch": "feature/R10-turn-loop",
       "depends_on": [
         "R09"
@@ -317,7 +317,7 @@
       "base_sha": "34a9d08",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R10 approved: focused 55; default 1495; discover 1704; opt-in 19; architecture/scope pass"
     },
     {
       "id": "R11",

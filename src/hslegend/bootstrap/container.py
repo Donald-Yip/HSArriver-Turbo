@@ -6,7 +6,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from hslegend.application.planning import ExecutionLedger, PlanExecutor, PlanValidator
+from hslegend.application.planning import (
+    ExecutionLedger,
+    PlanBuilder,
+    PlanExecutor,
+    PlanValidator,
+)
 from hslegend.application.ports import (
     ActionDispatchPort,
     CardCatalogPort,
@@ -21,7 +26,9 @@ from hslegend.application.use_cases.enter_battle import (
     EnterBattleUseCase,
 )
 from hslegend.application.use_cases.mulligan import MulliganUseCase
+from hslegend.application.use_cases.turn import PlayTurnUseCase, TurnIntentParser
 from hslegend.domain import GameSnapshot
+from hslegend.plugins import build_default_registry
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,12 +37,15 @@ class Container:
 
     enter_battle: EnterBattleUseCase
     mulligan: MulliganUseCase | None = None
+    turn: PlayTurnUseCase | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enter_battle, EnterBattleUseCase):
             raise TypeError("enter_battle must be an EnterBattleUseCase")
         if self.mulligan is not None and not isinstance(self.mulligan, MulliganUseCase):
             raise TypeError("mulligan must be a MulliganUseCase or None")
+        if self.turn is not None and not isinstance(self.turn, PlayTurnUseCase):
+            raise TypeError("turn must be a PlayTurnUseCase or None")
 
     @property
     def enter_battle_use_case(self) -> EnterBattleUseCase:
@@ -49,6 +59,12 @@ class Container:
 
         return self.mulligan
 
+    @property
+    def turn_use_case(self) -> PlayTurnUseCase | None:
+        """Explicit alias for the optional turn service."""
+
+        return self.turn
+
 
 def build_container(
     lobby: LobbyStatePort,
@@ -60,6 +76,7 @@ def build_container(
     sleep: Callable[[float], None] | None = None,
     lobby_snapshot: GameSnapshot | None = None,
     mulligan: MulliganUseCase | None = None,
+    turn: PlayTurnUseCase | None = None,
 ) -> Container:
     """Build the vertical slice from injected adapters only.
 
@@ -76,7 +93,7 @@ def build_container(
         sleep=sleep,
         lobby_snapshot=lobby_snapshot,
     )
-    return Container(enter_battle=use_case, mulligan=mulligan)
+    return Container(enter_battle=use_case, mulligan=mulligan, turn=turn)
 
 
 def build_mulligan_use_case(
@@ -116,6 +133,58 @@ def build_mulligan_use_case(
     )
 
 
+def build_turn_use_case(
+    recommendation: RecommendationSourcePort,
+    state: GameStateSourcePort,
+    dispatch: ActionDispatchPort,
+    journal: RunJournalPort,
+    *,
+    card_catalog: CardCatalogPort | None = None,
+    builder: PlanBuilder | None = None,
+    validator: PlanValidator | None = None,
+    ledger: ExecutionLedger | None = None,
+    action_gate: ActionGate | None = None,
+    stop_token: StopToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    parser: TurnIntentParser | None = None,
+) -> PlayTurnUseCase:
+    """Build the bounded turn service from injected ports and default plugins."""
+
+    if builder is None:
+        if card_catalog is None or not callable(getattr(card_catalog, "get_card", None)):
+            raise TypeError("card_catalog must provide get_card() when builder is omitted")
+        builder = PlanBuilder(build_default_registry(), card_catalog)
+    if validator is None:
+        if card_catalog is None or not callable(getattr(card_catalog, "get_card", None)):
+            raise TypeError("card_catalog must provide get_card() when validator is omitted")
+        validator = PlanValidator(card_catalog)
+    ledger = ledger or ExecutionLedger()
+    executor = PlanExecutor(
+        dispatch,
+        state,
+        journal,
+        ledger,
+        validator,
+        clock=clock,
+    )
+    return PlayTurnUseCase(
+        recommendation,
+        state,
+        builder,
+        executor,
+        action_gate or ActionGate(),
+        stop_token or StopToken(),
+        clock=clock,
+        parser=parser,
+    )
+
+
+def build_play_turn_use_case(*args, **kwargs) -> PlayTurnUseCase:
+    """Explicit-name alias for callers that prefer the full use-case name."""
+
+    return build_turn_use_case(*args, **kwargs)
+
+
 def build_enter_battle_use_case(
     lobby: LobbyStatePort,
     dispatch: ActionDispatchPort,
@@ -144,5 +213,7 @@ __all__ = [
     "build_container",
     "build_enter_battle_use_case",
     "build_mulligan_use_case",
+    "build_play_turn_use_case",
+    "build_turn_use_case",
     "EnterBattleCommand",
 ]

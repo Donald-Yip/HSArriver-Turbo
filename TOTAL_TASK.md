@@ -53,7 +53,7 @@ R02E stage 1+B6 approved; stage 2B B9/B8/B7 environment-test isolation in progre
 | R02D | done | Test portfolio audit and cleanup ledger | R08 |
 | R02E | done | Test portfolio cleanup execution | R02D |
 | R09 | done | Mulligan vertical slice | R02E |
-| R10 | in_progress | Turn loop and reconciliation | R09 |
+| R10 | done | Turn loop and reconciliation | R09 |
 | R11 | planned | Settlement and stop | R10 |
 | R12 | planned | CLI and fake one-game E2E | R11 |
 | R13 | planned | Native one-game and main cutover | R12 |

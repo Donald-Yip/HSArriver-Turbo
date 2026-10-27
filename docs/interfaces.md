@@ -43,7 +43,7 @@ Stable semantic identity:
 
 ### ActionIntent / ActionPlan
 
-`ActionIntent` describes the semantic intent. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, timeout, `wait_for_change`, and an optional `confirmation_required` plan flag. A non-waiting step is dispatched sequentially but does not poll for a log revision or evaluate postconditions. The final step must wait; plans with `confirmation_required=True` must also carry a non-empty final step or plan postcondition. Plans must not contain coordinates or executable callbacks.
+`ActionIntent` describes the semantic intent. It carries an optional zero-based `destination` placement index; the R10 parser only sets it for `放置于我方N号位` on a play-card instruction. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, timeout, `wait_for_change`, and an optional `confirmation_required` plan flag. A non-waiting step is dispatched sequentially but does not poll for a log revision or evaluate postconditions. The final step must wait; plans with `confirmation_required=True` must also carry a non-empty final step or plan postcondition. Plans must not contain coordinates or executable callbacks.
 
 ### Domain Results
 
@@ -281,6 +281,13 @@ case. The journal record includes the recommendation evidence plus dispatch and
 snapshot evidence. `bootstrap.build_mulligan_use_case(...)` wires the service
 from injected ports without importing legacy modules.
 
+### PlayTurnUseCase
+
+`TurnIntentParser` is a pure deterministic parser over one immutable `GameSnapshot`. It accepts only the R10 MVP lines: `结束回合`, `使用英雄技能`, `打出N号位随从|法术|武器|地标|英雄`, `操作N号位随从攻击`, `操作我方英雄攻击`, `操作N号位地标`, target lines `目标是对方/敌方/我方/己方N号位[随从|地标|武器|英雄]`, hero target lines, and `放置于我方N号位`. Text slots and destinations are one-based; resolved hand/board slots are ordered by `(zone_pos, entity_id)` and the intent stores zero-based `choice_index`/`destination`. Unknown lines, multiple actions, duplicate targets/destinations, invalid slots, missing attack targets, ambiguous `zone_pos`, malformed side/zone ownership, unsupported or missing target kinds, and missing heroes/weapons fail closed with a stable `TurnIntentError.reason_code`. Target-only/two-phase recommendations are deferred to R13/R14 dispatch integration; R10 accepts only action+target in the same recommendation.
+
+`PlayTurnUseCase` consumes one fresh TURN recommendation against the current snapshot, rejects wrong mode or a recommendation for another snapshot, re-reads the snapshot before dispatch, and builds every action through the injected `PlanBuilder`. The default bootstrap registry supplies the turn-family plugins. The use case executes exactly one plan at a time through the shared `PlanExecutor`, `ActionGate`, ledger, and journal, and never starts the next action after `executed_unconfirmed`, `rejected`, `failed`, `cancelled`, `gate_busy`, or a missing action gate lease. `PlayTurnCommand(command_id, max_actions, timeout_seconds)` bounds the turn; the total deadline is propagated by clamping each plan's execution budget, and the executor remains the sole dispatch/confirmation authority. The loop stops as `cancelled` when cancellation wins after a confirmed action, as `ended` after a confirmed `end_turn` or a post-action snapshot showing `is_my_turn=False`, as `completed` when `max_actions` is reached, and as a typed terminal failure otherwise. `PlayTurnResult` preserves the action count, terminal reason, deduplicated evidence IDs, per-action `ExecutionRecord` values, `ended_turn`, and the optional release error. A confirmed action may only be followed by another action after a strictly later revision in the same game generation; stale post-action state, a generation change, or a release failure stops the loop before another dispatch. An unconfirmed identical action is stopped by the ledger, not retried.
+
+`bootstrap.build_turn_use_case(...)` wires the service from injected ports, a supplied/default `PlanBuilder`, `PlanValidator`, `ExecutionLedger`, and `PlanExecutor`; it imports the static default plugin registry but no legacy module or adapter.
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New

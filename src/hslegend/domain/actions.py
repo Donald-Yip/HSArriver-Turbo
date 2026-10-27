@@ -18,7 +18,15 @@ class ActionIntent(PrimitiveMixin):
     target: EntityRef | None = None
     card_id: str | None = None
     choice_index: int | None = None
+    destination: int | None = None
     intent_id: str = ""
+
+    def __post_init__(self) -> None:
+        if self.destination is not None:
+            if type(self.destination) is not int:
+                raise TypeError("destination must be an int or None")
+            if self.destination < 0:
+                raise ValueError("destination must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
