@@ -144,6 +144,22 @@ class TrackerTests(unittest.TestCase):
         self.assertTrue(self.hook.wait_for_unhook())
         self.assertFalse(self.tracker.available())
 
+    def test_stop_unhooks_synchronously_exactly_once(self):
+        self.tracker.ensure_started(4242)
+        self._wait_attached_and_ready()
+        thread = self.tracker._thread
+
+        self.tracker.stop()
+
+        self.assertEqual([1001], self.hook.unhooked,
+                         "stop 必须同步摘掉当前 hook")
+        self.assertFalse(self.tracker.available())
+        if thread is not None:
+            thread.join(timeout=1.0)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual([1001], self.hook.unhooked,
+                         "线程 finally 不得再次摘 hook")
+
     def test_poll_detects_geometry_change(self):
         geometries = [(1920, 1080, 960, 362)]
 

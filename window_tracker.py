@@ -320,13 +320,14 @@ class WindowMoveTracker:
                 ctypes.windll.user32.TranslateMessage(ctypes.byref(msg))
                 ctypes.windll.user32.DispatchMessageW(ctypes.byref(msg))
         finally:
-            try:
-                (self._unhook or ctypes.windll.user32.UnhookWinEvent)(hook)
-            except Exception:
-                pass
             with self._lock:
-                self._hook = None
-            self._thread_id = 0
+                hook_to_unhook = self._hook if self._hook == hook else None
+                if hook_to_unhook is not None:
+                    self._hook = None
+            if hook_to_unhook is not None:
+                self._unhook_now(hook_to_unhook)
+            with self._lock:
+                self._thread_id = 0
 
     def _default_hook_factory(self, handle: int, proc) -> Optional[int]:
         pid = _window_pid(handle)
@@ -356,11 +357,28 @@ class WindowMoveTracker:
         print("[跟踪] 窗口移动事件钩子不可用，改用轮询兜底"
               f"（{FALLBACK_POLL_SECONDS * 1000:.0f}ms）")
 
+    def _unhook_now(self, hook: int) -> None:
+        try:
+            (self._unhook or ctypes.windll.user32.UnhookWinEvent)(hook)
+        except Exception:
+            pass
+
+    def _claim_current_hook(self) -> Optional[int]:
+        with self._lock:
+            hook = self._hook
+            if hook is None:
+                return None
+            self._hook = None
+            return hook
+
     def stop(self) -> None:
         self._stop.set()
         with self._lock:
             self._starting = False      # 别让 wait_ready 白等
         thread_id = self._thread_id
+        hook = self._claim_current_hook()
+        if hook is not None:
+            self._unhook_now(hook)
         try:
             if thread_id:
                 ctypes.windll.user32.PostThreadMessageW(
@@ -370,9 +388,12 @@ class WindowMoveTracker:
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=0.5)
+        # The hook may have been published by a factory still finishing when
+        # stop() began. Claim and unhook that late publication as well.
+        hook = self._claim_current_hook()
+        if hook is not None:
+            self._unhook_now(hook)
         self._thread = None
-        with self._lock:
-            self._hook = None
 
     def reset(self) -> None:
         """清空时间戳/计数（测试用）。"""

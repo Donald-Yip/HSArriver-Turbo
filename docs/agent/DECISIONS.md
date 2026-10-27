@@ -27,3 +27,7 @@ Ruling: Split R02 into R02A inventory, R02B CI/architecture gates, and R02C test
 ## 2026-10-27 - Split R02C Into Batches
 
 Ruling: Execute test rationalization as R02C1-R02C5 by replacement batch - prevents a single irreversible test-cleanup commit and keeps each deletion traceable - if wrong, batches can be reverted independently.
+
+## 2026-10-27 - R05 Window Tracker Scope
+
+Ruling: R05 may modify `window_tracker.py` only for deterministic shutdown cleanup - the full headless gate exposed an unrelated timing flake, and the fix is isolated to lifecycle cleanup - if wrong, revert that hunk and the corresponding tracker test with the rest of R05.

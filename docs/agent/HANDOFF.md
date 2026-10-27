@@ -2,20 +2,20 @@
 
 ## Current Phase
 
-R05 - planning and execution pipeline
+R06 - data adapters
 
 ## Current Task
 
-R05 (`planned`)
+R06 (`planned`)
 
 ## Completed
 
-- R00-R04 complete.
-- Domain contracts and application ports/runtime controls committed.
-- Headless baseline remains deterministic.
+- R00-R05 complete.
+- Domain, application ports/runtime, planning/plugins/executor are committed and reviewed.
+- Headless baseline: 1525 run, 1524 passed, 1 explicit skip.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R04.
-2. Create feature/R05-plan-execution.
-3. Implement PlanPlugin contract, PluginRegistry, PlanBuilder, PlanValidator, ExecutionLedger, PlanExecutor, default declarative plugins, and journal integration.
+1. Fast-forward develop to R05.
+2. Create feature/R06-data-adapters.
+3. Implement JSON config/card catalog, JSONL journal, and file artifact store with temp-dir tests.

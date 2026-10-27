@@ -140,9 +140,72 @@ Required fields:
 
 Allowed status values: `not_executed`, `executed_confirmed`, `executed_unconfirmed`, `rejected`, `failed`, `cancelled`.
 
-## Plugin Contract
+## Planning And Execution Contracts
 
-`PlanPlugin` is the application-level extension contract. Plugins receive a read-only `PlanContext` and return a declarative `ActionPlan`. They cannot click, read files, access configuration globals, create threads, use the network, or import adapters.
+### PlanPlugin / PlanContext
+
+`PlanPlugin` is the application-level extension contract. It exposes a stable
+`plugin_id` and `build(context: PlanContext) -> ActionPlan`. `PlanContext`
+contains the immutable `GameSnapshot`, requested `ActionIntent`, and optional
+catalog `CardDefinition`; it never contains clicks, coordinates, callbacks, or
+configuration globals. Plugins cannot perform I/O, create threads, use the
+network, or import adapters.
+
+### PluginRegistry
+
+`PluginRegistry` is a static, explicit registry. Resolution priority is:
+
+1. exact card ID;
+2. capability or action family;
+3. default.
+
+All matches at the highest matching priority are considered. If more than one
+plugin remains, resolution raises `PluginConflictError`; no insertion-order
+tie-break exists. `build_default_registry()` registers the MVP plugins for
+mulligan, play card, targeted card, attack, hero power, location, and end turn.
+
+### PlanBuilder / PlanValidator
+
+`PlanBuilder` resolves exactly one plugin through a `CardCatalogPort`, passes a
+read-only `PlanContext`, and returns the plugin's declarative `ActionPlan`.
+`PlanValidator` supplies the catalog card definition to the pure domain
+`PlanRuleValidator`; a named card absent from the catalog is rejected with
+`card_not_found`. `validate_plan()` checks plan structure and plan-level
+preconditions, while `validate_step()` checks one step's preconditions against
+the current snapshot immediately before that step is dispatched.
+
+### ExecutionLedger
+
+`ExecutionLedger` tracks immutable `LedgerAttempt` values per stable action key.
+`NOT_EXECUTED` means in flight. A confirmed action is never replayed. An
+`EXECUTED_UNCONFIRMED` action requires explicit
+`authorize_retry(..., evidence_id=...)` before another attempt. Failed,
+rejected, and cancelled attempts may be retried within `max_attempts`. An
+in-flight `NOT_EXECUTED` attempt rejects another `begin()` with
+`InFlightAttemptError`. Archived actions cannot be started.
+
+### PlanExecutor
+
+`PlanExecutor` acquires one `ActionGate` lease, reads the current
+`GameStateSourcePort` observation, validates plan structure and each step's
+preconditions against the current snapshot, dispatches each approved step
+through `ActionDispatchPort`, waits for a later `log_revision`, and evaluates
+step/plan postconditions with the domain `PostconditionEvaluator`.
+`plan.timeout_seconds` is a total execution budget measured by the injected
+monotonic clock; each wait is clamped to the smaller of the step timeout and
+remaining plan budget.
+
+It appends exactly one `ExecutionRecord` to `RunJournalPort` per ledger attempt,
+including confirmed, unconfirmed, rejected, failed, and cancelled outcomes. The
+`ActionGate` lease is acquired before `ExecutionLedger.begin()` and is held
+through ledger completion, record construction, and the journal append; release
+happens only in the outer `finally`. The ledger is completed exactly once before
+journaling; a journal exception propagates unchanged and does not trigger a
+second completion. StopToken and remaining plan budget are checked after step
+validation and immediately before dispatch. Cancellation before any dispatch
+records `cancelled`; any exception, postcondition failure, timeout, or
+cancellation after dispatch records `executed_unconfirmed` with the original
+reason code, so immediate replay remains blocked.
 
 ## Compatibility
 

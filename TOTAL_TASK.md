@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R03: domain contracts fix round 1 complete; ready for review.
+R05: plan execution pipeline fix round 2 complete; ready for re-review.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R03-domain-contracts`, based on `develop` at `468b598`
+- Current feature branch: `feature/R05-plan-execution`, based on `develop` at `637639e`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -46,7 +46,7 @@ R03: domain contracts fix round 1 complete; ready for review.
 | R02C5 | done | Headless finalization | R02C4 |
 | R03 | done | Domain contracts | R02C5 |
 | R04 | done | Application ports and runtime controls | R03 |
-| R05 | planned | Plan and execution pipeline | R04 |
+| R05 | done | Plan and execution pipeline | R04 |
 | R06 | planned | Data adapters | R05 |
 | R07 | planned | External-system adapters | R06 |
 | R08 | planned | Enter-battle vertical slice | R07 |
@@ -122,4 +122,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Fresh R03 reviewer verifies fix round 1 and the complete staged file set; Controller commits only after domain, headless, compile, architecture, and scope gates are confirmed.
+Fresh R05 reviewer verifies fix round 2 and the complete staged file set; Controller commits only after domain, application, plugins, headless, compile, architecture, and scope gates are confirmed.

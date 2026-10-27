@@ -15,7 +15,7 @@ Updated: 2026-10-27
 | R02C5 | done | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |
 | R03 | done | feature/R03-domain-contracts | R02C5 | Domain models and rules |
 | R04 | done | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
-| R05 | planned | feature/R05-plan-execution | R04 | Plan and execution pipeline |
+| R05 | done | feature/R05-plan-execution | R04 | Plan and execution pipeline fix round 2 complete |
 | R06 | planned | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |
 | R07 | planned | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input |
 | R08 | planned | feature/R08-enter-battle | R07 | Enter battle slice |
