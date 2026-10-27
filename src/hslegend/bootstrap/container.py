@@ -25,6 +25,7 @@ from hslegend.application.use_cases.enter_battle import (
     EnterBattleCommand,
     EnterBattleUseCase,
 )
+from hslegend.application.use_cases.finish_battle import FinishBattleUseCase
 from hslegend.application.use_cases.mulligan import MulliganUseCase
 from hslegend.application.use_cases.turn import PlayTurnUseCase, TurnIntentParser
 from hslegend.domain import GameSnapshot
@@ -38,6 +39,7 @@ class Container:
     enter_battle: EnterBattleUseCase
     mulligan: MulliganUseCase | None = None
     turn: PlayTurnUseCase | None = None
+    finish_battle: FinishBattleUseCase | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.enter_battle, EnterBattleUseCase):
@@ -46,6 +48,10 @@ class Container:
             raise TypeError("mulligan must be a MulliganUseCase or None")
         if self.turn is not None and not isinstance(self.turn, PlayTurnUseCase):
             raise TypeError("turn must be a PlayTurnUseCase or None")
+        if self.finish_battle is not None and not isinstance(
+            self.finish_battle, FinishBattleUseCase
+        ):
+            raise TypeError("finish_battle must be a FinishBattleUseCase or None")
 
     @property
     def enter_battle_use_case(self) -> EnterBattleUseCase:
@@ -65,6 +71,12 @@ class Container:
 
         return self.turn
 
+    @property
+    def finish_battle_use_case(self) -> FinishBattleUseCase | None:
+        """Explicit alias for the optional settlement service."""
+
+        return self.finish_battle
+
 
 def build_container(
     lobby: LobbyStatePort,
@@ -77,6 +89,7 @@ def build_container(
     lobby_snapshot: GameSnapshot | None = None,
     mulligan: MulliganUseCase | None = None,
     turn: PlayTurnUseCase | None = None,
+    finish_battle: FinishBattleUseCase | None = None,
 ) -> Container:
     """Build the vertical slice from injected adapters only.
 
@@ -93,7 +106,12 @@ def build_container(
         sleep=sleep,
         lobby_snapshot=lobby_snapshot,
     )
-    return Container(enter_battle=use_case, mulligan=mulligan, turn=turn)
+    return Container(
+        enter_battle=use_case,
+        mulligan=mulligan,
+        turn=turn,
+        finish_battle=finish_battle,
+    )
 
 
 def build_mulligan_use_case(
@@ -185,6 +203,23 @@ def build_play_turn_use_case(*args, **kwargs) -> PlayTurnUseCase:
     return build_turn_use_case(*args, **kwargs)
 
 
+def build_finish_battle_use_case(
+    lobby: LobbyStatePort,
+    *,
+    stop_token: StopToken | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] | None = None,
+) -> FinishBattleUseCase:
+    """Build the observation-only settlement service."""
+
+    return FinishBattleUseCase(
+        lobby,
+        stop_token or StopToken(),
+        clock,
+        sleep=sleep,
+    )
+
+
 def build_enter_battle_use_case(
     lobby: LobbyStatePort,
     dispatch: ActionDispatchPort,
@@ -212,6 +247,7 @@ __all__ = [
     "Container",
     "build_container",
     "build_enter_battle_use_case",
+    "build_finish_battle_use_case",
     "build_mulligan_use_case",
     "build_play_turn_use_case",
     "build_turn_use_case",

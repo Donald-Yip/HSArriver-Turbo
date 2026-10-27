@@ -23,7 +23,7 @@ Updated: 2026-10-27
 | R02E | done | feature/R02E-test-cleanup | R02D | Final portfolio approved and committed |
 | R09 | done | feature/R09-mulligan | R02E | Mulligan slice approved |
 | R10 | done | feature/R10-turn-loop | R09 | One-turn action loop approved |
-| R11 | in_progress | feature/R11-settlement-stop | R10 | Result observation and one-game stop |
+| R11 | done | feature/R11-settlement-stop | R10 | Settlement observation and one-game stop approved |
 | R12 | planned | feature/R12-one-game-cli | R11 | CLI and fake full game |
 | R13 | planned | feature/R13-native-cutover | R12 | Native one game and main cutover |
 | R14 | planned | feature/R14-plugin-registry | R05 | Static plugin expansion |

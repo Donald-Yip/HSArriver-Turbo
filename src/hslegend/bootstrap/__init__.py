@@ -1,5 +1,11 @@
 """Composition-root entry points."""
 
+from hslegend.application.use_cases.finish_battle import (
+    FinishBattleCommand,
+    FinishBattleResult,
+    FinishBattleStatus,
+    FinishBattleUseCase,
+)
 from hslegend.application.use_cases.mulligan import (
     MulliganCommand,
     MulliganInstructionError,
@@ -24,6 +30,7 @@ from .container import (
     EnterBattleCommand,
     build_container,
     build_enter_battle_use_case,
+    build_finish_battle_use_case,
     build_mulligan_use_case,
     build_play_turn_use_case,
     build_turn_use_case,
@@ -32,6 +39,10 @@ from .container import (
 __all__ = [
     "Container",
     "EnterBattleCommand",
+    "FinishBattleCommand",
+    "FinishBattleResult",
+    "FinishBattleStatus",
+    "FinishBattleUseCase",
     "MulliganCommand",
     "MulliganInstructionError",
     "MulliganResult",
@@ -45,6 +56,7 @@ __all__ = [
     "TurnIntentParser",
     "build_container",
     "build_enter_battle_use_case",
+    "build_finish_battle_use_case",
     "build_mulligan_use_case",
     "build_play_turn_use_case",
     "build_turn_use_case",

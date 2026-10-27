@@ -321,9 +321,9 @@
     },
     {
       "id": "R11",
-      "status": "in_progress",
-      "owner": "implementer",
-      "review_round": 0,
+      "status": "done",
+      "owner": "controller",
+      "review_round": 3,
       "branch": "feature/R11-settlement-stop",
       "depends_on": [
         "R10"
@@ -334,7 +334,7 @@
       "base_sha": "5ae2ae1",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R11 approved: focused 19; default 1495; discover 1723; opt-in 19; architecture/scope/compile pass"
     },
     {
       "id": "R12",

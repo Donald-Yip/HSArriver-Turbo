@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R02E stage 1+B6 approved; stage 2B B9/B8/B7 environment-test isolation in progress.
+R11 settlement and one-game stop is independently approved. R12 now adds the application-level one-game orchestration, installable `src` packaging, fake end-to-end scenario, and CLI.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R08-enter-battle`, based on `develop` at `082255e`
+- Current feature branch: `feature/R11-settlement-stop`, based on `develop` at `5ae2ae1`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -54,7 +54,7 @@ R02E stage 1+B6 approved; stage 2B B9/B8/B7 environment-test isolation in progre
 | R02E | done | Test portfolio cleanup execution | R02D |
 | R09 | done | Mulligan vertical slice | R02E |
 | R10 | done | Turn loop and reconciliation | R09 |
-| R11 | in_progress | Settlement and one-game stop | R10 |
+| R11 | done | Settlement and one-game stop | R10 |
 | R12 | planned | CLI and fake one-game E2E | R11 |
 | R13 | planned | Native one-game and main cutover | R12 |
 | R14 | planned | Static plugin registry expansion | R05 |
@@ -124,4 +124,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-R02E stage 1 executes only B1/B2/B5 with exact count deltas, replacement evidence, and independent review. B3/B4/B6-B9 remain deferred.
+Fast-forward `develop` to R11, create `feature/R12-one-game-cli`, and establish installable `src` packaging before implementing the application-level one-game orchestrator, fake full-game E2E, and `hslegend-onegame` CLI. The current `tool.uv.package = false` is a blocking root issue for the CLI.

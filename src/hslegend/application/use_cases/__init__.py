@@ -1,5 +1,11 @@
 """Application use cases."""
 
+from .finish_battle import (
+    FinishBattleCommand,
+    FinishBattleResult,
+    FinishBattleStatus,
+    FinishBattleUseCase,
+)
 from .enter_battle import (
     LOBBY_SNAPSHOT,
     Clock,
@@ -32,6 +38,10 @@ from .turn import (
 from .turn_intent import TurnIntentError, TurnIntentParser, parse_turn_intent
 
 __all__ = [
+    "FinishBattleCommand",
+    "FinishBattleResult",
+    "FinishBattleStatus",
+    "FinishBattleUseCase",
     "MulliganCommand",
     "MulliganInstructionError",
     "MulliganResult",

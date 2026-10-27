@@ -288,6 +288,30 @@ from injected ports without importing legacy modules.
 `PlayTurnUseCase` consumes one fresh TURN recommendation against the current snapshot, rejects wrong mode or a recommendation for another snapshot, re-reads the snapshot before dispatch, and builds every action through the injected `PlanBuilder`. The default bootstrap registry supplies the turn-family plugins. The use case executes exactly one plan at a time through the shared `PlanExecutor`, `ActionGate`, ledger, and journal, and never starts the next action after `executed_unconfirmed`, `rejected`, `failed`, `cancelled`, `gate_busy`, or a missing action gate lease. `PlayTurnCommand(command_id, max_actions, timeout_seconds)` bounds the turn; the total deadline is propagated by clamping each plan's execution budget, and the executor remains the sole dispatch/confirmation authority. The loop stops as `cancelled` when cancellation wins after a confirmed action, as `ended` after a confirmed `end_turn` or a post-action snapshot showing `is_my_turn=False`, as `completed` when `max_actions` is reached, and as a typed terminal failure otherwise. `PlayTurnResult` preserves the action count, terminal reason, deduplicated evidence IDs, per-action `ExecutionRecord` values, `ended_turn`, and the optional release error. A confirmed action may only be followed by another action after a strictly later revision in the same game generation; stale post-action state, a generation change, or a release failure stops the loop before another dispatch. An unconfirmed identical action is stopped by the ledger, not retried.
 
 `bootstrap.build_turn_use_case(...)` wires the service from injected ports, a supplied/default `PlanBuilder`, `PlanValidator`, `ExecutionLedger`, and `PlanExecutor`; it imports the static default plugin registry but no legacy module or adapter.
+### FinishBattleUseCase
+
+`FinishBattleUseCase` is observation-only. It polls `LobbyStatePort.get_state(timeout_seconds=remaining)` with an injected clock/sleeper until the authoritative `LobbyPhase.RESULT` is observed. It has no `ActionDispatchPort`, action gate or ledger dependency and cannot click start, continue, rematch or deck selection. `FinishBattleCommand(command_id, timeout_seconds, poll_interval_seconds)` bounds the wait. `FinishBattleResult` reports completed/cancelled/timed_out/failed, last observed phase, unique evidence IDs and elapsed seconds. Adapter, clock, and sleeper failures are typed without leaking exceptions.
+
+A cancellation observed before the start clock is sampled returns `cancelled`
+with `elapsed_seconds` exactly `0.0` and does not read the clock.
+
+The command deadline is computed from the injected monotonic clock at command
+start. `timed_out` is returned only when the injected clock shows that this
+deadline was reached before `RESULT`; an adapter `TimeoutError` observed before
+the deadline is a typed `failed` outcome with reason `lobby_state_timeout`, while
+the same error observed at or after the deadline is `timed_out` with reason
+`timeout`. Generic adapter failures are `lobby_state_error`, invalid observations
+are `lobby_state_invalid`, clock failures are `clock_error`, and sleeper failures
+are `sleep_error`, all preserving the last observed phase and evidence.
+
+Cancellation is checked before polling and immediately after every completed or
+failed `get_state` call, including `TimeoutError`, generic exceptions, and invalid
+observations, before that outcome is classified. It is also checked after the
+sleeper completes or fails and immediately before terminal `completed` or
+`timed_out` results. Therefore cancellation that occurs while a port call or
+sleeper is in flight takes precedence over that call's failure and returns
+`cancelled` with the last successfully observed phase and evidence.
+
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New
