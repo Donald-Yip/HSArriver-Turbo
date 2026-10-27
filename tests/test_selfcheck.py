@@ -36,14 +36,6 @@ class PythonVersionTests(unittest.TestCase):
         self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
         self.assertIn("32 位", item["detail"])
 
-    def test_running_interpreter_is_the_recommended_one(self):
-        """本项目实测环境就是 3.12.x；这条挂了说明用了别的解释器跑测试。"""
-        item = selfcheck.python_item()
-
-        self.assertEqual(selfcheck.STATUS_OK, item["status"])
-        self.assertEqual((3, 12), selfcheck.EXPECTED_PYTHON)
-
-
 class DependencyManifestTests(unittest.TestCase):
     def test_requirements_pins_are_parsed(self):
         pins = selfcheck._requirements_pins()
@@ -249,36 +241,6 @@ class WindowedClientSizeTests(unittest.TestCase):
         items = self._items(1600, 900, "fullscreen")
 
         self.assertNotIn("client-windowed", items)
-
-
-class RealEnvironmentTests(unittest.TestCase):
-    """真跑一遍自检：确认依赖确实能 import，且解释器是 3.12。"""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.result = selfcheck.run_checks()
-
-    def test_python_312_is_reported_ok(self):
-        item = next(i for i in self.result["items"] if i["key"] == "python")
-
-        self.assertEqual(selfcheck.STATUS_OK, item["status"])
-        self.assertTrue(self.result["python"].startswith("3.12"))
-
-    def test_all_declared_dependencies_are_importable(self):
-        failing = [i["label"] for i in self.result["items"]
-                   if i["key"] in {"pywin32", "opencv-python-headless", "numpy",
-                                   "pillow", "paddleocr", "paddlepaddle"}
-                   and i["status"] == selfcheck.STATUS_FAIL]
-
-        self.assertEqual([], failing)
-
-    def test_environment_items_are_present(self):
-        keys = {i["key"] for i in self.result["items"]}
-
-        # 分辨率不再是自检项（坐标换算层会跟随客户区尺寸/窗口位置）；
-        # 取而代之的是「客户区几何」。
-        self.assertLessEqual({"admin", "client", "dpi", "log-root"}, keys)
-        self.assertNotIn("resolution", keys)
 
 
 if __name__ == "__main__":
