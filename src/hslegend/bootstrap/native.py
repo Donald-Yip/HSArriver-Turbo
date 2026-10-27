@@ -95,12 +95,24 @@ def build_native_one_game(
     )
 
 
-__all__ = ["build_native_one_game", "build_native_preflight"]
+__all__ = [
+    "build_native_live_preflight",
+    "build_native_one_game",
+    "build_native_preflight",
+]
 
 
 def build_native_preflight(deck_index: int, *, live_command: str | None = None):
     """Lazily delegate read-only preflight to the legacy adapter package."""
 
     from hslegend.adapters.legacy.preflight import build_native_preflight as _build
+
+    return _build(deck_index, live_command=live_command)
+
+
+def build_native_live_preflight(deck_index: int, *, live_command: str | None = None):
+    """Lazily focus the game and run the authorized live readiness gate."""
+
+    from hslegend.adapters.legacy.preflight import build_native_live_preflight as _build
 
     return _build(deck_index, live_command=live_command)

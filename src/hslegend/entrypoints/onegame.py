@@ -229,6 +229,7 @@ def main(
     native_builder: Callable[[], Any] | None = None,
     fake_builder: Callable[[], Any] | None = None,
     preflight_builder: Callable[..., Any] | None = None,
+    live_preflight_builder: Callable[..., Any] | None = None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -267,6 +268,32 @@ def main(
 
     if not args.fake and not args.allow_live:
         parser.error("--allow-live is required for native Hearthstone input")
+
+    if not args.fake and args.allow_live:
+        if live_preflight_builder is None:
+            from hslegend.bootstrap.native import build_native_live_preflight
+
+            live_preflight_builder = build_native_live_preflight
+        try:
+            live_report = live_preflight_builder(
+                args.deck_index,
+                live_command=_live_command(args),
+            )
+        except Exception as exc:
+            error = {
+                "ok": False,
+                "deck_index": args.deck_index,
+                "reason_code": _reason_code(exc),
+                "message": str(exc) or type(exc).__name__,
+            }
+            if args.json:
+                print(json.dumps(error, ensure_ascii=False, sort_keys=True))
+            else:
+                print("live preflight failed: " + error["message"], file=sys.stderr)
+            return 1
+        valid_live_report, _invalid_reason = _validate_preflight_report(live_report)
+        if not valid_live_report or not live_report.ok:
+            return _preflight_exit(json_output=args.json, report=live_report)
 
     try:
         command = OneGameCommand(

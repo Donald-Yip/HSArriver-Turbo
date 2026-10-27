@@ -14,6 +14,7 @@ from hslegend.adapters.legacy.preflight import (
     PreflightProbes,
     PreflightReport,
     _default_ui_probe,
+    run_live_preflight,
     run_preflight,
 )
 
@@ -155,6 +156,30 @@ class PreflightTests(unittest.TestCase):
                 reasons = {check.reason_code for check in report.checks if not check.ok}
                 self.assertIn(expected, reasons)
                 self.assertFalse(report.ok)
+
+    def test_live_preflight_activates_then_checks(self) -> None:
+        events: list[str] = []
+        report = run_live_preflight(
+            0,
+            self.probes(),
+            activate=lambda: events.append("activate") or True,
+            sleep=lambda seconds: events.append(f"sleep:{seconds}"),
+            live_command="uv run hslegend-onegame --allow-live --json",
+        )
+        self.assertTrue(report.ok)
+        self.assertEqual("window_activation", report.checks[0].check_id)
+        self.assertEqual(["activate", "sleep:0.35"], events)
+
+    def test_live_preflight_activation_failure_fails_closed(self) -> None:
+        report = run_live_preflight(
+            0,
+            self.probes(),
+            activate=lambda: False,
+            sleep=lambda _seconds: None,
+            live_command="uv run hslegend-onegame --allow-live --json",
+        )
+        self.assertFalse(report.ok)
+        self.assertEqual("window_activation_failed", report.checks[0].reason_code)
 
     def test_report_and_failed_check_reject_contradictions(self) -> None:
         with self.assertRaises(ValueError):

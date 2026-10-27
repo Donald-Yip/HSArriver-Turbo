@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import time
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -450,6 +451,85 @@ def _default_probes(runtime: Any) -> PreflightProbes:
     )
 
 
+def run_live_preflight(
+    deck_index: int,
+    probes: PreflightProbes,
+    *,
+    activate: Callable[[], bool],
+    sleep: Callable[[float], None],
+    live_command: str | None = None,
+) -> PreflightReport:
+    """Activate the game, pause, then require the same read-only preflight."""
+
+    if not callable(activate):
+        raise TypeError("activate must be callable")
+    if not callable(sleep):
+        raise TypeError("sleep must be callable")
+    try:
+        activated = activate()
+        if type(activated) is not bool:
+            raise TypeError("activation probe must return an exact bool")
+    except Exception as exc:
+        activation = _check(
+            "window_activation",
+            False,
+            "window_activation_error",
+            _safe_detail(exc),
+        )
+    else:
+        activation = _check(
+            "window_activation",
+            activated,
+            "window_activation_failed",
+            "failed to foreground the Hearthstone window",
+            success_detail="hearthstone-focused",
+        )
+    if activation.ok:
+        sleep(0.35)
+    report = run_preflight(deck_index, probes, live_command=live_command)
+    return PreflightReport(
+        ok=activation.ok and report.ok,
+        deck_index=report.deck_index,
+        ui_phase=report.ui_phase,
+        checks=(activation, *report.checks),
+        live_command=report.live_command,
+    )
+
+
+def build_native_live_preflight(
+    deck_index: int,
+    *,
+    live_command: str | None = None,
+) -> PreflightReport:
+    """Focus Hearthstone for an authorized live run, then require readiness."""
+
+    command = live_command or _default_live_command(deck_index)
+    try:
+        runtime = _load_legacy_runtime()
+    except Exception as exc:
+        return PreflightReport(
+            ok=False,
+            deck_index=deck_index,
+            ui_phase="unknown",
+            checks=(
+                _check(
+                    "legacy_runtime",
+                    False,
+                    "legacy_runtime_unavailable",
+                    _safe_detail(exc),
+                ),
+            ),
+            live_command=command,
+        )
+    return run_live_preflight(
+        deck_index,
+        _default_probes(runtime),
+        activate=lambda: runtime.get_screen.focus_hearthstone_if_present(),
+        sleep=time.sleep,
+        live_command=command,
+    )
+
+
 def build_native_preflight(
     deck_index: int,
     *,
@@ -487,6 +567,8 @@ __all__ = [
     "PreflightProbes",
     "PreflightReport",
     "SAFE_START_PHASES",
+    "build_native_live_preflight",
     "build_native_preflight",
+    "run_live_preflight",
     "run_preflight",
 ]

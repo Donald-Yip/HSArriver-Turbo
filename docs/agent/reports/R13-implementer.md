@@ -88,3 +88,11 @@ Revert the Phase A changes. The R13A native bridge and R12 fake path remain unch
 - Focused Phase A tests: 33/33 passed.
 - Full discovery: 1,816/1,816 passed at reviewer checkpoint.
 - No live Hearthstone command was run. Phase B remains explicitly gated on user authorization, configured BattleTag/log root, safe foreground state, and an elevated process.
+
+## Live Startup Root Fix
+
+- Running a command from the terminal necessarily makes the terminal foreground, so requiring the user to manually race the preflight was a UX defect.
+- The authorized `--allow-live` path now focuses Hearthstone first, waits for the focus transition, and runs the same read-only readiness checks before constructing/executing the native game graph.
+- A focus or readiness failure exits with the preflight report and performs no click.
+- A passing live preflight is silent; the command later emits exactly one game-result JSON object.
+- Added focused coverage for activation order, activation failure, no native execution on failed live preflight, and single-object output.

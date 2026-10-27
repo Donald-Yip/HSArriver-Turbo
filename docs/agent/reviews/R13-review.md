@@ -1,14 +1,13 @@
-# R13 Phase A — Round 4 Review
+# R13 Live Startup Focus Review
 
 **Disposition: Approved**
 
-## Final Findings
+## Findings
 
-- PASS — Canonical preflight JSON is built from validated report fields rather than trusting `to_primitive()`. Malformed or inconsistent custom payloads are ignored, and the emitted object contains the validated `ok`, deck, phase, live command, and ordered checks.
-- PASS — Non-existent Power.log paths fail with `power_log_missing`; successful checks retain the path.
-- PASS — Whitespace-only `ui_phase`, contradictory report state, malformed checks, and externally supplied report inconsistencies fail closed.
-- PASS — Successful UI evidence remains in check details, including phase, confidence, and evidence ID.
-- PASS — Bootstrap-only architecture import, exact live command, tracker-free capture, and typed CLI reasons remain fixed.
-- PASS — The live gate still rejects native execution without `--allow-live` and rejects `--preflight --allow-live`. No click, focus, screenshot save, process launch, OCR write, or game-state mutation path is present.
+- PASS — Authorized `--allow-live` activation runs before readiness checks: focus, 0.35-second wait, then the same read-only `run_preflight`; the combined report includes the activation check first.
+- PASS — Activation, probe, or readiness failure returns before native graph construction and `execute()`, so no game execution or click occurs. The focused no-native-call test covers this boundary.
+- PASS — A passing live preflight emits no report output; the CLI later emits exactly one final JSON object. The success-path test parses the complete captured stdout as one JSON document.
+- PASS — Fake mode skips live activation/preflight, explicit preflight remains read-only and rejects `--allow-live`, and missing `--allow-live` still fails before native construction.
+- PASS — No regressions found in architecture, import isolation, typed reasons, canonical report output, Power.log validation, or UI evidence.
 
-No regressions found. Verification: architecture gate PASS; focused tests 33/33; full suite 1816/1816; `compileall` and `git diff --cached --check` PASS. No live command was run; self-check remains blocked only by the current environment's admin/log-root configuration.
+Verification: architecture gate PASS; focused tests 36/36; full suite 1819/1819; `compileall` and `git diff --check` PASS. No live game command was run; self-check is blocked only by the current process not being elevated.

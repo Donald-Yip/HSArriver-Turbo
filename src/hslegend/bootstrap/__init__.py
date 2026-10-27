@@ -67,7 +67,11 @@ from .fake import FakeOneGameHarness, build_fake_one_game
 
 
 def __getattr__(name: str):
-    if name in {"build_native_one_game", "build_native_preflight"}:
+    if name in {
+        "build_native_live_preflight",
+        "build_native_one_game",
+        "build_native_preflight",
+    }:
         from . import native
 
         value = getattr(native, name)
@@ -80,6 +84,7 @@ __all__ = [
     *__all__,
     "FakeOneGameHarness",
     "build_fake_one_game",
+    "build_native_live_preflight",
     "build_native_one_game",
     "build_native_preflight",
 ]

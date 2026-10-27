@@ -112,6 +112,26 @@ class FakeOneGameEndToEndTests(unittest.TestCase):
         self.assertEqual(2, len(harness.scenario.journal.records))
 
 
+def live_ready_report(
+    deck_index: int = 0,
+    live_command: str = "uv run hslegend-onegame --allow-live --json",
+) -> PreflightReport:
+    return PreflightReport(
+        ok=True,
+        deck_index=deck_index,
+        ui_phase="main_menu",
+        checks=(
+            PreflightCheck(
+                "window_activation",
+                True,
+                detail="hearthstone-focused",
+            ),
+            PreflightCheck("foreground", True, detail="main_menu"),
+        ),
+        live_command=live_command,
+    )
+
+
 class OneGameCliTests(unittest.TestCase):
     def test_help_is_available(self) -> None:
         completed = run_cli("--help")
@@ -156,6 +176,7 @@ class OneGameCliTests(unittest.TestCase):
                 ["--allow-live", "--json"],
                 native_builder=native_builder,
                 fake_builder=fake_builder,
+                live_preflight_builder=lambda deck, **_kwargs: live_ready_report(deck),
             )
 
         self.assertEqual(0, code)
@@ -324,10 +345,39 @@ class OneGameCliTests(unittest.TestCase):
             code = cli_main(
                 ["--allow-live", "--json"],
                 native_builder=native_builder,
+                live_preflight_builder=lambda deck, **_kwargs: live_ready_report(deck),
             )
         self.assertEqual(1, code)
         payload = json.loads(output.getvalue())
         self.assertEqual("legacy_runtime_unavailable", payload["reason_code"])
+
+    def test_live_preflight_failure_prevents_native_execution(self) -> None:
+        calls: list[str] = []
+        failed = PreflightReport(
+            ok=False,
+            deck_index=0,
+            ui_phase="unknown",
+            checks=(PreflightCheck("window_activation", False, "window_activation_failed", "focus"),),
+            live_command="uv run hslegend-onegame --allow-live --json",
+        )
+
+        def native_builder():
+            calls.append("native")
+            return build_fake_one_game()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--allow-live", "--json"],
+                native_builder=native_builder,
+                live_preflight_builder=lambda _deck, **_kwargs: failed,
+            )
+        self.assertEqual(1, code)
+        self.assertEqual([], calls)
+        self.assertEqual(
+            "window_activation_failed",
+            json.loads(output.getvalue())["checks"][0]["reason_code"],
+        )
 
     def test_fake_selects_fake_builder(self) -> None:
         calls: list[str] = []
