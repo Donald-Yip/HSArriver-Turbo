@@ -236,9 +236,9 @@
     },
     {
       "id": "R06",
-      "status": "planned",
-      "owner": null,
-      "review_round": 0,
+      "status": "done",
+      "owner": "implementer",
+      "review_round": 2,
       "branch": "feature/R06-data-adapters",
       "depends_on": [
         "R05"
@@ -246,10 +246,10 @@
       "task_book": "docs/tasks/R06-data-adapters.md",
       "implementer_report": "docs/agent/reports/R06-implementer.md",
       "review_report": "docs/agent/reviews/R06-review.md",
-      "base_sha": null,
+      "base_sha": "e4cda59",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R06 committed; adapters 22; headless 1525"
     },
     {
       "id": "R07",

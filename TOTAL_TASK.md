@@ -47,7 +47,7 @@ R05: plan execution pipeline fix round 2 complete; ready for re-review.
 | R03 | done | Domain contracts | R02C5 |
 | R04 | done | Application ports and runtime controls | R03 |
 | R05 | done | Plan and execution pipeline | R04 |
-| R06 | planned | Data adapters | R05 |
+| R06 | done | Data adapters | R05 |
 | R07 | planned | External-system adapters | R06 |
 | R08 | planned | Enter-battle vertical slice | R07 |
 | R09 | planned | Mulligan vertical slice | R08 |
