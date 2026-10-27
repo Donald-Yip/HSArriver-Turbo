@@ -4,9 +4,28 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import unittest
 
-from tools.run_headless_tests import RequiredOptInResult
+from tools.run_headless_tests import (
+    RequiredOptInResult,
+    native_live_manifest,
+    opt_in_manifest,
+)
+
+
+class RunnerManifestTests(unittest.TestCase):
+    def test_opt_in_and_native_live_modes_stay_separate(self):
+        root = Path(__file__).resolve().parent.parent
+        opt_in = opt_in_manifest(root)["opt_in_modules"]
+        native_live = native_live_manifest(root)["native_live_modules"]
+
+        self.assertIn("tests.opt_in.test_repository_contracts", opt_in)
+        self.assertTrue(all(module.startswith("tests.opt_in.") for module in opt_in))
+        self.assertTrue(
+            all(module.startswith("tests.native_live.") for module in native_live)
+        )
+        self.assertFalse(set(opt_in) & set(native_live))
 
 
 class RequiredOptInResultTests(unittest.TestCase):

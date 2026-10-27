@@ -113,3 +113,7 @@ jobs:
       - name: Headless unit tests
         shell: pwsh
         run: uv run python tools/run_headless_tests.py
+
+      - name: Opt-in integration tests
+        shell: pwsh
+        run: uv run python tools/run_headless_tests.py --opt-in

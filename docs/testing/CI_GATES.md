@@ -49,34 +49,28 @@ directories, so `**/*.py` matches both `a.py` and `nested/a.py`.
 ## CI Defaults
 
 The workflow runs on `windows-latest` and uses uv only for dependencies. It runs
-compile, architecture, scope, and headless unit tests. It does not run native Windows
-smoke tests, Node frontend tests, real OCR inference, screen capture, or a real
-Hearthstone game.
+compile, architecture, scope, default headless tests, and the deterministic opt-in
+gate. It never runs tests requiring a real Hearthstone window.
 
-R02C4 moved the external cases to `tests/native/`. That directory has no
-`__init__.py`, so ordinary discovery rooted at `tests` does not recurse into it.
-`tools/run_headless_tests.py` also enumerates only top-level `tests/test_*.py`
-modules, so Node and native files are not imported by the default runner rather
-than being collected and filtered afterward.
+Gate directories are intentionally non-packages:
 
-Run the explicit Node/native gate when the environment supports it:
+- `tests/opt_in`: deterministic Node/native/tooling checks used by Windows CI.
+- `tests/native_live`: real-window checks run only by an explicit local/native job.
+
+`tools/run_headless_tests.py` discovers nested gate modules by filename without
+importing them for the default suite. A required skip in `--opt-in` or `--native-live`
+is reported as a failure.
 
 ```powershell
+uv run python tools/run_headless_tests.py
 uv run python tools/run_headless_tests.py --opt-in
+uv run python tools/run_headless_tests.py --native-live
 ```
 
-That gate loads only `tests/native/test_process_enumeration.py` and
-`tests/native/test_surrender_frontend.py`. A required skip is reported as a failure,
-so a missing Node executable or unsupported native process API cannot pass silently.
-`tests/test_ci_gates.py` keeps that skip-to-failure contract in the default headless
-suite. The individual `python -m unittest tests.native...` commands remain useful for
-diagnosis, but they retain unittest's normal skip semantics and are not the gate.
+Windows CI runs the first two commands and never runs `--native-live`. Set `HSL_NODE`
+only when Node is not discoverable from `PATH`.
 
-Set `HSL_NODE` to an explicit Node executable if it is not on `PATH`. The Node
-test otherwise auto-discovers `node` from `PATH` or environment-derived standard
-installation directories and always decodes the child process output as UTF-8.
-
-The default/opt-in discovery manifest is visible with:
+The manifests are visible without importing their modules:
 
 ```powershell
 uv run python tools/run_headless_tests.py --list-exclusions

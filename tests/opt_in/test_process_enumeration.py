@@ -1,6 +1,6 @@
 """Opt-in Windows smoke tests for the real process-enumeration path.
 
-These tests intentionally live under ``tests/native``. The directory has no
+These tests intentionally live under ``tests/opt_in``. The directory has no
 ``__init__.py``, so default discovery rooted at ``tests`` does not collect them.
 Run explicitly on Windows:
 

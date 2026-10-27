@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Run the default headless unittest suite.
 
-Opt-in integration tests live under ``tests/native`` and are never imported by
-this runner. The default suite is assembled from top-level ``tests/test_*.py``
-modules, rather than recursively discovering every importable test package. This
-keeps Node, real process inspection, OCR models, a screen, and a running game out
-of the default gate without relying on run-time filtering or silent skips.
+The default suite is assembled only from top-level ``tests/test_*.py`` modules.
+Deterministic integration tests live under ``tests/opt_in`` and run explicitly
+with ``--opt-in``. Tests requiring a real Hearthstone window live under
+``tests/native_live`` and run only with ``--native-live``. Directories are
+discovered without importing their modules until the selected gate starts.
 """
 
 from __future__ import annotations
@@ -16,10 +16,23 @@ import sys
 import unittest
 from pathlib import Path
 
-OPT_IN_MODULES = (
-    "tests.native.test_process_enumeration",
-    "tests.native.test_surrender_frontend",
-)
+def _package_modules(root: Path, package: str) -> list[str]:
+    directory = root.joinpath(*package.split("."))
+    if not directory.is_dir():
+        return []
+    return [
+        f"{package}.{path.stem}"
+        for path in sorted(directory.glob("test_*.py"))
+        if path.is_file()
+    ]
+
+
+def opt_in_modules(root: Path) -> list[str]:
+    return _package_modules(root, "tests.opt_in")
+
+
+def native_live_modules(root: Path) -> list[str]:
+    return _package_modules(root, "tests.native_live")
 
 
 class RequiredOptInResult(unittest.TextTestResult):
@@ -35,8 +48,8 @@ class RequiredOptInResult(unittest.TextTestResult):
 def default_test_modules(root: Path) -> list[str]:
     """Return only the top-level default test modules.
 
-    ``glob`` is intentionally non-recursive. Files under ``tests/native`` remain
-    opt-in even if that directory later gains an ``__init__.py``.
+    ``glob`` is intentionally non-recursive. Nested opt-in and native-live
+    directories are never included by default.
     """
     return [f"tests.{path.stem}" for path in sorted((root / "tests").glob("test_*.py")) if path.is_file()]
 
@@ -51,17 +64,34 @@ def build_headless_suite(root: Path) -> tuple[unittest.TestSuite, list[str]]:
 
 def build_opt_in_suite(root: Path) -> tuple[unittest.TestSuite, list[str]]:
     loader = unittest.TestLoader()
-    modules = list(OPT_IN_MODULES)
+    modules = opt_in_modules(root)
     return loader.loadTestsFromNames(modules), modules
 
 
-def opt_in_manifest() -> dict[str, object]:
+def build_native_live_suite(root: Path) -> tuple[unittest.TestSuite, list[str]]:
+    loader = unittest.TestLoader()
+    modules = native_live_modules(root)
+    return loader.loadTestsFromNames(modules), modules
+
+
+def opt_in_manifest(root: Path | None = None) -> dict[str, object]:
+    root = (root or Path(__file__).resolve().parents[1]).resolve()
     return {
         "mode": "opt-in modules are not collected by the default runner",
         "excluded_modules": [],
         "excluded_tests": [],
-        "opt_in_modules": list(OPT_IN_MODULES),
+        "opt_in_modules": opt_in_modules(root),
         "opt_in_skips": "failure when running with --opt-in",
+        "native_live_modules": native_live_modules(root),
+    }
+
+
+def native_live_manifest(root: Path | None = None) -> dict[str, object]:
+    root = (root or Path(__file__).resolve().parents[1]).resolve()
+    return {
+        "mode": "native-live modules require a real Hearthstone window",
+        "native_live_modules": native_live_modules(root),
+        "native_live_skips": "failure when running with --native-live",
     }
 
 
@@ -82,19 +112,31 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the default/opt-in discovery manifest as JSON before running",
     )
-    parser.add_argument(
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--opt-in",
         action="store_true",
         help=(
-            "Run the explicit Node/native opt-in modules; any skipped required "
+            "Run explicit Node/native/tooling modules; any skipped required "
             "test fails the gate"
+        ),
+    )
+    mode_group.add_argument(
+        "--native-live",
+        action="store_true",
+        help=(
+            "Run tests requiring a real Hearthstone window; any skipped test "
+            "fails the gate"
         ),
     )
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
     sys.path.insert(0, str(root))
-    manifest = opt_in_manifest()
+    manifest = {
+        "opt_in": opt_in_manifest(root),
+        "native_live": native_live_manifest(root),
+    }
     if args.list_opt_in:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
@@ -104,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.opt_in:
         suite, modules = build_opt_in_suite(root)
         mode = "opt-in"
+    elif args.native_live:
+        suite, modules = build_native_live_suite(root)
+        mode = "native-live"
     else:
         suite, modules = build_headless_suite(root)
         mode = "headless"
@@ -112,17 +157,27 @@ def main(argv: list[str] | None = None) -> int:
     if count == 0:
         print("[headless-tests] ERROR: discovery selected zero tests", file=sys.stderr)
         return 2
-    if args.opt_in:
+    if mode == "opt-in":
         print(
             f"[headless-tests] selected {count} opt-in tests from "
+            f"{len(modules)} modules; required skips fail"
+        )
+    elif mode == "native-live":
+        print(
+            f"[headless-tests] selected {count} native-live tests from "
             f"{len(modules)} modules; required skips fail"
         )
     else:
         print(
             f"[headless-tests] selected {count} tests; opt-in modules not "
-            f"collected: {len(OPT_IN_MODULES)}"
+            f"collected: {len(opt_in_modules(root))}; native-live modules not "
+            f"collected: {len(native_live_modules(root))}"
         )
-    result_class = RequiredOptInResult if args.opt_in else unittest.TextTestResult
+    result_class = (
+        RequiredOptInResult
+        if mode in {"opt-in", "native-live"}
+        else unittest.TextTestResult
+    )
     result = unittest.TextTestRunner(
         verbosity=2, resultclass=result_class).run(suite)
     passed = result.testsRun - len(result.failures) - len(result.errors) - len(result.skipped)

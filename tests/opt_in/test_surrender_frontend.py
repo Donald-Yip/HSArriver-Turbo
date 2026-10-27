@@ -1,6 +1,6 @@
 """Opt-in frontend round-trip check: run web/index.html's script in a fake DOM.
 
-The test intentionally lives under ``tests/native``. That directory has no
+The test intentionally lives under ``tests/opt_in``. That directory has no
 ``__init__.py``, so ``python -m unittest discover -s tests -t .`` does not recurse
 into it. Run it explicitly when Node is available:
 

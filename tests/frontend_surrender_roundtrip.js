@@ -1,6 +1,6 @@
 /* 前端往返校验：把 index.html 的脚本放进假 DOM 里跑，检查
    「嵌套配置 → 表单 state → 收集回配置」能不能原样往返，以及折叠状态是否记住。
-   由 tests/native/test_surrender_frontend.py 通过 node 调起（显式 opt-in）。 */
+   由 tests/opt_in/test_surrender_frontend.py 通过 node 调起（显式 opt-in）。 */
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");

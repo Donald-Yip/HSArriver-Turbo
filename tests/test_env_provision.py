@@ -379,16 +379,6 @@ class TemplateTests(unittest.TestCase):
             if isinstance(value, str):
                 self.assertNotRegex(value, r"[A-Za-z]:[\\/]", value)
 
-    def test_template_is_not_ignored_by_git(self):
-        """模板必须能进版本库（实际生效的 log/env.json 才是被忽略的那个）。"""
-        import subprocess
-
-        proc = subprocess.run(["git", "check-ignore", "--quiet",
-                               "env.example.json"], cwd=str(hsctl.ROOT),
-                              capture_output=True)
-        self.assertNotEqual(0, proc.returncode,
-                            "env.example.json 被 .gitignore 吞了，模板进不了仓库")
-
 
 if __name__ == "__main__":
     unittest.main()
