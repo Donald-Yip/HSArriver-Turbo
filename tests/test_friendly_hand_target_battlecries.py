@@ -5,8 +5,10 @@
 完整——漏一张就是点错目标或直接报错。
 """
 
+import importlib
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -113,14 +115,17 @@ class HandTargetCardDataTests(unittest.TestCase):
 
     def test_unreadable_card_data_falls_back_to_the_legacy_cards(self):
         """cards.json 读不出来时不能把原来能用的两张卡一起拖垮。"""
-        friendly_hand_target_card_ids.cache_clear()
-        self.addCleanup(friendly_hand_target_card_ids.cache_clear)
-        with patch(
-                "src.game_state.hand_target._metadata_hand_target_card_ids",
-                side_effect=OSError("cards.json missing")):
-            self.assertTrue(is_friendly_hand_target_card("CATA_490"))
-            self.assertTrue(is_friendly_hand_target_card("CATA_563"))
-            self.assertFalse(is_friendly_hand_target_card("CATA_200"))
+        from src.game_state import hand_target as hand_target_module
+
+        self.addCleanup(importlib.reload, hand_target_module)
+        with patch.object(Path, "open", side_effect=OSError("cards.json missing")):
+            # Reload after installing the Path.open failure so every metadata
+            # cache is empty and the public file seam actually drives fallback.
+            importlib.reload(hand_target_module)
+            self.assertTrue(hand_target_module.is_friendly_hand_target_card("CATA_490"))
+            self.assertTrue(hand_target_module.is_friendly_hand_target_card("CATA_563"))
+            self.assertFalse(hand_target_module.is_friendly_hand_target_card("CATA_200"))
+        importlib.reload(hand_target_module)
 
 
 class HandTargetRuleTests(unittest.TestCase):

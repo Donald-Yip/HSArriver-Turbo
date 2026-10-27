@@ -17,7 +17,7 @@ environment-derived Node.js installation directories. Set `HSL_NODE` to an expli
 executable when needed:
 
 ```powershell
-$env:HSL_NODE = 'C:/Tools/nodejs/node.exe'
+$env:HSL_NODE = '<path-to-node>'
 uv run python -m unittest tests.native.test_surrender_frontend -v
 ```
 

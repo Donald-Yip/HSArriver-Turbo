@@ -13,6 +13,10 @@ Rewrite the remaining five private-patch tests, remove temporary headless exclus
 - `tests/test_friendly_hand_target_battlecries.py`
 - `tests/test_hand_or_board_targets.py`
 - `tests/test_web_selfcheck_api.py`
+- `tests/test_window_tracker.py`
+- `tests/__init__.py`
+- `tests/native/README.md`
+- `tests/test_ci_gates.py`
 - `tools/run_headless_tests.py`
 - `docs/testing/**`
 - `docs/agent/**`
@@ -41,3 +45,8 @@ test(R02C5): finalize deterministic headless baseline
 
 - Implementer: `docs/agent/reports/R02C5-implementer.md`
 - Reviewer: `docs/agent/reviews/R02C5-review.md`
+
+## Additional Acceptance
+
+- The explicit Node/native opt-in gate must treat required-test skips as failure.
+- No machine-specific executable paths may appear in tracked evidence or documentation.

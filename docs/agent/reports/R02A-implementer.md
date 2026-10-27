@@ -65,7 +65,7 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 AssertionError: 'OK: A �� (B �� C)' not found in ''
 ```
 
-该失败已记录为 R02C rewrite：Node 子进程必须固定 `encoding="utf-8"`，并移除 `C:\Users\DonaldYip\...` / `D:\nodejs\node.exe` 本机路径。全量测试仍有 1520 个 case，说明 discovery 数量未因盘点变化。
+该失败已记录为 R02C rewrite：Node 子进程必须固定 `encoding="utf-8"`，并移除用户目录与特定盘符的本机路径。全量测试仍有 1520 个 case，说明 discovery 数量未因盘点变化。
 
 ```powershell
 # 检查 inventory 表行、唯一性、AST 方法数和 discovery 数一致

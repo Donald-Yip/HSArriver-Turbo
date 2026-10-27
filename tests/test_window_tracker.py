@@ -18,39 +18,55 @@ import window_tracker as wt
 
 
 class FakeHook:
-    """假的 SetWinEventHook：把回调留下来，测试里手动"触发事件"。"""
+    """假的 SetWinEventHook：用 Condition 同步挂钩，再手动触发事件。"""
 
-    def __init__(self):
-        self.proc = None
+    def __init__(self, succeeds=True):
+        self.succeeds = succeeds
+        self.procs = []
         self.handles = []
         self.unhooked = []
+        self.attempts = 0
+        self._condition = threading.Condition()
 
     def factory(self, handle, proc):
-        self.proc = proc
-        handle_id = 1000 + len(self.handles)
-        self.handles.append(handle_id)
-        return handle_id
+        with self._condition:
+            self.attempts += 1
+            if not self.succeeds:
+                self._condition.notify_all()
+                return 0
+            self.procs.append(proc)
+            handle_id = 1000 + self.attempts
+            self.handles.append(handle_id)
+            self._condition.notify_all()
+            return handle_id
 
     def unhook(self, hook):
-        self.unhooked.append(hook)
+        with self._condition:
+            self.unhooked.append(hook)
+            self._condition.notify_all()
+
+    @property
+    def proc(self):
+        return self.procs[-1] if self.procs else None
+
+    def wait_for_attached(self, count=1, timeout=2.0):
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: len(self.handles) >= count, timeout)
+
+    def wait_for_attempt(self, timeout=2.0):
+        with self._condition:
+            return self._condition.wait_for(lambda: self.attempts >= 1, timeout)
+
+    def wait_for_unhook(self, count=1, timeout=2.0):
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: len(self.unhooked) >= count, timeout)
 
     def fire(self, hwnd=4242):
-        assert self.proc is not None, "hook 还没挂上"
-        self.proc(1, wt.EVENT_OBJECT_LOCATIONCHANGE, hwnd, 0, 0, 0, 0)
-
-
-def wait_for(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
-    """等一个由**后台 hook 线程**满足的条件（挂钩是异步的）。
-
-    直接断言 `stats()`/`len(handles)` 会和 hook 线程抢时间：`ensure_started()`
-    返回时线程可能还没跑到 `SetWinEventHook`。测试必须等，而不是假定它已经跑完。
-    """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return bool(predicate())
+        proc = self.proc
+        assert proc is not None, "hook 还没挂上"
+        proc(1, wt.EVENT_OBJECT_LOCATIONCHANGE, hwnd, 0, 0, 0, 0)
 
 
 class TrackerTests(unittest.TestCase):
@@ -66,16 +82,20 @@ class TrackerTests(unittest.TestCase):
     def tearDown(self):
         self.tracker.stop()
 
+    def _wait_attached_and_ready(self, count=1):
+        self.assertTrue(self.hook.wait_for_attached(count),
+                        f"挂钩是异步的，应同步等到第 {count} 次挂上")
+        self.assertTrue(self.tracker.wait_ready(timeout=2.0))
+
     def test_ensure_started_is_idempotent(self):
         self.assertTrue(self.tracker.ensure_started(4242))
+        self._wait_attached_and_ready()
+
         self.assertTrue(self.tracker.ensure_started(4242))
 
-        self.assertTrue(wait_for(lambda: len(self.hook.handles) == 1),
-                        "挂钩是异步的，应该只挂一次")
-        self.assertFalse(wait_for(lambda: len(self.hook.handles) > 1,
-                                  timeout=0.3),
-                         "重复调用不应重复挂钩")
-        self.assertTrue(wait_for(self.tracker.available))
+        self.assertEqual(1, self.hook.attempts, "重复调用不应重复挂钩")
+        self.assertEqual(1, len(self.hook.handles))
+        self.assertTrue(self.tracker.available())
 
     def test_no_window_means_not_started(self):
         tracker = wt.WindowMoveTracker(hook_factory=self.hook.factory,
@@ -89,19 +109,23 @@ class TrackerTests(unittest.TestCase):
             tracker.stop()
 
     def test_hook_failure_degrades_without_raising(self):
+        failed_hook = FakeHook(succeeds=False)
         tracker = wt.WindowMoveTracker(
-            hook_factory=lambda handle, proc: 0,     # 挂钩失败
-            unhook=self.hook.unhook,
+            hook_factory=failed_hook.factory,
+            unhook=failed_hook.unhook,
             hwnd_provider=lambda: 4242,
             clock=lambda: self.now[0])
         try:
             self.assertTrue(tracker.ensure_started(4242))
-            self.assertFalse(tracker.available(), "挂钩失败应报告不可用")
+            self.assertTrue(failed_hook.wait_for_attempt())
+            self.assertFalse(tracker.wait_ready(timeout=2.0),
+                             "挂钩失败应报告不可用")
         finally:
             tracker.stop()
 
     def test_event_updates_timestamp_and_count(self):
         self.tracker.ensure_started(4242)
+        self._wait_attached_and_ready()
         self.assertFalse(self.tracker.moved_since(0.0))
 
         self.now[0] = 120.0
@@ -114,17 +138,11 @@ class TrackerTests(unittest.TestCase):
 
     def test_stop_stops_recording(self):
         self.tracker.ensure_started(4242)
-        # 挂钩是异步的：必须等 hook 线程真的跑到 SetWinEventHook 再读 proc。
-        # 直接读会抢时间 —— 单独跑这个文件时线程来得及，全量跑（CPU 竞争）时
-        # 就来不及，proc 会是 None（本文件顶部 wait_for 的说明就是这个坑）。
-        self.assertTrue(wait_for(lambda: self.hook.proc is not None),
-                        "挂钩是异步的，应等它挂上再断言")
-        proc = self.hook.proc
+        self._wait_attached_and_ready()
         self.tracker.stop()
 
-        # 钩子已卸载：即便再触发回调也不该再被算作"移动"
+        self.assertTrue(self.hook.wait_for_unhook())
         self.assertFalse(self.tracker.available())
-        self.assertTrue(proc is not None)
 
     def test_poll_detects_geometry_change(self):
         geometries = [(1920, 1080, 960, 362)]
@@ -167,12 +185,13 @@ class TrackerTests(unittest.TestCase):
 
     def test_rehook_when_handle_changes(self):
         self.tracker.ensure_started(4242)
-        self.assertTrue(wait_for(lambda: len(self.hook.handles) == 1))
+        self._wait_attached_and_ready(1)
 
         self.tracker.ensure_started(9999)
 
-        self.assertTrue(wait_for(lambda: len(self.hook.handles) == 2),
+        self.assertTrue(self.hook.wait_for_attached(2),
                         "句柄变化应重新挂钩")
+        self.assertTrue(self.tracker.wait_ready(timeout=2.0))
 
     def test_stats_shape(self):
         stats = self.tracker.stats()
@@ -184,18 +203,21 @@ class TrackerTests(unittest.TestCase):
     def test_wait_ready_sees_the_hook_after_startup(self):
         """挂钩是异步的：状态显示前要等线程挂完，否则会误报"轮询兜底"。"""
         self.tracker.ensure_started(4242)
+        self.assertTrue(self.hook.wait_for_attached())
 
         self.assertTrue(self.tracker.wait_ready(timeout=2.0))
         self.assertFalse(self.tracker.starting())
 
     def test_wait_ready_gives_up_when_the_hook_fails(self):
+        failed_hook = FakeHook(succeeds=False)
         tracker = wt.WindowMoveTracker(
-            hook_factory=lambda handle, proc: 0,     # 挂钩失败
-            unhook=self.hook.unhook,
+            hook_factory=failed_hook.factory,
+            unhook=failed_hook.unhook,
             hwnd_provider=lambda: 4242,
             clock=lambda: self.now[0])
         try:
             tracker.ensure_started(4242)
+            self.assertTrue(failed_hook.wait_for_attempt())
 
             self.assertFalse(tracker.wait_ready(timeout=2.0))
             self.assertFalse(tracker.starting(), "失败也必须结束等待状态")
@@ -204,11 +226,18 @@ class TrackerTests(unittest.TestCase):
 
     def test_wait_ready_never_blocks_when_nothing_is_starting(self):
         """按帧调用（叠加层/预览）不能每帧都等：没在启动就立刻返回。"""
-        started = time.monotonic()
+        done = threading.Event()
+        results = []
 
-        self.assertFalse(self.tracker.wait_ready(timeout=1.0))
+        def wait():
+            results.append(self.tracker.wait_ready(timeout=1.0))
+            done.set()
 
-        self.assertLess(time.monotonic() - started, 0.1)
+        thread = threading.Thread(target=wait, name="test-wait-ready", daemon=True)
+        thread.start()
+
+        self.assertTrue(done.wait(1.0), "wait_ready 在未启动时不应阻塞")
+        self.assertEqual([False], results)
 
 
 class ClockConsistencyTests(unittest.TestCase):

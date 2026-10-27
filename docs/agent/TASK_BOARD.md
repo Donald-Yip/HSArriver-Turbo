@@ -12,7 +12,7 @@ Updated: 2026-10-27
 | R02C2 | done | feature/R02C2-overlay-tests | R02C1 | Overlay source-string replacement |
 | R02C3 | done | feature/R02C3-non-overlay-tests | R02C2 | Non-overlay source-string replacement |
 | R02C4 | done | feature/R02C4-native-node | R02C3 | Native and Node isolation |
-| R02C5 | planned | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |
+| R02C5 | done | feature/R02C5-headless-final | R02C4 | Private-patch rewrite and final headless gate |
 | R03 | planned | feature/R03-domain-contracts | R02C5 | Domain models and rules |
 | R04 | planned | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
 | R05 | planned | feature/R05-plan-execution | R04 | Plan and execution pipeline |

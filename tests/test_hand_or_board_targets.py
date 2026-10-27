@@ -6,8 +6,10 @@
 名字拿不到或两边同名时退回「只有一边能对上号位」，两边都能对上就报错不点。
 """
 
+import importlib
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -54,14 +56,18 @@ class HandOrBoardCardDataTests(unittest.TestCase):
         self.assertFalse(allows_hand_target("OTHER_MINION"))
 
     def test_unreadable_card_data_falls_back_to_the_legacy_card(self):
-        hand_or_board_target_card_ids.cache_clear()
-        self.addCleanup(hand_or_board_target_card_ids.cache_clear)
-        with patch(
-                "src.game_state.hand_target._metadata_hand_or_board_card_ids",
-                side_effect=OSError("cards.json missing")):
-            self.assertTrue(is_hand_or_board_target_card(HAND_OR_BOARD_CARD))
+        from src.game_state import hand_target as hand_target_module
+
+        self.addCleanup(importlib.reload, hand_target_module)
+        with patch.object(Path, "open", side_effect=OSError("cards.json missing")):
+            # Reload under the public Path.open failure to clear every metadata
+            # cache, then exercise the public lookup rather than a private helper.
+            importlib.reload(hand_target_module)
+            self.assertTrue(
+                hand_target_module.is_hand_or_board_target_card(HAND_OR_BOARD_CARD))
             self.assertEqual(LEGACY_HAND_OR_BOARD_CARD_IDS,
-                             hand_or_board_target_card_ids())
+                             hand_target_module.hand_or_board_target_card_ids())
+        importlib.reload(hand_target_module)
 
 
 class TargetNameParsingTests(unittest.TestCase):

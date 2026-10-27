@@ -26,28 +26,34 @@ def fake_result(ok=True, failed=0):
     }
 
 
+class FakeSelfcheckRunner:
+    """Callable fake injected at the public ``selfcheck.run_checks`` seam."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        return self._factory()
+
+
 class SelfcheckCacheTests(unittest.TestCase):
     def setUp(self):
         self._saved = web_ui._selfcheck_state["result"]
         web_ui._selfcheck_state["result"] = None
-        self.calls = []
 
     def tearDown(self):
         web_ui._selfcheck_state["result"] = self._saved
 
-    def _patch(self, result):
-        def run():
-            self.calls.append(1)
-            return dict(result)
-        return patch.object(web_ui.selfcheck, "run_checks", side_effect=run)
-
     def test_result_is_cached_until_forced(self):
-        with self._patch(fake_result()), patch.object(web_ui, "_log_selfcheck"):
+        runner = FakeSelfcheckRunner(fake_result)
+        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             first = web_ui.run_selfcheck()
             second = web_ui.run_selfcheck()
             third = web_ui.run_selfcheck(force=True)
 
-        self.assertEqual(2, len(self.calls))
+        self.assertEqual(2, runner.calls)
         self.assertIs(first, second)
         self.assertEqual(first["summary"], third["summary"])
 
@@ -55,8 +61,8 @@ class SelfcheckCacheTests(unittest.TestCase):
         self.assertEqual({"checked": False}, web_ui.selfcheck_summary())
 
     def test_status_carries_the_summary_after_a_run(self):
-        with self._patch(fake_result(ok=False, failed=2)), \
-                patch.object(web_ui, "_log_selfcheck"):
+        runner = FakeSelfcheckRunner(lambda: fake_result(ok=False, failed=2))
+        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             web_ui.run_selfcheck(force=True)
 
         summary = web_ui.selfcheck_summary()
@@ -69,7 +75,6 @@ class SelfcheckCacheTests(unittest.TestCase):
     def test_crashed_selfcheck_still_returns_a_conclusion(self):
         with patch.object(web_ui.selfcheck, "run_checks",
                           side_effect=RuntimeError("炸了")), \
-                patch.object(web_ui, "_log_selfcheck"), \
                 patch.object(web_ui.traceback, "print_exc"):
             result = web_ui.run_selfcheck(force=True)
 
@@ -97,11 +102,13 @@ class SelfcheckCacheTests(unittest.TestCase):
         self.assertTrue(thread.daemon)
 
     def test_api_selfcheck_wraps_the_result(self):
-        with self._patch(fake_result()), patch.object(web_ui, "_log_selfcheck"):
+        runner = FakeSelfcheckRunner(fake_result)
+        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             payload = web_ui.api_selfcheck(force=True)
 
         self.assertTrue(payload["ok"])
         self.assertIn("items", payload["result"])
+        self.assertEqual(1, runner.calls)
 
 
 class SelfcheckLoggingTests(unittest.TestCase):
@@ -178,28 +185,22 @@ class SelfcheckApiTests(unittest.TestCase):
             return json.loads(resp.read().decode("utf8"))
 
     def test_get_selfcheck_returns_the_items(self):
-        with patch.object(web_ui.selfcheck, "run_checks",
-                          return_value=fake_result()), \
-                patch.object(web_ui, "_log_selfcheck"):
+        runner = FakeSelfcheckRunner(fake_result)
+        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             data = self._get("/api/selfcheck")
 
         self.assertTrue(data["ok"])
         self.assertTrue(data["result"]["ok"])
         self.assertEqual(1, len(data["result"]["items"]))
+        self.assertEqual(1, runner.calls)
 
     def test_post_selfcheck_forces_a_rerun(self):
-        calls = []
-
-        def run():
-            calls.append(1)
-            return fake_result()
-
-        with patch.object(web_ui.selfcheck, "run_checks", side_effect=run), \
-                patch.object(web_ui, "_log_selfcheck"):
+        runner = FakeSelfcheckRunner(fake_result)
+        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             self._get("/api/selfcheck")
             self._post("/api/selfcheck")
 
-        self.assertEqual(2, len(calls))
+        self.assertEqual(2, runner.calls)
 
     def test_status_exposes_the_selfcheck_summary(self):
         web_ui._selfcheck_state["result"] = fake_result(ok=False, failed=1)

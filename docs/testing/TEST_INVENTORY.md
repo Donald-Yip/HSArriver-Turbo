@@ -1,6 +1,6 @@
 # R02A Test Inventory
 
-> 状态：R02A 盘点完成；R02C1 已按 Batch 1 删除 5 个批准候选，R02C2 已按 Batch 2 删除 19 个浮窗源码串候选，R02C3 已按 Batch 3 删除 11 个非浮窗源码串候选，均由行为测试替代。其余 `candidate-delete` 仍只是 R02C 候选，必须先创建并通过替代测试。
+> 状态：R02A 盘点完成；R02C1-R02C3 已按批次完成源码串替换，R02C4 已完成 Node/native opt-in 隔离，R02C5 已完成 5 个私有 patch rewrite 与 6 个线程同步 rewrite。其余 `candidate-delete` 仍只是候选，必须先创建并通过替代测试。
 
 ## 口径
 
@@ -49,12 +49,12 @@
 | 19 | `tests/test_env_provision.py` | 394 | 32 | EnvFileTests(5), VerifyPythonTests(6), DiscoverTests(5), ResolveTests(3), EnsureInterpreterTests(6), DoctorVerdictTests(5), TemplateTests(2) | Tooling | 真实 OS/子进程/依赖环境；私有 patch | keep | controller | - | uv/Python 发现、env pin 和 doctor 结论。  |
 | 20 | `tests/test_feedback.py` | 494 | 21 | FeedbackTests(11), ReportTests(1), ExportTests(1), ZipNameTests(4), ExportOpenTests(1), ArchiveTests(3) | Tooling / Adapter | 破坏性行为覆盖（fake/临时目录） | keep | controller | - | 反馈打包、导出与临时目录清理。  |
 | 21 | `tests/test_four_option_choices.py` | 101 | 7 | FourOptionChoiceTests(7) | Application | 无 | keep | controller | - | 四选一发现卡路径。  |
-| 22 | `tests/test_friendly_hand_target_battlecries.py` | 555 | 21 | HandTargetCardDataTests(6), HandTargetRuleTests(3), HandTargetTypeMismatchTests(3), FollowUpHandTargetLogTests(2), FriendlyHandTargetBattlecryTests(7) | Application | 私有 patch | rewrite | R02C | R02C | 手牌目标战吼规则；1 个私有 metadata patch 改为端口/fake seam。  |
+| 22 | `tests/test_friendly_hand_target_battlecries.py` | 555 | 21 | HandTargetCardDataTests(6), HandTargetRuleTests(3), HandTargetTypeMismatchTests(3), FollowUpHandTargetLogTests(2), FriendlyHandTargetBattlecryTests(7) | Application | 无私有 helper patch | keep (rewritten R02C5) | controller | - | 手牌目标战吼规则；metadata 回退由公共 `Path.open` 失败 seam 覆盖。  |
 | 23 | `tests/test_fsm_liveness_stop.py` | 151 | 8 | LivenessStopTests(6), LoopWiringTests(2) | Application | 源码字符串/源码文件内容 | rewrite | R02C | R02C | 存活停止与主循环接线；1 个源码字符串断言改为行为接线测试。  |
 | 24 | `tests/test_full_board_magnetic.py` | 127 | 3 | FullBoardMagneticTests(3) | Application | 私有 patch | keep | controller | - | 满场磁力放置与拖拽落点。  |
 | 25 | `tests/test_hand_animation_delay.py` | 225 | 5 | HandAnimationDelayTests(5) | Application | 无 | keep | controller | - | 手牌动画延时的 fake clock 测试。  |
 | 26 | `tests/test_hand_deck_actions.py` | 42 | 2 | HandDeckActionParserTests(2) | Application | 无 | keep | controller | - | 锻造/交易动作映射。  |
-| 27 | `tests/test_hand_or_board_targets.py` | 341 | 19 | HandOrBoardCardDataTests(3), TargetNameParsingTests(3), HandOrBoardAdaptationTests(10), HandOrBoardExecutionTests(3) | Application | 私有 patch | rewrite | R02C | R02C | 手牌/场面目标解析；1 个私有 metadata patch 改为可注入 seam。  |
+| 27 | `tests/test_hand_or_board_targets.py` | 341 | 19 | HandOrBoardCardDataTests(3), TargetNameParsingTests(3), HandOrBoardAdaptationTests(10), HandOrBoardExecutionTests(3) | Application | 无私有 helper patch | keep (rewritten R02C5) | controller | - | 手牌/场面目标解析；metadata 回退由公共 `Path.open` 失败 seam 覆盖。  |
 | 28 | `tests/test_hearthstone_liveness.py` | 221 | 17 | ProcessLivenessTests(7), LogStalenessTests(6), NativeProcessTests(4) | Application / native smoke | 真实 OS/子进程/依赖环境 | keep + move-native 2 | R02C | R02C | 13 个 fake-clock 行为测试保留；2 个真实进程枚举转 opt-in Windows smoke；2 个注入 fake 的 unknown 分支保留 headless。  |
 | 29 | `tests/test_hs_restart.py` | 449 | 28 | ResolvePathsTests(5), ClearLogsTests(3), KillHearthstoneTests(4), LaunchHearthstoneTests(10), OverlayDelayDisplayTests(6) | Tooling | 破坏性行为覆盖（fake/临时目录） | keep | controller | - | 重启、清日志、进程终止路径；全部通过 fake/临时目录覆盖。  |
 | 30 | `tests/test_hs_window.py` | 66 | 9 | HeightForWidthTests(3), ClampWidthTests(6) | Domain | 无 | keep | controller | - | 窗口宽高纯函数。  |
@@ -115,9 +115,10 @@
 | 85 | `tests/test_web_prepare_flow.py` | 371 | 22 | PrepareTests(6), OverlayStateSyncTests(6), OverlayPageTests(4), OverlayVerificationTests(5), StartAfterPrepareTests(1) | Web / UI contract | 私有 patch | keep | controller | - | prepare 流程与浮窗同步。  |
 | 86 | `tests/test_web_regions_api.py` | 138 | 8 | RegionsApiTests(5), RegionsPageTests(3) | Web contract | 本地 loopback HTTP；私有 patch | keep | controller | - | 本地 loopback 区域预览 API。  |
 | 87 | `tests/test_web_screenshot_points.py` | 204 | 11 | ModePointMarkerTests(3), ScreenshotPointsApiTests(3), ServeStopApiTests(4), PortFileTests(1) | Web / UI contract | 私有 patch | keep | controller | - | 截图点与停止 API。  |
-| 88 | `tests/test_web_selfcheck_api.py` | 243 | 16 | SelfcheckCacheTests(6), SelfcheckLoggingTests(2), SelfcheckApiTests(4), SelfcheckPageTests(4) | Web contract | 本地 loopback HTTP；私有 patch | keep + rewrite 3 | R02C | R02C | 自检 API/cache 契约保留；3 个私有 patch 改为 fake runner seam。  |
+| 88 | `tests/test_web_selfcheck_api.py` | 243 | 16 | SelfcheckCacheTests(6), SelfcheckLoggingTests(2), SelfcheckApiTests(4), SelfcheckPageTests(4) | Web contract | 本地 loopback HTTP | keep (rewritten 3 R02C5) | controller | - | 自检 API/cache/status 契约保留；3 个 runner patch 改为公开 `selfcheck.run_checks` fake seam。  |
 | 89 | `tests/test_web_ui_surrender.py` | 215 | 16 | SaveTests(6), ConfirmTests(2), EmptyConfigTests(2), NestedSaveTests(3), WebPageTests(3) | Web contract | 无 | keep | controller | - | 投降配置保存/确认/嵌套结构。  |
-| 90 | `tests/test_window_tracker.py` | 257 | 16 | TrackerTests(12), ClockConsistencyTests(2), ModuleSingletonTests(2) | Adapter contract | 无 | keep + rewrite 6 | R02C | R02C | 10 个确定性测试保留；6 个依赖后台 hook 线程/实时轮询的方法改为 Event/Condition 同步。  |
+| 90 | `tests/test_window_tracker.py` | 257 | 16 | TrackerTests(12), ClockConsistencyTests(2), ModuleSingletonTests(2) | Adapter contract | 无实时 sleep 轮询 | keep (rewritten 6 R02C5) | controller | - | 16 个确定性测试；异步 hook 生命周期和事件测试由 Condition/Event 同步。  |
+| 91 | `tests/test_ci_gates.py` | 33 | 1 | RequiredOptInResultTests(1) | Tooling / CI contract | 无 | keep (added R02C5) | controller | - | required opt-in skip 必须转成 failure；默认 headless runner 自动收集。  |
 
 ## 辅助 JS
 
@@ -142,8 +143,8 @@
 | 文件 / 类 | 方法 | 决策 | 依据 |
 |---|---|---|---|
 | `test_click_safety_checks.py::ClickSafetyCheckRemovalTests` | `test_clicks_when_hearthstone_window_is_not_found`, `test_background_window_activates_and_clicks_without_hit_testing` | deleted (R02C1) | 两个危险验收已由 5 个 fail-closed/合法路径测试替代；见上方 R02C1 删除记录。 |
-| `test_friendly_hand_target_battlecries.py::FriendlyHandTargetBattlecryTests` | `test_unreadable_card_data_falls_back_to_the_legacy_cards` | rewrite | 行为值得保留，改为注入 metadata reader fake，不 patch 私有函数。 |
-| `test_hand_or_board_targets.py::HandOrBoardCardDataTests` | `test_unreadable_card_data_falls_back_to_the_legacy_card` | rewrite | 同上，改为构造损坏 reader/fake port。 |
+| `test_friendly_hand_target_battlecries.py::HandTargetCardDataTests` | `test_unreadable_card_data_falls_back_to_the_legacy_cards` | rewritten (R02C5) | 行为保留；公共 `Path.open` 失败后模块重载，验证 legacy cards 回退，不 patch `_metadata_*`。 |
+| `test_hand_or_board_targets.py::HandOrBoardCardDataTests` | `test_unreadable_card_data_falls_back_to_the_legacy_card` | rewritten (R02C5) | 行为保留；同一公共 `Path.open` 失败 seam 验证 ambiguous-card legacy 回退。 |
 | `test_fsm_liveness_stop.py::LoopWiringTests` | `test_main_loop_and_battling_call_the_check` | replaced (R02C3) | 已由 `test_main_loop_and_battling_call_the_check_once_before_stopping` 通过 fake loop 计数 `check_hearthstone_liveness` 的出口调用替代。 |
 | `test_human_like_scope.py::MulliganScopeTests` | `test_fsm_does_not_wire_the_human_like_hook_into_mulligan` | replaced (R02C3) | 已由 `test_fsm_wires_the_human_like_hook_only_into_recommendation_flow` 通过 fake flow 构造参数替代：MulliganFlow 无挂点，RecommendationFlow 有挂点。 |
 | `test_hsctl.py::TableDriftTests` | `test_delay_keys_match_config_whitelist`, `test_delay_effect_table_matches_web_ui`, `test_screenshot_kinds_match_web_ui` | deleted (R02C1) | 私有表互相比较已删除；由 5 个 CLI 可观察输出/参数契约测试替代。 |
@@ -156,12 +157,12 @@
 | `test_overlay_window_slider.py::SliderWiringTests` | `test_run_builds_a_custom_canvas_slider`, `test_root_drag_ignores_events_from_the_slider` | replaced (R02C2) | 已由 `test_slider_canvas_events_update_value_and_apply_on_release` 与 `test_root_drag_ignores_slider_events` 替代。 |
 | `test_region_overlay_button.py::OverlayButtonTests` | `test_calibrate_button_exists_and_is_short` | replaced (R02C2) | 已由 `test_calibrate_button_dispatches_callback` 通过 fake Button 调用与校准回调 spy 替代。 |
 | `test_start_latency.py::NoFixedSleepTests/OverlayStartingFeedbackTests` | `test_main_menu_action_does_not_wait_three_seconds`, `test_choosing_hero_action_does_not_wait_two_seconds`, `test_both_entry_states_log_a_milestone`, `test_overlay_renders_starting_text`, `test_start_accepts_the_is_starting_callback` | replaced (R02C3) | 已由 fake clock 睡眠记录、milestone logger spy、fake widget 的「启动中…」按钮状态和 `start(is_starting=...)` 回调接线测试替代。 |
-| `test_window_tracker.py::TrackerTests` | `test_ensure_started_is_idempotent`, `test_stop_stops_recording`, `test_rehook_when_handle_changes`, `test_wait_ready_sees_the_hook_after_startup`, `test_wait_ready_gives_up_when_the_hook_fails`, `test_wait_ready_never_blocks_when_nothing_is_starting` | rewrite | 现用 `time.time()` + `time.sleep(0.01)` 轮询后台 hook 线程，最长 2s；改为 Event/Condition/可注入同步器，禁止实时轮询。 |
+| `test_window_tracker.py::TrackerTests` | `test_ensure_started_is_idempotent`, `test_stop_stops_recording`, `test_rehook_when_handle_changes`, `test_wait_ready_sees_the_hook_after_startup`, `test_wait_ready_gives_up_when_the_hook_fails`, `test_wait_ready_never_blocks_when_nothing_is_starting` | rewritten (R02C5) | 用 Condition 同步 hook attach/unhook/attempt，用 Event 验证非阻塞返回；事件测试先 `wait_ready()` 再 fire。 |
 | `test_surrender_frontend.py::FrontendRoundTripTests` | `test_nested_config_survives_the_form` | moved (R02C4) | 已迁到 `tests/native/test_surrender_frontend.py`；Node 前端往返契约保留，子进程固定 `encoding="utf-8"`，支持 `HSL_NODE` 或自动发现且无机器路径。 |
 | `test_version.py::SurfaceTests` | `test_overlay_draws_version_label`, `test_cli_version_flag_uses_module` | replaced (R02C3) | 已由 `test_overlay_renders_version_text_next_to_brand` 与 `test_cli_version_flag_prints_module_label` 通过 fake Label 树和公开 `hsctl.py --version` 子进程替代。 |
 | `test_web_admin_banner.py::AdminWarningBannerTests` | `test_main_prints_the_banner_only_for_non_admins` | replaced (R02C3) | 已由 `test_main_outputs_the_banner_only_for_non_admins` 通过 patch admin bool 并捕获 `main()` stdout 替代。 |
 | `test_web_logs_wiring.py::OverlayWiringTests` | `test_run_uses_the_log_row_and_confirms_before_clearing` | replaced (R02C3) | 已由 `test_run_renders_log_row_and_clears_only_after_confirmation` 通过 fake widget 树、日志回调和确认取消/确认两路径替代。 |
-| `test_web_selfcheck_api.py::SelfcheckCacheTests/SelfcheckApiTests` | `test_result_is_cached_until_forced`, `test_status_carries_the_summary_after_a_run`, `test_api_selfcheck_wraps_the_result` | rewrite | 私有 patch；注入 fake selfcheck runner 并保留 API/cache 行为。 |
+| `test_web_selfcheck_api.py::SelfcheckCacheTests/SelfcheckApiTests` | `test_result_is_cached_until_forced`, `test_status_carries_the_summary_after_a_run`, `test_api_selfcheck_wraps_the_result` | rewritten (R02C5) | `FakeSelfcheckRunner` 注入公开 `web_ui.selfcheck.run_checks`；保留 cache identity、force rerun、status summary 与 API wrapper。 |
 
 ### R02C4 opt-in 迁移记录
 
@@ -173,15 +174,25 @@
 | `tests.test_hearthstone_liveness.NativeProcessTests.test_returns_bool_for_unknown_process` | 原位置保留 | 注入 fake 的 headless 行为未移动。 |
 | `tests.test_hearthstone_liveness.NativeProcessTests.test_unreadable_process_list_is_unknown` | 原位置保留 | 注入 fake 的 headless 行为未移动。 |
 
+### R02C5 rewrite 记录
+
+| 文件 / 方法 | before | after |
+|---|---|---|
+| `test_friendly_hand_target_battlecries.py::test_unreadable_card_data_falls_back_to_the_legacy_cards` | patch `_metadata_hand_target_card_ids` | 公共 `Path.open` 失败 + 重载清缓存 + legacy assertions |
+| `test_hand_or_board_targets.py::test_unreadable_card_data_falls_back_to_the_legacy_card` | patch `_metadata_hand_or_board_card_ids` | 公共 `Path.open` 失败 + legacy ambiguous-card assertions |
+| `test_web_selfcheck_api.py` 的 cache/status/API 3 方法 | patch `web_ui.selfcheck.run_checks` + `_log_selfcheck` | `FakeSelfcheckRunner` 注入公开 `selfcheck.run_checks` |
+| `test_window_tracker.py` 6 个异步测试 | `time.time()` + `time.sleep(0.01)` 轮询 | Condition/Event 同步；先 ready 再 fire |
+| `tools/run_headless_tests.py` opt-in | 逐模块 `unittest`，skip 仍成功 | `--opt-in` 将 required skip 转为 failure |
+
 ## 发现的主要垃圾测试类型
 
 1. **源码字符串测试 30 个方法 / 13 个文件**：`inspect.getsource` 28 个，直接读取 `log_overlay.py`/`hsctl.py` 2 个。它们复制实现文本，重构必误报。
 2. **危险行为验收 2 个方法**：`test_click_safety_checks` 曾明确断言无窗口/未命中仍点击；R02C1 已替换为 fail-closed。
 3. **重复表漂移 3 个方法**：`test_hsctl.TableDriftTests` 曾直接比较私有表；R02C1 已改为外部可观察 CLI 契约。
-4. **私有 patch 133 个方法 / 32 个文件**：多数是注入日志、时钟、进程/窗口等 seam，暂时可保留；其中 2 个 hand-target metadata patch 和 3 个 web selfcheck runner patch 明确需要 R02C rewrite。
+4. **私有 patch 133 个方法 / 32 个文件**：多数是注入日志、时钟、进程/窗口等 seam，暂时可保留；其中 2 个 hand-target metadata patch 和 3 个 web selfcheck runner patch 已在 R02C5 重写。
 5. **真实/外部运行依赖**：Node 1 个测试，真实进程枚举 2 个方法，MCP 子进程 2 个，环境/依赖 smoke 8 个；大多可保留在独立层，Node 与进程枚举不应进默认核心门。
-6. **本机路径与编码**：`test_surrender_frontend.py` 硬编码 `C:\Users\DonaldYip\...` 和 `D:\nodejs\node.exe`，且 `subprocess.run(text=True)` 使用 GBK，导致当前唯一失败。
-7. **实时轮询/线程同步**：`test_window_tracker.py` 6 个方法用 `time.time()` + `time.sleep(0.01)` 等后台 hook，最长 2s；应改为 Event/Condition 或注入同步 seam。
+6. **本机路径与编码**：`test_surrender_frontend.py` 曾硬编码用户目录与特定盘符的 Node 路径，且 `subprocess.run(text=True)` 使用 GBK，导致当时唯一失败；R02C4 已移除具体路径。
+7. **实时轮询/线程同步**：`test_window_tracker.py` 6 个方法曾用 `time.time()` + `time.sleep(0.01)` 等后台 hook，最长 2s；R02C5 已改为 Condition/Event 同步。
 8. **仓库内临时目录**：`test_hsctl.py`、`test_web_hot_control.py`、`test_web_screenshot_points.py` 使用 `.tmp-tests`，并行/中断时可能污染工作区；不是删测试理由，但 R02C 应改为独立临时目录或 fixture 清理。
 
 ## Discovery 原始结果
@@ -201,7 +212,7 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 ## 汇总
 
 - `keep`：1471 个方法（含可按文件分组保留的测试）。
-- `rewrite`：12 个方法（5 个私有 patch + 1 个 Node 前端测试 + 6 个 `test_window_tracker` 实时轮询/线程同步测试）及若干 candidate-delete 的替换实现。
+- `rewrite`：12 个方法（5 个私有 patch + 1 个 Node 前端测试 + 6 个 `test_window_tracker` 实时轮询/线程同步测试）；R02C4/R02C5 已完成对应 rewrite。
 - `move-native`：2 个方法（仅真实进程枚举）。
 - `candidate-delete`：35 个方法（源码串 30 + 危险验收 2 + 重复表漂移 3）。
 - 合计：1471 + 12 + 2 + 35 = 1520。

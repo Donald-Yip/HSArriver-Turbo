@@ -22,6 +22,16 @@ OPT_IN_MODULES = (
 )
 
 
+class RequiredOptInResult(unittest.TextTestResult):
+    """Opt-in test result where a skip is a gate failure, not success."""
+
+    def addSkip(self, test, reason):
+        error = (AssertionError,
+                 AssertionError(f"required opt-in test skipped: {reason}"),
+                 None)
+        super().addFailure(test, error)
+
+
 def default_test_modules(root: Path) -> list[str]:
     """Return only the top-level default test modules.
 
@@ -39,12 +49,19 @@ def build_headless_suite(root: Path) -> tuple[unittest.TestSuite, list[str]]:
     return loader.loadTestsFromNames(modules), modules
 
 
+def build_opt_in_suite(root: Path) -> tuple[unittest.TestSuite, list[str]]:
+    loader = unittest.TestLoader()
+    modules = list(OPT_IN_MODULES)
+    return loader.loadTestsFromNames(modules), modules
+
+
 def opt_in_manifest() -> dict[str, object]:
     return {
         "mode": "opt-in modules are not collected by the default runner",
         "excluded_modules": [],
         "excluded_tests": [],
         "opt_in_modules": list(OPT_IN_MODULES),
+        "opt_in_skips": "failure when running with --opt-in",
     }
 
 
@@ -65,11 +82,18 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the default/opt-in discovery manifest as JSON before running",
     )
+    parser.add_argument(
+        "--opt-in",
+        action="store_true",
+        help=(
+            "Run the explicit Node/native opt-in modules; any skipped required "
+            "test fails the gate"
+        ),
+    )
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
     sys.path.insert(0, str(root))
-    suite, _modules = build_headless_suite(root)
     manifest = opt_in_manifest()
     if args.list_opt_in:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
@@ -77,16 +101,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_opt_in:
         print(json.dumps(manifest, ensure_ascii=False, indent=2))
 
+    if args.opt_in:
+        suite, modules = build_opt_in_suite(root)
+        mode = "opt-in"
+    else:
+        suite, modules = build_headless_suite(root)
+        mode = "headless"
+
     count = suite.countTestCases()
     if count == 0:
         print("[headless-tests] ERROR: discovery selected zero tests", file=sys.stderr)
         return 2
-    print(f"[headless-tests] selected {count} tests; opt-in modules not collected: {len(OPT_IN_MODULES)}")
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if args.opt_in:
+        print(
+            f"[headless-tests] selected {count} opt-in tests from "
+            f"{len(modules)} modules; required skips fail"
+        )
+    else:
+        print(
+            f"[headless-tests] selected {count} tests; opt-in modules not "
+            f"collected: {len(OPT_IN_MODULES)}"
+        )
+    result_class = RequiredOptInResult if args.opt_in else unittest.TextTestResult
+    result = unittest.TextTestRunner(
+        verbosity=2, resultclass=result_class).run(suite)
     passed = result.testsRun - len(result.failures) - len(result.errors) - len(result.skipped)
     print(
-        f"[headless-tests] summary: run={result.testsRun} passed={passed} "
-        f"failures={len(result.failures)} errors={len(result.errors)} skipped={len(result.skipped)}"
+        f"[headless-tests] {mode} summary: run={result.testsRun} passed={passed} "
+        f"failures={len(result.failures)} errors={len(result.errors)} "
+        f"skipped={len(result.skipped)}"
     )
     return 0 if result.wasSuccessful() else 1
 

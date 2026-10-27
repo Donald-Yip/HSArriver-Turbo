@@ -2,21 +2,21 @@
 
 ## Current Phase
 
-R02C5 - private-patch rewrite and deterministic headless finalization
+R03 - immutable domain contracts and pure rules
 
 ## Current Task
 
-R02C5 (`planned`)
+R03 (`planned`)
 
 ## Completed
 
-- R00-R02C4 complete.
-- Default headless excludes native/Node by module location rather than runtime filtering.
-- Remaining work: rewrite five private-patch tests and finalize deterministic headless gates.
+- R00-R02C5 complete.
+- Headless suite deterministic: 1524 run, 1523 passed, 1 explicit skip.
+- Opt-in Node/native: 3/3.
+- Architecture/scope/CI gates established.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R02C4.
-2. Create feature/R02C5-headless-final.
-3. Rewrite private-patch metadata/selfcheck tests with injected seams.
-4. Verify required opt-in gates fail on skips.
+1. Fast-forward develop to R02C5.
+2. Create feature/R03-domain-contracts.
+3. Implement immutable GameSnapshot, EntityRef, CardDefinition, ActionIntent, ActionPlan and pure rule contracts.

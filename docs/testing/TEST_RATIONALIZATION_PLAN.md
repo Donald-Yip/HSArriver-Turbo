@@ -46,7 +46,7 @@
 
 - `tests/native/` 或显式环境变量门控；默认 discover 不收集。
 - 真实进程枚举仅 `NativeProcessTests.test_can_enumerate_processes`、`test_finds_this_python_process` 两个方法；真实 Windows GUI/窗口/鼠标、真实 Hearthstone/Paddle/OCR smoke 也放这里。
-- Node 前端测试改为独立 opt-in web integration；固定 `encoding="utf-8"`，移除 `C:\Users\...` 与 `D:\nodejs\...`。
+- Node 前端测试改为独立 opt-in web integration；固定 `encoding="utf-8"`，移除机器专用路径，改由 `HSL_NODE=<path-to-node>` 或自动发现定位。
 
 ## 推荐默认命令
 
@@ -159,6 +159,14 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 - 把 `test_window_tracker.py` 的 6 个实时轮询测试改为 Event/Condition/注入同步器。
 - 这些是 rewrite，不是 candidate-delete；完成前不删除对应文件。
 
+#### R02C5 实现记录
+
+- 两个 hand-target 回退测试改为让公共 `Path.open` 读取 seam 失败，并在失败窗口内重载模块以清空 metadata cache；不再 patch `_metadata_*` 私有 helper。
+- `test_web_selfcheck_api` 的 cache/API/status 测试改用 `FakeSelfcheckRunner`，只替换公开模块对象 `web_ui.selfcheck.run_checks`；不再 patch `_log_selfcheck` 私有 helper。
+- `test_window_tracker` 的异步启动、事件、停止、rehook、等待成功/失败全部用 `Condition`/`Event` 同步；事件测试先等 `wait_ready()` 再 fire，测试文件不再用 `time.sleep` 或自建轮询循环。
+- `tools/run_headless_tests.py --opt-in` 显式运行 Node/native 模块，且任何 required skip 都转为 failure；默认 headless 仍只收集顶层 `tests/test_*.py`。
+- 原始命令、pass/fail/skip 计数和行为覆盖见 `docs/agent/reports/R02C5-implementer.md`。
+
 ## Headless 门禁与验收
 
 1. 默认 suite 0 failures、0 errors，不能靠 skip 掩盖环境缺失。
@@ -167,11 +175,12 @@ uv run python -m unittest discover -s tests/e2e_fake -t .
 4. 每个 candidate-delete 的替代测试在删除前必须单独通过；记录命令、exit code、pass/fail/skip。
 5. 删除后运行全量 class/模块组合回归，再运行默认门；检查 collection 数变化只能来自已批准删除。
 6. 任何替代测试无法稳定 headless 化时，保留原行为测试并降级为 opt-in，不强行删除。
+7. 显式 opt-in 门使用 `tools/run_headless_tests.py --opt-in`；Node/native 的 required skip 视为 failure。
 
 ## 风险
 
 - 浮窗源码串测试虽然反模式，但其中文案/布局是用户可见行为；替代测试不能只做快照，要断言触发条件和回调。
 - `TableDriftTests` 已由 R02C1 的可见 CLI 契约覆盖全部延时字段/生效提示与 screenshot kind；review 需确认没有退回私有表比较。
 - 只移动 2 个真实进程枚举后，默认 CI 仍保留 2 个 fake unknown 分支；真实 ctypes 分支需要 opt-in Windows job 或 release smoke。
-- Node 前端测试目前是全量唯一失败；修复编码不等于降低契约，必须保留嵌套配置往返断言。
+- Node 前端测试曾是全量唯一失败；R02C4 已修复 UTF-8 解码并迁入 opt-in，嵌套配置往返断言保持不变。
 - 删除批次必须与 R02A 台账一一对应；若出现未登记删除，立即停止并回滚该批次。

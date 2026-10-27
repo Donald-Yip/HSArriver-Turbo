@@ -59,12 +59,18 @@ R02C4 moved the external cases to `tests/native/`. That directory has no
 modules, so Node and native files are not imported by the default runner rather
 than being collected and filtered afterward.
 
-Run opt-in smoke tests explicitly when the environment supports them:
+Run the explicit Node/native gate when the environment supports it:
 
 ```powershell
-uv run python -m unittest tests.native.test_process_enumeration -v
-uv run python -m unittest tests.native.test_surrender_frontend -v
+uv run python tools/run_headless_tests.py --opt-in
 ```
+
+That gate loads only `tests/native/test_process_enumeration.py` and
+`tests/native/test_surrender_frontend.py`. A required skip is reported as a failure,
+so a missing Node executable or unsupported native process API cannot pass silently.
+`tests/test_ci_gates.py` keeps that skip-to-failure contract in the default headless
+suite. The individual `python -m unittest tests.native...` commands remain useful for
+diagnosis, but they retain unittest's normal skip semantics and are not the gate.
 
 Set `HSL_NODE` to an explicit Node executable if it is not on `PATH`. The Node
 test otherwise auto-discovers `node` from `PATH` or environment-derived standard
