@@ -297,7 +297,7 @@
       "task_book": "docs/tasks/R09-mulligan.md",
       "implementer_report": "docs/agent/reports/R09-implementer.md",
       "review_report": "docs/agent/reviews/R09-review.md",
-      "base_sha": "HEAD",
+      "base_sha": "9c7746d",
       "head_sha": null,
       "blockers": [],
       "last_verified_command": null
