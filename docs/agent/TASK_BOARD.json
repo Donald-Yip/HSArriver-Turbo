@@ -321,8 +321,8 @@
     },
     {
       "id": "R11",
-      "status": "planned",
-      "owner": null,
+      "status": "in_progress",
+      "owner": "implementer",
       "review_round": 0,
       "branch": "feature/R11-settlement-stop",
       "depends_on": [
@@ -331,7 +331,7 @@
       "task_book": "docs/tasks/R11-settlement-stop.md",
       "implementer_report": "docs/agent/reports/R11-implementer.md",
       "review_report": "docs/agent/reviews/R11-review.md",
-      "base_sha": null,
+      "base_sha": "5ae2ae1",
       "head_sha": null,
       "blockers": [],
       "last_verified_command": null
