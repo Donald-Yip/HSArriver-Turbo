@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R08: enter-battle vertical slice approved and ready to commit.
+R02E: execute approved test cleanup in independent batches; stage 1 covers B1/B2/B5.
 
 ## Branch And Environment
 
@@ -50,7 +50,9 @@ R08: enter-battle vertical slice approved and ready to commit.
 | R06 | done | Data adapters | R05 |
 | R07 | done | External-system adapters | R06 |
 | R08 | done | Enter-battle vertical slice | R07 |
-| R09 | planned | Mulligan vertical slice | R08 |
+| R02D | done | Test portfolio audit and cleanup ledger | R08 |
+| R02E | in_progress | Test portfolio cleanup execution | R02D |
+| R09 | planned | Mulligan vertical slice | R02E |
 | R10 | planned | Turn loop and reconciliation | R09 |
 | R11 | planned | Settlement and stop | R10 |
 | R12 | planned | CLI and fake one-game E2E | R11 |
@@ -122,4 +124,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Commit R08 as one verified increment, fast-forward `develop`, then create R02D to redesign the test suite around behavior and layer boundaries before R09.
+R02E stage 1 executes only B1/B2/B5 with exact count deltas, replacement evidence, and independent review. B3/B4/B6-B9 remain deferred.

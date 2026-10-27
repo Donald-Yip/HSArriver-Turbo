@@ -292,7 +292,7 @@
       "review_round": 0,
       "branch": "feature/R09-mulligan",
       "depends_on": [
-        "R08"
+        "R02E"
       ],
       "task_book": "docs/tasks/R09-mulligan.md",
       "implementer_report": "docs/agent/reports/R09-implementer.md",

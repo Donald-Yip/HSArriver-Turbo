@@ -19,7 +19,9 @@ Updated: 2026-10-27
 | R06 | done | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |
 | R07 | done | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input; fix round 1 ready |
 | R08 | done | feature/R08-enter-battle | R07 | Enter-battle slice approved |
-| R09 | planned | feature/R09-mulligan | R08 | Mulligan slice |
+| R02D | done | feature/R02D-test-portfolio | R08 | Test portfolio audit committed |
+| R02E | in_progress | feature/R02E-test-cleanup | R02D | Stage 1: B1/B2/B5 cleanup |
+| R09 | planned | feature/R09-mulligan | R02E | Mulligan slice |
 | R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |
 | R11 | planned | feature/R11-settlement-stop | R10 | Settlement and stop |
 | R12 | planned | feature/R12-one-game-cli | R11 | CLI and fake full game |
