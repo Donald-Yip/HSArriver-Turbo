@@ -2,30 +2,18 @@
 
 ## Current Phase
 
-R02E stage 2B independent review.
+R02E final cleanup: B4 then B3.
 
-## Current Task
+## Approved
 
-R02E (`ready_for_review`)
-
-## Implemented
-
-- B9 `cf83d1f`: explicit `tests/opt_in`/`tests/native_live` gate directories, import-free manifests, O12 exact exit code.
-- B8 `a19745e`: environment checks moved to CI opt-in; static manifest parity retained.
-- B7 `a3eca78`: live-window, MCP, and Windows checks moved to their correct explicit gates.
-
-## Verified
-
-- default: 1,511 tests, all pass.
-- discover: 1,673 tests, all pass.
-- CI opt-in: 16/16 pass.
-- native-live: 1 test; missing window is a failure.
-- B9/B8/B7 each reverse-apply cleanly from final HEAD.
-- Default manifest test is import-free and launches no subprocess.
+- Stage 1 B1/B2/B5.
+- Stage 2A B6.
+- Stage 2B B9/B8/B7.
+- Current verified boundaries: default 1,511; discover 1,673; CI opt-in 16; native-live 1.
 
 ## Exact Next Action
 
-1. Independent reviewer validates Stage 2B.
-2. Fix findings.
-3. Record approval.
-4. Continue to B4/B3.
+1. Implement B4 public overlay lifecycle scenario and remove five private-patch tests.
+2. Implement B3 Node DOM behavior module and remove twelve implementation-string tests.
+3. Run final full gates and independent review.
+4. Close R02E only when default reaches 1,495 and CI opt-in reaches 19.

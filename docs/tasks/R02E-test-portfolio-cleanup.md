@@ -17,17 +17,15 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 
 ## Current Increment
 
-Stage 1 (`B1/B2/B5`) and stage 2A (`B6`) are independently approved.
+Stages 1, 2A, and 2B are independently approved.
 
-Stage 2B (`B9/B8/B7`) is implemented and awaits independent review:
+Stage 3 executes the remaining high-risk cleanup:
 
-- B9: move O12 repository hygiene to an explicit opt-in tooling gate.
-- B8: move O04-O11/O14 environment checks to opt-in tooling; retain one static manifest check in default.
-- B7: move O02/O03/O13 to CI opt-in and O01 to a separate native-live gate; no source-structure MCP substitute.
-- Required CI opt-in must fail on missing prerequisites; the live-window gate is explicit and never runs in ordinary CI.
-- Stage target: default `1,511`, discover `1,673`, CI opt-in `16`, native-live `1`.
+- B4: replace five private `_run`/`gc` patch tests with one public `start()` lifecycle scenario using fake Tk and an executing thread double.
+- B3: replace twelve implementation-string tests with three Node DOM behavior methods under `tests/opt_in`.
+- Final target: default `1,495`, discover `1,657`, CI opt-in `19`, native-live `1`.
 
-B3/B4 remain deferred until stage 2B is approved.
+Each batch remains independently revertible.
 
 ## Non-Goals
 
@@ -68,7 +66,12 @@ B3/B4 remain deferred until stage 2B is approved.
 - `tests/test_web_logs_wiring.py`
 - `tests/test_web_prepare_flow.py`
 - `tests/test_web_screenshot_points.py`
+- `tests/test_version.py`
+- `tests/test_human_like_minion_hover.py`
+- `tests/test_selfcheck_collapse.py`
+- `tests/test_overlay_tk_lifecycle.py`
 - `tests/frontend_surrender_roundtrip.js`
+- `tests/web_ui_behaviors.js`
 - `tests/test_env_provision.py`
 - `tests/test_ci_gates.py`
 - `tests/test_uv_environment.py`
