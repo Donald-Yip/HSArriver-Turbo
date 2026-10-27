@@ -207,6 +207,49 @@ records `cancelled`; any exception, postcondition failure, timeout, or
 cancellation after dispatch records `executed_unconfirmed` with the original
 reason code, so immediate replay remains blocked.
 
+## External Adapter Contracts
+
+R07 adapters are injection-only seams around legacy perception and input. New
+architecture modules do not import root legacy modules; bootstrap or tests pass
+callables into these constructors.
+
+### HsangRecommendationAdapter
+
+- Constructor: `capture()`, `read(frame)`, `parse(ocr, turn_number, log_revision)`.
+- `recommend(snapshot, mode)` returns a `RecommendationObservation`.
+- Parsed instruction, confidence, evidence ID, turn, and revision are validated.
+- Capture/read/parse failures raise typed `HsangAdapterError` subclasses.
+
+### PowerLogGameStateAdapter
+
+- Constructor: `snapshot_provider() -> GameSnapshot | GameObservation` and
+  `revision_provider() -> int`.
+- `current()` returns `GameObservation`; injected confidence is used only for a
+  raw `GameSnapshot`.
+- `wait_for_revision_change(after_revision, timeout_seconds)` polls the revision
+  provider, returns a later observation, or returns `None` on timeout or
+  cancellation. Cancellation is optional through an injected `stop_token` with
+  `is_cancelled()`.
+- Provider failures and invalid revisions raise typed `PowerLogAdapterError`
+  subclasses.
+
+### LegacyLobbyStateAdapter
+
+- Constructor: `recognizer()`, optional monotonic `clock()`.
+- Recognizer output may be a normalized phase string, `LobbyPhase`, `LobbyState`,
+  or a mapping/object with `phase`/`state` plus optional confidence/evidence.
+- Unknown aliases fail closed to `LobbyPhase.UNKNOWN` with default confidence
+  `0.0`; invalid numeric fields raise `LobbyStateAdapterError`.
+
+### LegacyActionDispatch
+
+- Constructor: semantic-name mapping to `handler(step, snapshot)` callables plus
+  an optional deterministic dispatch ID factory.
+- A handler may return `DispatchResult`, a mapping with dispatch fields, or
+  `None` (legacy success). Handler exceptions become failed dispatch results.
+- Unknown action names return `DispatchResult.rejected("unknown_action")` before
+  a handler is invoked. No adapter path clicks directly or stores coordinates.
+
 ## Compatibility
 
 Legacy public HTTP/CLI/MCP/config/log behavior remains unchanged until the explicit cutover task. New internal contracts may evolve only through the interface document and contract tests.

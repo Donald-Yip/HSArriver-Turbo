@@ -253,9 +253,9 @@
     },
     {
       "id": "R07",
-      "status": "planned",
-      "owner": null,
-      "review_round": 0,
+      "status": "done",
+      "owner": "implementer",
+      "review_round": 2,
       "branch": "feature/R07-external-adapters",
       "depends_on": [
         "R06"
@@ -263,10 +263,10 @@
       "task_book": "docs/tasks/R07-external-adapters.md",
       "implementer_report": "docs/agent/reports/R07-implementer.md",
       "review_report": "docs/agent/reviews/R07-review.md",
-      "base_sha": null,
+      "base_sha": "25a0ce1",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R07 committed; adapters 50; headless 1525"
     },
     {
       "id": "R08",

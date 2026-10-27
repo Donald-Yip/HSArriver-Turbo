@@ -17,7 +17,7 @@ Updated: 2026-10-27
 | R04 | done | feature/R04-application-ports | R03 | Ports, runtime controls, fakes |
 | R05 | done | feature/R05-plan-execution | R04 | Plan and execution pipeline fix round 2 complete |
 | R06 | done | feature/R06-data-adapters | R05 | Config, cards, journal, artifacts |
-| R07 | planned | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input |
+| R07 | done | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input; fix round 1 ready |
 | R08 | planned | feature/R08-enter-battle | R07 | Enter battle slice |
 | R09 | planned | feature/R09-mulligan | R08 | Mulligan slice |
 | R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |

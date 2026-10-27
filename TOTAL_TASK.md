@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R05: plan execution pipeline fix round 2 complete; ready for re-review.
+R07: external-system adapters fix round 1 complete; ready for re-review.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R05-plan-execution`, based on `develop` at `637639e`
+- Current feature branch: `feature/R07-external-adapters`, based on `develop` at `25a0ce1`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -48,7 +48,7 @@ R05: plan execution pipeline fix round 2 complete; ready for re-review.
 | R04 | done | Application ports and runtime controls | R03 |
 | R05 | done | Plan and execution pipeline | R04 |
 | R06 | done | Data adapters | R05 |
-| R07 | planned | External-system adapters | R06 |
+| R07 | done | External-system adapters | R06 |
 | R08 | planned | Enter-battle vertical slice | R07 |
 | R09 | planned | Mulligan vertical slice | R08 |
 | R10 | planned | Turn loop and reconciliation | R09 |
@@ -122,4 +122,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Fresh R05 reviewer verifies fix round 2 and the complete staged file set; Controller commits only after domain, application, plugins, headless, compile, architecture, and scope gates are confirmed.
+Fresh R07 reviewer verifies fix round 1 and the complete staged file set; Controller commits only after adapters, domain, application, plugins, headless, compile, architecture, and scope gates are confirmed.

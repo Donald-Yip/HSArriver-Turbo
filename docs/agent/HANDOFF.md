@@ -2,19 +2,20 @@
 
 ## Current Phase
 
-R07 - external-system adapters
+R08 - enter-battle use case and bootstrap
 
 ## Current Task
 
-R07 (`planned`)
+R08 (`planned`)
 
 ## Completed
 
-- R00-R06 complete.
-- Domain, application, plugins/executor, and data adapters are committed and reviewed.
+- R00-R07 complete.
+- Core layers and injected external adapters are committed and reviewed.
 
 ## Exact Next Action
 
-1. Fast-forward develop to R06.
-2. Create feature/R07-external-adapters.
-3. Wrap HSAng capture/OCR/parser, Power.log state, lobby recognition, and semantic click dispatch.
+1. Fast-forward develop to R07.
+2. Create feature/R08-enter-battle.
+3. Implement composition root and EnterBattleUseCase using lobby and action ports.
+4. Add fake end-to-end main-menu -> deck-select verification without real desktop.
