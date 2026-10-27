@@ -62,8 +62,8 @@ All application DTOs are frozen slots dataclasses, normalize collections to tupl
 - `DispatchResult`: `sent`, `rejected`, or `failed`; this is not the overall business result.
 - `ExecutionRecord`: correlation/session/game/intent/plan/action IDs, before/after snapshot IDs, execution status, step results, error code, elapsed time, evidence IDs, journal metadata (ID, durable, duplicate, journal evidence), and `release_error`.
 - `JournalAppendResult`: durable journal record ID, durability flag, duplicate flag, and evidence IDs.
-- `OneGameCommand`: command ID, deck ID, mode, and an optional maximum turn count that must be an exact positive `int` when provided.
-- `OneGameResult`: command/session IDs, terminal run status, reason code, game ID, journal record ID, and evidence IDs.
+- `OneGameCommand`: command ID, deck index, total deadline, child-operation budgets, maximum turn slices, actions per turn, and poll interval.
+- `OneGameResult`: command/session IDs, terminal status/reason, last lobby phase, turn/action counts, ordered unique evidence, and the exact child results.
 
 ## Application Ports
 

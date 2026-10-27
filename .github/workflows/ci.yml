@@ -46,6 +46,18 @@ jobs:
           uv python install 3.12
           uv sync --locked --all-groups
 
+      - name: Import package
+        shell: pwsh
+        run: uv run python -c "import hslegend; print(hslegend.__file__)"
+
+      - name: One-game CLI help
+        shell: pwsh
+        run: uv run hslegend-onegame --help
+
+      - name: One-game fake CLI smoke
+        shell: pwsh
+        run: uv run hslegend-onegame --fake --json
+
       - name: Compile Python
         shell: pwsh
         run: uv run python -m compileall -q src tests tools

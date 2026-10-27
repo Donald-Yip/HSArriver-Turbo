@@ -10,9 +10,6 @@ from .dto import (
     JournalAppendResult,
     LobbyPhase,
     LobbyState,
-    OneGameCommand,
-    OneGameResult,
-    OneGameStatus,
     RecommendationMode,
     RecommendationObservation,
 )
@@ -45,6 +42,12 @@ from .use_cases.finish_battle import (
     FinishBattleResult,
     FinishBattleStatus,
     FinishBattleUseCase,
+)
+from .use_cases.one_game import (
+    OneGameCommand,
+    OneGameResult,
+    OneGameStatus,
+    OneGameUseCase,
 )
 from .use_cases.turn import (
     PlayTurnCommand,
@@ -82,6 +85,7 @@ __all__ = [
     "OneGameCommand",
     "OneGameResult",
     "OneGameStatus",
+    "OneGameUseCase",
     "OperationCancelled",
     "RecommendationMode",
     "RecommendationObservation",

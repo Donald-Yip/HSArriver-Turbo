@@ -48,14 +48,6 @@ class ExecutionStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class OneGameStatus(str, Enum):
-    """Terminal status of a one-game command."""
-
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
 def _confidence(value: float, field_name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{field_name} must be a number")
@@ -289,9 +281,6 @@ __all__ = [
     "JournalAppendResult",
     "LobbyPhase",
     "LobbyState",
-    "OneGameCommand",
-    "OneGameResult",
-    "OneGameStatus",
     "RecommendationMode",
     "RecommendationObservation",
 ]

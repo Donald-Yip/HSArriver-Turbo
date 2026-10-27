@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "hslegend-arriver"
 version = "2026.10.24"
@@ -19,10 +23,19 @@ dependencies = [
     "setuptools==84.0.0",
 ]
 
+[project.scripts]
+hslegend-onegame = "hslegend.entrypoints.onegame:main"
+
 [tool.uv]
-package = false
+package = true
 # Keep PaddleOCR's transitive OpenCV variants aligned with the direct headless pin.
 constraint-dependencies = [
     "opencv-python==4.10.0.84",
     "opencv-contrib-python==4.10.0.84",
 ]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

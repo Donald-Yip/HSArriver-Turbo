@@ -140,6 +140,7 @@ uv run hslegend-onegame --fake --deck-index 0 --max-turns 20 --timeout-seconds 9
 
 ## Allowed Files
 
+- `.gitignore`
 - `pyproject.toml`
 - `uv.lock`
 - `.github/workflows/ci.yml`
@@ -165,8 +166,7 @@ uv run hslegend-onegame --fake --deck-index 0 --max-turns 20 --timeout-seconds 9
 ## Forbidden Files
 
 - All legacy/root production modules except documentation explicitly listed.
-- Existing adapter implementations under `src/hslegend/adapters/**` other than
-  the new `demo/**` package.
+- Existing adapter implementations outside the new demo package.
 - OCR, Win32, coordinates, configs, logs, screenshots, and native-live tests.
 - Existing R08-R11 application use-case implementations.
 - Existing non-R12 tests outside the explicit list.

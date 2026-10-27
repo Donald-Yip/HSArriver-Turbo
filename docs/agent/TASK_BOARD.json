@@ -338,9 +338,9 @@
     },
     {
       "id": "R12",
-      "status": "in_progress",
+      "status": "done",
       "owner": "controller",
-      "review_round": 0,
+      "review_round": 2,
       "branch": "feature/R12-one-game-cli",
       "depends_on": [
         "R11"
@@ -351,7 +351,7 @@
       "base_sha": "2426366",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R12 approved: focused 23; default 1500; discover 1745; opt-in 19; import/CLI/architecture/scope/compile pass"
     },
     {
       "id": "R13",

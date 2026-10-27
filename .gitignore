@@ -22,6 +22,9 @@ build/
 
 .reasonix/
 demo/
+!src/hslegend/adapters/demo/
+!src/hslegend/adapters/demo/**
+src/*.egg-info/
 image.png
 
 # cards.json 是核心数据文件，需要随仓库发布

@@ -29,6 +29,12 @@ APPLICATION_FORBIDDEN = (
 )
 ADAPTER_FORBIDDEN = (
     "hslegend.use_cases",
+    "hslegend.application.use_cases",
+    "hslegend.bootstrap",
+    "hslegend.entrypoints",
+)
+ENTRYPOINT_ALLOWED = (
+    "hslegend.application",
     "hslegend.bootstrap",
     "hslegend.entrypoints",
 )
@@ -182,6 +188,17 @@ def plugin_io_violation(target: str) -> str | None:
     return None
 
 
+def entrypoint_violation(target: str) -> str | None:
+    if target == "hslegend" or target.startswith("hslegend."):
+        if any(is_module_or_prefix(target, prefix) for prefix in ENTRYPOINT_ALLOWED):
+            return None
+        return "entrypoint_imports_outside_allowlist"
+    root_name = target.split(".", 1)[0]
+    if root_name in STANDARD_LIBRARY:
+        return None
+    return "entrypoint_imports_non_stdlib"
+
+
 def module_bound_names(tree: ast.AST) -> set[str]:
     """Return names bound by module-level statements.
 
@@ -241,6 +258,10 @@ def violation_for_target(
     elif layer == "adapters":
         if any(is_module_or_prefix(target, prefix) for prefix in ADAPTER_FORBIDDEN):
             return "adapter_imports_inner_or_composition", "Adapters cannot import use_cases/bootstrap/entrypoints"
+    elif layer == "entrypoints":
+        kind = entrypoint_violation(target)
+        if kind:
+            return kind, "Entrypoints may import only stdlib, application, bootstrap, and sibling entrypoints"
     elif layer == "plugins":
         if any(is_module_or_prefix(target, prefix) for prefix in PLUGIN_FORBIDDEN):
             return "plugin_imports_forbidden_backend", "Plugins cannot import adapters/runtime/IO/input backends"
@@ -443,11 +464,23 @@ def run_self_test() -> dict[str, object]:
                 "src/hslegend/application/bad.py": "from hslegend.adapters.io import x\n",
             },
             "adapter imports use_cases": {
-                "src/hslegend/adapters/bad.py": "from hslegend.use_cases.foo import x\n",
-                "src/hslegend/use_cases/__init__.py": "",
+                "src/hslegend/adapters/bad.py": "from hslegend.application.use_cases.foo import x\n",
+                "src/hslegend/application/use_cases/__init__.py": "",
             },
             "plugin imports input backend": {
                 "src/hslegend/plugins/bad.py": "from hslegend.adapters.input_backend import x\n",
+            },
+            "entrypoint imports adapter": {
+                "src/hslegend/entrypoints/bad.py": "from hslegend.adapters.io import x\n",
+            },
+            "entrypoint imports plugin": {
+                "src/hslegend/entrypoints/bad.py": "from hslegend.plugins.plan import x\n",
+            },
+            "entrypoint imports domain": {
+                "src/hslegend/entrypoints/bad.py": "from hslegend.domain import GameSnapshot\n",
+            },
+            "entrypoint imports third party": {
+                "src/hslegend/entrypoints/bad.py": "import requests\n",
             },
             "all layers import legacy root": {
                 "src/hslegend/domain/bad.py": "import click\n",
@@ -488,6 +521,10 @@ def run_self_test() -> dict[str, object]:
             "application imports adapter": "application_imports_outer_layer",
             "adapter imports use_cases": "adapter_imports_inner_or_composition",
             "plugin imports input backend": "plugin_imports_forbidden_backend",
+            "entrypoint imports adapter": "entrypoint_imports_outside_allowlist",
+            "entrypoint imports plugin": "entrypoint_imports_outside_allowlist",
+            "entrypoint imports domain": "entrypoint_imports_outside_allowlist",
+            "entrypoint imports third party": "entrypoint_imports_non_stdlib",
             "all layers import legacy root": "imports_legacy_root_module",
             "application imports plugins": "application_imports_outer_layer",
             "plugin builtin IO calls": "plugin_io_call",

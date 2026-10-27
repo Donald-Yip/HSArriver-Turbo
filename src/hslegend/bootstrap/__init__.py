@@ -62,3 +62,11 @@ __all__ = [
     "build_turn_use_case",
     "parse_turn_intent",
 ]
+
+from .fake import FakeOneGameHarness, build_fake_one_game
+
+__all__ = [
+    *__all__,
+    "FakeOneGameHarness",
+    "build_fake_one_game",
+]

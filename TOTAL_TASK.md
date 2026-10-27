@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R12 is in progress: add the real application-level one-game orchestrator, make `src/hslegend` installable, wire deterministic demo adapters, and expose `hslegend-onegame --fake` with a full-game headless acceptance test.
+R12 is complete and independently approved. R13 now wires the existing R06/R07 adapters into a native one-game composition, validates the real Windows path, and decides the main cutover.
 
 ## Branch And Environment
 
@@ -55,7 +55,7 @@ R12 is in progress: add the real application-level one-game orchestrator, make `
 | R09 | done | Mulligan vertical slice | R02E |
 | R10 | done | Turn loop and reconciliation | R09 |
 | R11 | done | Settlement and one-game stop | R10 |
-| R12 | in_progress | CLI and fake one-game E2E | R11 |
+| R12 | done | CLI and fake one-game E2E | R11 |
 | R13 | planned | Native one-game and main cutover | R12 |
 | R14 | planned | Static plugin registry expansion | R05 |
 | R15 | planned | Control-plane security | R13 |
@@ -124,4 +124,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Execute R12 from `docs/tasks/R12-one-game-cli.md`: establish installable `src` packaging first, then implement `OneGameUseCase`, deterministic demo adapters, the CLI, architecture/CI gates, and a fake full-game E2E. The current `tool.uv.package = false` is a blocking root issue for the CLI.
+Fast-forward `develop` to R12 and execute R13: build the native adapter composition exclusively in bootstrap, add contract/native-smoke gates, preserve fail-closed recommendation handling, and cut over to `main` only after controlled one-game acceptance.

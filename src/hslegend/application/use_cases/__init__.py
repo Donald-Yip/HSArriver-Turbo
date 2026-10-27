@@ -69,3 +69,18 @@ __all__ = [
     "TurnIntentParser",
     "parse_turn_intent",
 ]
+
+from .one_game import (
+    OneGameCommand,
+    OneGameResult,
+    OneGameStatus,
+    OneGameUseCase,
+)
+
+__all__ = [
+    *__all__,
+    "OneGameCommand",
+    "OneGameResult",
+    "OneGameStatus",
+    "OneGameUseCase",
+]

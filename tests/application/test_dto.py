@@ -14,9 +14,6 @@ from hslegend.application import (
     JournalAppendResult,
     LobbyPhase,
     LobbyState,
-    OneGameCommand,
-    OneGameResult,
-    OneGameStatus,
     RecommendationMode,
     RecommendationObservation,
 )
@@ -30,8 +27,6 @@ DTO_TYPES = (
     GameObservation,
     JournalAppendResult,
     LobbyState,
-    OneGameCommand,
-    OneGameResult,
     RecommendationObservation,
 )
 
@@ -75,8 +70,7 @@ class DtoContractTests(unittest.TestCase):
                 self.assertEqual(value.to_primitive(), json.loads(encoded))
                 self.assertEqual(encoded, value.to_json())
 
-    def test_commands_results_and_execution_records_round_trip(self) -> None:
-        command = OneGameCommand("command-1", "deck-1", max_turns=20)
+    def test_execution_records_and_dispatch_round_trip(self) -> None:
         record = ExecutionRecord(
             record_id="record-1",
             correlation_id="correlation-1",
@@ -92,22 +86,13 @@ class DtoContractTests(unittest.TestCase):
             elapsed_seconds=0.25,
             evidence_ids=("evidence-1",),
         )
-        result = OneGameResult(
-            command_id=command.command_id,
-            session_id="session-1",
-            status=OneGameStatus.COMPLETED,
-            game_id="game-1",
-            journal_record_id="journal-1",
-            evidence_ids=("evidence-1",),
-        )
         dispatch = DispatchResult.sent("dispatch-1", "evidence-1")
 
-        self.assertEqual("traditional", command.mode)
         self.assertEqual(DispatchStatus.SENT, dispatch.status)
-        self.assertEqual((("step-1:confirmed",)), record.step_results)
+        self.assertEqual(("step-1:confirmed",), record.step_results)
         self.assertEqual("executed_confirmed", record.to_primitive()["status"])
-        self.assertEqual("completed", result.to_primitive()["status"])
-        self.assertEqual(json.loads(result.to_json()), result.to_primitive())
+        self.assertEqual(json.loads(dispatch.to_json()), dispatch.to_primitive())
+        self.assertEqual(json.loads(record.to_json()), record.to_primitive())
 
     def test_config_snapshot_freezes_nested_values(self) -> None:
         source = {"nested": [1, {"items": ["a"]}], "enabled": True}
@@ -130,15 +115,6 @@ class DtoContractTests(unittest.TestCase):
             with self.subTest(values=repr(values)):
                 with self.assertRaisesRegex(ValueError, "finite"):
                     ConfigSnapshot(values)  # type: ignore[arg-type]
-
-    def test_max_turns_requires_an_exact_positive_int(self) -> None:
-        for invalid in (True, False, 1.5, 2.0):
-            with self.subTest(max_turns=invalid):
-                with self.assertRaises(TypeError):
-                    OneGameCommand("command", "deck", max_turns=invalid)  # type: ignore[arg-type]
-        with self.assertRaises(ValueError):
-            OneGameCommand("command", "deck", max_turns=0)
-        self.assertEqual(3, OneGameCommand("command", "deck", max_turns=3).max_turns)
 
 if __name__ == "__main__":
     unittest.main()
