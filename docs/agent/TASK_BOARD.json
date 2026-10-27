@@ -332,14 +332,14 @@
       "implementer_report": "docs/agent/reports/R11-implementer.md",
       "review_report": "docs/agent/reviews/R11-review.md",
       "base_sha": "5ae2ae1",
-      "head_sha": null,
+      "head_sha": "2426366",
       "blockers": [],
       "last_verified_command": "R11 approved: focused 19; default 1495; discover 1723; opt-in 19; architecture/scope/compile pass"
     },
     {
       "id": "R12",
-      "status": "planned",
-      "owner": null,
+      "status": "in_progress",
+      "owner": "controller",
       "review_round": 0,
       "branch": "feature/R12-one-game-cli",
       "depends_on": [
@@ -348,7 +348,7 @@
       "task_book": "docs/tasks/R12-one-game-cli.md",
       "implementer_report": "docs/agent/reports/R12-implementer.md",
       "review_report": "docs/agent/reviews/R12-review.md",
-      "base_sha": null,
+      "base_sha": "2426366",
       "head_sha": null,
       "blockers": [],
       "last_verified_command": null

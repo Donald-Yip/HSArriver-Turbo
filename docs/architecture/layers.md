@@ -47,3 +47,32 @@ CLI -> bootstrap -> RunOneGame
 - New code must not import their internals.
 - Adapters may wrap stable legacy functions.
 - Old code is retired only after the new entrypoint passes headless and native one-game acceptance.
+
+## Dependency Rules
+
+```text
+domain      -> standard library + domain
+application -> domain + application ports
+adapters    -> domain + application ports + external systems
+plugins     -> domain + plugin contract
+bootstrap   -> application + adapters + plugins
+entrypoints -> bootstrap + application + standard library
+```
+
+Entrypoints translate CLI input into application commands and render typed
+results. They do not import adapters, plugins, or legacy/root modules. Bootstrap
+is the only layer that knows which concrete adapters implement the ports.
+
+## R12 Headless Delivery Slice
+
+```text
+uv run hslegend-onegame --fake
+  -> entrypoint
+  -> bootstrap fake composition
+  -> OneGameUseCase
+  -> EnterBattle -> Mulligan -> PlayTurn -> FinishBattle
+  -> typed JSON result and process exit code
+```
+
+The fake adapter path uses real application use cases and deterministic ports.
+Native adapter composition remains an explicit R13 cutover.

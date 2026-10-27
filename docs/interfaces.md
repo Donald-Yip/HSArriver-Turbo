@@ -312,6 +312,23 @@ sleeper completes or fails and immediately before terminal `completed` or
 sleeper is in flight takes precedence over that call's failure and returns
 `cancelled` with the last successfully observed phase and evidence.
 
+### OneGameUseCase
+
+`OneGameUseCase` is the application-level coordinator for exactly one game. It composes the injected `EnterBattleUseCase`, `MulliganUseCase`, `PlayTurnUseCase`, and `FinishBattleUseCase`; it does not reinterpret their internal plans or retry their unsafe outcomes. `OneGameCommand` carries the deck index, total deadline, child-operation budgets, maximum turn slices, actions per turn, and poll interval. The total monotonic deadline clamps every child call.
+
+The flow enters traditional battle once, waits for `LobbyPhase.IN_GAME`, runs mulligan at most once, delegates each detected local turn once, and invokes settlement at most once after game end or a directly observed result. `PlayTurnStatus.ENDED/local_turn_ended` waits for a later game-state revision; `PlayTurnStatus.ENDED/game_ended` moves to settlement. `PlayTurnStatus.COMPLETED` is fail-closed as `turn_action_budget_exhausted` rather than silently continuing an unfinished turn. Any cancelled child result makes the game result `cancelled`; any failed, rejected, unconfirmed, or gate-busy result makes it `failed`. No path retries an unsafe action or starts another game.
+
+`OneGameResult` preserves the command/session identity, terminal status and reason, last lobby phase, turn/action counts, ordered unique evidence, and the child `EnterBattleResult`, `MulliganResult`, turn results, and `FinishBattleResult`. The names `OneGameCommand`, `OneGameStatus`, and `OneGameResult` remain exported from `hslegend.application`, but their real definition lives with the one-game use case.
+
+R12 wires a deterministic demo adapter through the real R08-R11 use cases. The CLI contract is:
+
+```text
+uv run hslegend-onegame --help
+uv run hslegend-onegame --fake --json
+```
+
+`--fake` is required until R13 supplies native adapters. A completed game exits 0, other terminal results exit 1, and CLI usage errors exit 2. The entrypoint may import only the standard library, `hslegend.application`, and `hslegend.bootstrap`; adapter/plugin composition belongs in bootstrap.
+
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New
