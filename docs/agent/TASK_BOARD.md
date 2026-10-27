@@ -20,7 +20,7 @@ Updated: 2026-10-27
 | R07 | done | feature/R07-external-adapters | R06 | HsAng, Power.log, lobby, input; fix round 1 ready |
 | R08 | done | feature/R08-enter-battle | R07 | Enter-battle slice approved |
 | R02D | done | feature/R02D-test-portfolio | R08 | Test portfolio audit committed |
-| R02E | in_progress | feature/R02E-test-cleanup | R02D | Stage 1 approved; Stage 2A B6 in progress |
+| R02E | ready_for_review | feature/R02E-test-cleanup | R02D | Stage 1 approved; B6 implemented, review pending |
 | R09 | planned | feature/R09-mulligan | R02E | Mulligan slice |
 | R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |
 | R11 | planned | feature/R11-settlement-stop | R10 | Settlement and stop |

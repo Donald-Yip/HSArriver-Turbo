@@ -242,3 +242,11 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - R08 now uses a temporary runtime log and asserts preserved content, appended line, bounded size, and absence of a temp file.
 - R09 now asserts observable control state instead of `Thread.assert_not_called()`.
 - Method count and both suite counts remain unchanged.
+
+### B6 wall-clock timeout assertions
+
+- Status: implemented, pending independent review and commit.
+- R04/R05 now gate blocking callbacks with `threading.Event`.
+- Timeout is asserted by `TimeoutError`; after release they locate the actual deadline worker and join it.
+- Removed `time.sleep` upper-bound timing assertions.
+- Method counts remain default 1,523, discover 1,685, opt-in 3.

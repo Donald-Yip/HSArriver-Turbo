@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+import threading
 import unittest
 from types import SimpleNamespace
 
@@ -426,17 +426,33 @@ class LegacyLobbyStateAdapterTests(unittest.TestCase):
         self.assertEqual([0.25], budgets)
 
     def test_slow_recognizer_returns_within_deadline_budget(self) -> None:
+        release = threading.Event()
+        finished = threading.Event()
+
         def recognizer(*, timeout_seconds: float):
-            time.sleep(0.3)
+            release.wait()
+            finished.set()
             return "main_menu"
 
         adapter = LegacyLobbyStateAdapter(recognizer)
-        started_at = time.monotonic()
+        before = set(threading.enumerate())
+        workers = []
+        try:
+            with self.assertRaises(TimeoutError):
+                adapter.get_state(timeout_seconds=0.02)
+            workers = [
+                thread for thread in threading.enumerate()
+                if thread not in before
+                and thread.name == "hslegend-adapter-deadline"
+            ]
+            self.assertEqual(1, len(workers), "expected one live deadline worker")
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join()
 
-        with self.assertRaises(TimeoutError):
-            adapter.get_state(timeout_seconds=0.05)
-
-        self.assertLess(time.monotonic() - started_at, 0.15)
+        self.assertFalse(workers[0].is_alive())
+        self.assertTrue(finished.is_set())
 
 
 class LegacyActionDispatchTests(unittest.TestCase):
@@ -553,17 +569,33 @@ class LegacyActionDispatchTests(unittest.TestCase):
         self.assertEqual([0.25], budgets)
 
     def test_slow_handler_returns_within_deadline_budget(self) -> None:
+        release = threading.Event()
+        finished = threading.Event()
+
         def handler(step, current_snapshot, *, timeout_seconds: float):
-            time.sleep(0.3)
+            release.wait()
+            finished.set()
             return None
 
         adapter = LegacyActionDispatch({"play_card": handler})
-        started_at = time.monotonic()
+        before = set(threading.enumerate())
+        workers = []
+        try:
+            with self.assertRaises(TimeoutError):
+                adapter.dispatch(plan_step(), snapshot(), timeout_seconds=0.02)
+            workers = [
+                thread for thread in threading.enumerate()
+                if thread not in before
+                and thread.name == "hslegend-adapter-deadline"
+            ]
+            self.assertEqual(1, len(workers), "expected one live deadline worker")
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join()
 
-        with self.assertRaises(TimeoutError):
-            adapter.dispatch(plan_step(), snapshot(), timeout_seconds=0.05)
-
-        self.assertLess(time.monotonic() - started_at, 0.15)
+        self.assertFalse(workers[0].is_alive())
+        self.assertTrue(finished.is_set())
 
 
 class ExternalAdapterPortConformanceTests(unittest.TestCase):

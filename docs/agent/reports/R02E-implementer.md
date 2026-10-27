@@ -65,6 +65,20 @@ Verification:
 - Focused `LogTrimTests` plus `OverlayVerificationTests`: `Ran 9 tests`, `OK`.
 - Method count unchanged.
 
+## B6
+
+Changed:
+
+- R04/R05 now use Event-gated callbacks.
+- Verified timeout via `TimeoutError`, then released the callback and joined the actual deadline worker; no `Event.wait(timeout)` or elapsed-time assertion remains.
+- Removed `time.sleep(0.3)` and wall-clock `<0.15` assertions.
+
+Verification:
+
+- Focused adapter gate: `Ran 15 tests`, `OK`.
+- Three consecutive focused runs: `OK`.
+- Adapter tests are discoverable-only; default headless method count is unchanged.
+
 ## Known Risks
 
 - R06 now imports frame helpers from another test module. This is test-only coupling; a later helper move may reduce it.
