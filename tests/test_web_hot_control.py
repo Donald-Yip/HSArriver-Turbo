@@ -186,20 +186,6 @@ class HotChannelTests(unittest.TestCase):
         self.assertFalse(web_ui._hot_requested(None))
         self.assertFalse(web_ui._hot_requested({"hot": 0}))
 
-    def test_delay_effect_scope_table(self):
-        self.assertEqual(web_ui._delay_effect_scope("pre_action_delay_seconds"),
-                         "live")
-        self.assertEqual(web_ui._delay_effect_scope("post_action_delay_seconds"),
-                         "next_start")
-        self.assertEqual(web_ui._delay_effect_scope("ocr_preprocess_scale"),
-                         "restart")
-        # 每个白名单字段都必须被分类，不能漏
-        from config import _USER_DELAY_KEYS
-        for key in _USER_DELAY_KEYS:
-            self.assertIn(web_ui._delay_effect_scope(key),
-                          ("live", "next_start", "restart"))
-
-
 class ScreenshotApiTests(unittest.TestCase):
     """按需抓图 API：只截图、落盘、返回路径；参数错误要优雅拒绝。"""
 

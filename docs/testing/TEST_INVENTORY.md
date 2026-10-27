@@ -216,3 +216,14 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - `move-native`：2 个方法（仅真实进程枚举）。
 - `candidate-delete`：35 个方法（源码串 30 + 危险验收 2 + 重复表漂移 3）。
 - 合计：1471 + 12 + 2 + 35 = 1520。
+
+## R02E Cleanup Execution Log
+
+### B1 duplicate table / private list drift
+
+- Status: implemented, pending independent review and commit.
+- Removed `tests/test_web_hot_control.py::HotChannelTests.test_delay_effect_scope_table`.
+- Removed `tests/test_draw_extra_delay_settings.py::ConfigTests.test_key_is_part_of_the_user_delay_whitelist`.
+- Rewrote R06 in place as a fixed-frame `screen_regions -> battle_entry.identify` behavior check.
+- Rewrote R07 in place as a default-coordinate plus save/load roundtrip check.
+- Public equivalent gate: 31/31 pass; `HotChannelTests` 19 -> 18; `ConfigTests` 3 -> 2.

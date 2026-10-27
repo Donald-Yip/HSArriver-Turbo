@@ -87,7 +87,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 uv run python -m unittest discover -s tests -t .
 ```
 
-当前 targeted 组合为 31 个方法；A01/A02 删除 2 个方法，R06/R07 在现有方法内改写，expected 29 个 targeted 通过。相对 baseline 默认 `1,525 -> 1,523`，opt-in `3 -> 3`。
+B1 的公开等效门为 31 个方法，R06/R07 在现有方法内改写，所以改写前后都应是 31/31 通过。A01 所在 `HotChannelTests` 从 19 改为 18，A02 所在 `ConfigTests` 从 3 改为 2；B1 分组总数从 53 改为 51。相对 baseline 默认 `1,525 -> 1,523`，opt-in `3 -> 3`。
 
 **Rollback**
 

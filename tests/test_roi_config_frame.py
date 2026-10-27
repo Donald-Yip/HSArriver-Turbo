@@ -209,7 +209,16 @@ class RecommendationConfigIntegrationTests(unittest.TestCase):
         cfg = config.RecommendationConfig()
 
         self.assertEqual((1230, 180, 1385, 225), tuple(cfg.post_game_rank_roi))
-        self.assertIn("post_game_rank_roi", config._USER_BOX_KEYS)
+
+        saved = (1200, 170, 1400, 230)
+        path = self.tmp / "ui_config.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["roi_frame"] = "client"
+        data["post_game_rank_roi"] = list(saved)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+        reloaded = config.RecommendationConfig()
+        self.assertEqual(saved, tuple(reloaded.post_game_rank_roi))
 
 
 if __name__ == "__main__":

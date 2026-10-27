@@ -144,18 +144,23 @@ class CalibrationTargetTests(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
 
     def test_interface_recognition_boxes_match_battle_entry(self):
-        """界面识别的三个框必须与 battle_entry 的默认值一致（防止两边改岔）。
-
-        与 AI 胜率区域那条规矩一样：坐标只应有一个出处，改了一边另一边会红。
-        """
+        """校准清单里的界面框必须能直接驱动 battle_entry 的固定帧识别。"""
+        from tests.test_battle_entry import deck_select_frame, main_menu_frame
         import battle_entry
 
-        self.assertEqual(battle_entry.MAIN_MENU_BATTLE_DEFAULT,
-                         screen_regions.MAIN_MENU_BATTLE_REGION)
-        self.assertEqual(battle_entry.DECK_SELECT_TITLE_DEFAULT,
-                         screen_regions.DECK_SELECT_TITLE_REGION)
-        self.assertEqual(battle_entry.DECK_GRID_DEFAULT,
-                         screen_regions.DECK_GRID_REGION)
+        targets = {target["key"]: target["box"]
+                   for target in screen_regions.calibration_targets(make_config())}
+        config = SimpleNamespace(
+            main_menu_battle_roi=targets["main_menu_battle"],
+            deck_select_title_roi=targets["deck_select_title"],
+            deck_grid_roi=targets["deck_grid"],
+            post_game_start_roi=targets["post_game_start"],
+        )
+        self.assertEqual("main_menu",
+                         battle_entry.identify(main_menu_frame(config), config)["state"])
+        self.assertEqual("deck_select",
+                         battle_entry.identify(deck_select_frame(config), config)["state"])
+
         # 文字框可以很薄：它的缩放下限必须小于框高，否则手柄拖不出来
         for key in ("main_menu_battle", "deck_select_title"):
             target = next(t for t in screen_regions.calibration_targets(make_config())
