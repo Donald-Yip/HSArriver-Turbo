@@ -381,3 +381,13 @@ revert B9 commit；不要把 `.gitignore` 变化混入该批次。
 - B4 若无法在不改生产代码的前提下建立公共 lifecycle 门，M06-M08/R01 应保持 KEEP；不得用私有 patch 顺序替代。
 - B7/B8 需要 controller 确认 CI 是否已有 native/tooling job；没有 job 时先加 job，再迁移测试。
 - B1 的 `screen_regions` 黑盒替代需要 controller 同意新增固定 frame fixture；没有 fixture 时 R06 保持 KEEP。
+
+## Execution Result
+
+R02E completed the approved ledger.
+
+- A/M merged or removed methods: 12.
+- B3 conversion: 12 default implementation-string methods -> 3 CI opt-in behavior methods.
+- B4 conversion: 5 private call-order methods -> 1 public lifecycle method.
+- Final boundaries: default 1,495; discover 1,657; CI opt-in 19; native-live 1.
+- B1-B9 each remain independently reverse-applicable.

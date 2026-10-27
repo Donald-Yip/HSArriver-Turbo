@@ -87,6 +87,15 @@ Verification:
 - B9/B8/B7 reverse patch checks each exit `0`, proving independent rollback from final HEAD.
 - Current verified boundaries: default 1,511; discover 1,673; CI opt-in 16; native-live 1.
 
+## Final B4/B3
+
+- B4 `a181960`: one public fake-Tk lifecycle scenario covers normal and failed-mainloop cleanup/reopen and replaces five private patch tests.
+- B3 `1135959`: three real-script Node DOM behavior methods replaced twelve implementation-string tests.
+- Full default: 1,495 tests pass.
+- Full discover: 1,657 tests pass.
+- CI opt-in: 19/19 pass.
+- Native-live: one required real-window test, intentionally excluded from CI.
+
 ## Known Risks
 
 - R06 now imports frame helpers from another test module. This is test-only coupling; a later helper move may reduce it.

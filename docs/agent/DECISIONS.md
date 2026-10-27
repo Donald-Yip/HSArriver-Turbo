@@ -45,3 +45,10 @@ Ruling: R05 may modify `window_tracker.py` only for deterministic shutdown clean
 - Decision: O12 requires Git exit code exactly 1; fatal repository errors fail closed.
 - Decision: MCP uses the real stdio smoke as its gate; no static source-structure replacement is added.
 - Decision: B9, B8, and B7 must each reverse-apply cleanly from final HEAD.
+
+## 2026-10-27 R02E Final Portfolio
+
+- Decision: behavior gates replace source-string and private call-order assertions, not merely move them.
+- Decision: frontend behavior is exercised through the real `web/index.html` script in Node with a fake DOM.
+- Decision: overlay teardown is exercised through public `start()` lifecycle behavior with fake Tk, including a failed-mainloop path.
+- Final bounds: default 1,495; discover 1,657; CI opt-in 19; native-live 1.

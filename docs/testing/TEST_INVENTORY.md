@@ -260,3 +260,14 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - B9 established non-package `tests/opt_in` and `tests/native_live` directories and import-free manifests.
 - B8 moved installed-environment checks to CI opt-in while retaining static manifest parity in default.
 - B7 moved live-window mapping to native-live and MCP/Windows semantics to required CI opt-in.
+
+## Final R02E Portfolio
+
+- Default headless: **1,495** methods.
+- Discoverable: **1,657** methods.
+- CI opt-in: **19** methods across seven modules.
+- Native-live: **1** method.
+- All real TestCase methods: **1,677**.
+- B3 replaced twelve implementation-string tests with three real-script fake-DOM behavior methods.
+- B4 replaced five private call-order tests with one public overlay lifecycle scenario.
+- All batches are independently reverse-applicable.
