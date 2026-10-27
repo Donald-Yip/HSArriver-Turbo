@@ -17,16 +17,17 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 
 ## Current Increment
 
-Stage 1 (`B1/B2/B5`) is independently approved.
+Stage 1 (`B1/B2/B5`) and stage 2A (`B6`) are independently approved.
 
-Stage 2A executes only B6 from `docs/testing/TEST_CLEANUP_PLAN.md`:
+Stage 2B executes B9, B8, then B7 from `docs/testing/TEST_CLEANUP_PLAN.md`:
 
-- R04: rewrite the legacy lobby timeout test using an Event-gated callback.
-- R05: rewrite the legacy action-dispatch timeout test using an Event-gated callback.
-- Remove wall-clock upper-bound assertions and real sleeps from these tests.
-- Counts remain default `1,523`, discover `1,685`, opt-in `3`.
+- B9: move O12 repository hygiene to an explicit opt-in tooling gate.
+- B8: move O04-O11/O14 environment checks to opt-in tooling; retain one static manifest check in default.
+- B7: move O02/O03/O13 to CI opt-in and O01 to a separate native-live gate; retain one static MCP schema check in default.
+- Required CI opt-in must fail on missing prerequisites; the live-window gate is explicit and never runs in ordinary CI.
+- Stage target: default `1,511`, discover `1,673`, CI opt-in `16`, native-live `1`.
 
-B3/B4/B7/B8/B9 are explicitly deferred to later increments.
+B3/B4 remain deferred.
 
 ## Non-Goals
 
@@ -66,11 +67,21 @@ B3/B4/B7/B8/B9 are explicitly deferred to later increments.
 - `tests/adapters/test_external_adapters.py`
 - `tests/test_web_logs_wiring.py`
 - `tests/test_web_prepare_flow.py`
+- `tests/test_env_provision.py`
+- `tests/test_uv_environment.py`
+- `tests/test_selfcheck.py`
+- `tests/test_mcp_server.py`
+- `tests/test_display_mapping.py`
+- `tests/tooling/**`
+- `tests/native/**`
 - `tests/helpers/**`
+- `tools/run_headless_tests.py`
+- `.github/workflows/ci.yml`
 - `docs/testing/TEST_INVENTORY.md`
 - `docs/testing/TEST_RATIONALIZATION_PLAN.md`
 - `docs/testing/TEST_PORTFOLIO_AUDIT.md`
 - `docs/testing/TEST_CLEANUP_PLAN.md`
+- `docs/testing/CI_GATES.md`
 - `docs/tasks/R02E-*.md`
 - `docs/agent/reports/R02E-*.md`
 - `docs/agent/reports/R02D-implementer.md`
@@ -85,10 +96,8 @@ B3/B4/B7/B8/B9 are explicitly deferred to later increments.
 
 - Any production module under `src/` or legacy root modules
 - Any test file not listed above
-- `.github/**`
-- `tools/**`
 - `pyproject.toml`, `uv.lock`
-- Runtime configs, logs, screenshots, and native Hearthstone interactions
+- Runtime configs, logs, screenshots, and Hearthstone interactions in default/CI opt-in gates
 
 ## Dependencies And Impact
 
@@ -124,6 +133,9 @@ test(R02E-B1): remove private table drift checks
 test(R02E-B2): merge duplicate DTO boundary assertions
 test(R02E-B5): replace mock-only web test assertions
 test(R02E-B6): replace wall-clock timeout assertions
+test(R02E-B9): isolate repository hygiene check
+test(R02E-B8): isolate environment smoke checks
+test(R02E-B7): isolate native and MCP integration checks
 ```
 
 ## Report Paths

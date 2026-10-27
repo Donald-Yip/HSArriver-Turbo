@@ -76,7 +76,7 @@ Changed:
 Verification:
 
 - Focused adapter gate: `Ran 15 tests`, `OK`.
-- Three consecutive focused runs: `OK`.
+- Three consecutive focused runs: `OK`; independent review APPROVED.
 - Adapter tests are discoverable-only; default headless method count is unchanged.
 
 ## Known Risks

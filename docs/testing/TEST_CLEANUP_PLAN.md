@@ -44,20 +44,20 @@
 
 ### 3.1 按推荐顺序的精确数量账本
 
-| 步骤 | default 累计 | discover 累计 | opt-in 累计 | 净变化说明 |
-|---|---:|---:|---:|---|
-| baseline | 1,525 | 1,688 | 3 | 分层 163 方法属于 discover、不在 default |
-| B1 | 1,523 | 1,686 | 3 | 删除 2 个 top-level 方法 |
-| B2 | 1,523 | 1,685 | 3 | 合并 1 个 application 方法，只减少 discover |
-| B5 | 1,523 | 1,685 | 3 | 原位改写，不改变方法数 |
-| B9 | 1,522 | 1,684 | 4 | O12 从 top-level 移入 opt-in |
-| B8 | 1,514 | 1,676 | 13 | 9 个环境方法移入 opt-in，新增 1 个静态默认方法 |
-| B7 | 1,511 | 1,673 | 17 | 4 个环境方法移入 opt-in，新增 1 个静态默认方法 |
-| B6 | 1,511 | 1,673 | 17 | 2 个 adapter 方法原位改写 |
-| B4 | 1,507 | 1,669 | 17 | 5 个 top-level 方法合并为 1 个默认场景 |
-| B3 | 1,495 | 1,657 | 20 | 12 个 top-level 方法由 3 个 opt-in JS 方法取代 |
+| 步骤 | default 累计 | discover 累计 | CI opt-in 累计 | native-live 累计 | 净变化说明 |
+|---|---:|---:|---:|---:|---|
+| baseline | 1,525 | 1,688 | 3 | 0 | 分层 163 方法属于 discover、不在 default |
+| B1 | 1,523 | 1,686 | 3 | 0 | 删除 2 个 top-level 方法 |
+| B2 | 1,523 | 1,685 | 3 | 0 | 合并 1 个 application 方法，只减少 discover |
+| B5 | 1,523 | 1,685 | 3 | 0 | 原位改写，不改变方法数 |
+| B9 | 1,522 | 1,684 | 4 | 0 | O12 从 top-level 移入 CI opt-in |
+| B8 | 1,514 | 1,676 | 13 | 0 | 9 个环境方法移入 CI opt-in，新增 1 个静态默认方法 |
+| B7 | 1,511 | 1,673 | 16 | 1 | 3 个移入 CI opt-in，O01 移入 native-live；新增 1 个静态默认方法 |
+| B6 | 1,511 | 1,673 | 16 | 1 | 2 个 adapter 方法原位改写 |
+| B4 | 1,507 | 1,669 | 16 | 1 | 5 个 top-level 方法合并为 1 个默认场景 |
+| B3 | 1,495 | 1,657 | 19 | 1 | 12 个 top-level 方法由 3 个 CI opt-in JS 方法取代 |
 
-最终目标：default **1,495**，discover **1,657**，opt-in **20**，全树 **1,677** 个真实 TestCase 方法。任何 `run` 数与账本不一致都必须解释，或回滚该 batch。
+最终目标：default **1,495**，discover **1,657**，CI opt-in **19**，native-live **1**，全树 **1,677** 个真实 TestCase 方法。任何 `run` 数与账本不一致都必须解释，或回滚该 batch。
 
 ## 4. 批次明细
 
@@ -287,7 +287,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py --opt-in
 uv run python -m unittest discover -s tests -t .
 ```
 
-Expected：默认移除 4 个旧方法、增加 1 个静态 schema 方法，累计 default `1,514 -> 1,511`、discover `1,676 -> 1,673`；opt-in 增加 4 个方法，累计 `13 -> 17`。required skip=failure。
+Expected：默认移除 4 个旧方法、增加 1 个静态 schema 方法，累计 default `1,514 -> 1,511`、discover `1,676 -> 1,673`；CI opt-in 增加 3 个方法，累计 `13 -> 16`；native-live 增加 O01，累计 `0 -> 1`。required skip=failure。
 
 **Rollback**
 

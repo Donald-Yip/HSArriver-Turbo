@@ -245,7 +245,7 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 
 ### B6 wall-clock timeout assertions
 
-- Status: implemented, pending independent review and commit.
+- Status: implemented and independently approved.
 - R04/R05 now gate blocking callbacks with `threading.Event`.
 - Timeout is asserted by `TimeoutError`; after release they locate the actual deadline worker and join it.
 - Removed `time.sleep` upper-bound timing assertions.

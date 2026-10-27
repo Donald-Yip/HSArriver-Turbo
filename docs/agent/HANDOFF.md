@@ -2,26 +2,28 @@
 
 ## Current Phase
 
-R02E stage 2A/B6 awaiting independent review.
+R02E stage 2B: B9/B8/B7 environment test isolation.
 
 ## Current Task
 
-R02E (`ready_for_review`)
+R02E (`in_progress`)
 
-## Completed
+## Approved
 
-- Stage 1 B1/B2/B5 independently APPROVED.
-- B6 current HEAD: Event-gated adapter timeout tests; no wall-clock upper bounds.
+- Stage 1 B1/B2/B5.
+- Stage 2A B6, final commit `1ebd8fc`.
 
-## Verification
+## Stage 2B Targets
 
-- Focused adapter gate: 15 tests, three consecutive passes.
-- Full discover: 1,685 run / 1,684 pass / 1 explicit skip.
-- Method counts: default 1,523; discover 1,685; opt-in 3.
-- No production changes.
+- B9: O12 to CI opt-in tooling.
+- B8: O04-O11/O14 to CI opt-in tooling; one static manifest default method.
+- B7: O02/O03/O13 to CI opt-in; O01 to native-live; one static MCP schema default method.
+- intermediate/final default 1,511, discover 1,673, CI opt-in 16, native-live 1.
+- live-window test is never part of ordinary CI.
 
 ## Exact Next Action
 
-1. Retry independent B6 review when subagent quota is available.
-2. Approve or fix B6.
-3. Continue only with the next approved batch; B7/B8/B9 and B3/B4 remain deferred.
+1. Implement B9 and test the split runner modes.
+2. Implement B8, retaining static manifest coverage.
+3. Implement B7, retaining static MCP schema and separate native-live smoke.
+4. Run full gates and request independent stage 2B review.
