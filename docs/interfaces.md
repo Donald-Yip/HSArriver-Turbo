@@ -461,3 +461,16 @@ callables into these constructors.
 ## Compatibility
 
 Legacy public HTTP/CLI/MCP/config/log behavior remains unchanged until the explicit cutover task. New internal contracts may evolve only through the interface document and contract tests.
+
+### Full Web UI Startup Contract
+
+The complete pre-refactor Web control UI remains the primary operator surface at
+`web/index.html` served by `web_ui.py`. Its existing controls, HTTP endpoints,
+manual automation, scheduling, overlay, calibration, surrender, delay and log
+behavior are preserved.
+
+All launch paths (`web_ui.py`, `hsctl serve start`, elevated launch, and the
+highest-privilege scheduled task) force UTF-8 stdio so localized warnings cannot
+crash on Chinese Windows. The scheduled-task launcher also sets
+`PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`. No UI feature depends on the new
+one-game CLI.

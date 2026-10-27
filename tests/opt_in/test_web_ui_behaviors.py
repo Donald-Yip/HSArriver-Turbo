@@ -37,5 +37,28 @@ class WebUiBehaviorTests(unittest.TestCase):
     def test_settings_controls_round_trip(self) -> None:
         self._run_group("settings")
 
+    def test_web_ui_stdio_reconfiguration_is_utf8_and_replacement_safe(self) -> None:
+        script = (
+            "import io, sys\n"
+            "import web_ui\n"
+            "class Stream:\n"
+            "    def __init__(self): self.calls=[]\n"
+            "    def reconfigure(self, **kwargs): self.calls.append(kwargs)\n"
+            "out, err = Stream(), Stream()\n"
+            "original_stdout, original_stderr = sys.stdout, sys.stderr\n"
+            "try:\n"
+            "    sys.stdout, sys.stderr = out, err\n"
+            "    web_ui._configure_stdio()\n"
+            "finally:\n"
+            "    sys.stdout, sys.stderr = original_stdout, original_stderr\n"
+            "assert out.calls == [{'encoding':'utf-8','errors':'replace'}]\n"
+            "assert err.calls == [{'encoding':'utf-8','errors':'replace'}]\n"
+        )
+        proc = subprocess.run(
+            [str(ROOT / ".venv" / "Scripts" / "python.exe"), "-c", script],
+            cwd=str(ROOT), capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+
     def test_overlay_and_version_render_behavior(self) -> None:
         self._run_group("overlay")

@@ -17,6 +17,23 @@
 
 from __future__ import annotations
 
+import sys
+
+
+def _configure_stdio() -> None:
+    """Force console streams to UTF-8 on Chinese Windows code pages."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+_configure_stdio()
+
 import ctypes
 
 try:
@@ -36,7 +53,6 @@ import os
 import platform
 import secrets
 import subprocess
-import sys
 import threading
 import time
 import traceback

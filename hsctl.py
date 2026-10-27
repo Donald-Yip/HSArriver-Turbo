@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shlex
+import xml.etree.ElementTree as ET
 import signal
 import subprocess
 import sys
@@ -2653,6 +2654,8 @@ def _task_launcher_text() -> str:
         "rem no nested quotes. Rerun install-task to regenerate.\r\n"
         "chcp 65001 >nul\r\n"
         f'cd /d "{ROOT}"\r\n'
+        "set PYTHONUTF8=1\r\n"
+        "set PYTHONIOENCODING=utf-8\r\n"
         f'"{_python_for_task()}" "{ROOT / "hsctl.py"}" serve start --wait 120\r\n'
     )
 
@@ -2728,15 +2731,35 @@ def _task_xml():
     return raw.decode("mbcs" if os.name == "nt" else "utf-8", "replace")
 
 
+def _task_action_from_xml(xml: str | None) -> str:
+    """Return the executable path configured in the task, not the desired path."""
+
+    if not xml:
+        return ""
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        match = re.search(r"<Command>(.*?)</Command>", xml, re.DOTALL)
+        return match.group(1).strip() if match else ""
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] == "Command":
+            return (element.text or "").strip()
+    return ""
+
+
 def _task_state() -> dict:
     code, out = _run_quiet(["schtasks", "/query", "/tn", TASK_NAME])
     exists = code == 0
     xml = _task_xml() if exists else None
+    actual_action = _task_action_from_xml(xml)
     return {
         "name": TASK_NAME,
         "exists": exists,
         "highest": ("HighestAvailable" in xml) if xml else None,
-        "action": _task_action(),
+        "action": actual_action or _task_action(),
+        "actual_action": actual_action,
+        "expected_action": _task_action(),
+        "matches_current": bool(actual_action) and Path(actual_action) == TASK_LAUNCHER,
         "is_admin_now": is_user_admin(),
         "query": (out or "").strip()[:400],
     }
@@ -2852,12 +2875,21 @@ def _serve_start(args, ctx: Ctx) -> int:
     return _serve_start_direct(args, ctx)
 
 
+def _utf8_console_env(base=None) -> dict:
+    """Clone an environment and force the Web console to UTF-8 stdio."""
+
+    env = dict(os.environ if base is None else base)
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
 def _serve_start_direct(args, ctx: Ctx) -> int:
     """普通（非提权）后台上拉。"""
     cmd = [sys.executable, str(ROOT / "web_ui.py")]
     if not args.browser:
         cmd.append("--no-browser")
-    env = dict(os.environ)
+    env = _utf8_console_env()
     if ctx.port:
         env["HS_PORT"] = str(int(ctx.port))
     SERVE_LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -2900,6 +2932,7 @@ def _serve_start_elevated(args, ctx: Ctx) -> int:
     """UAC 提权启动：会弹同意框，需要有人在电脑前点「是」。"""
     if os.name != "nt":
         raise ApiFailure("--elevate 只在 Windows 上可用")
+    os.environ.update(_utf8_console_env())
     if ctx.port:
         # ShellExecute 没有 env 参数，只能改本进程环境让子进程继承。
         os.environ["HS_PORT"] = str(int(ctx.port))
@@ -2969,6 +3002,13 @@ def _serve_start_via_task(args, ctx: Ctx) -> int:
     if state["highest"] is False:
         print("⚠️ 这个任务没有勾选「最高权限」，起来后仍然不是管理员。")
         print("   重建：hsctl serve uninstall-task && hsctl serve install-task")
+    if state.get("actual_action") and not state.get("matches_current"):
+        raise ApiFailure(
+            "计划任务仍指向旧启动器，未执行以免启动错误副本:\n"
+            f"  当前：{state.get('actual_action')}\n"
+            f"  应为：{state.get('expected_action')}\n"
+            "  请在管理员 PowerShell 重跑：hsctl serve install-task --force"
+        )
     triggered = _run_task_now()
     if not triggered["ok"]:
         raise ApiFailure(f"触发计划任务失败：{triggered['detail']}")
@@ -3043,7 +3083,12 @@ def cmd_serve_task_status(args, ctx: Ctx) -> int:
     print(f"计划任务：{TASK_NAME}")
     print(f"  以最高权限运行：{'是' if state['highest'] else '否 / 未知'}")
     print(f"  当前进程是管理员：{'是' if state['is_admin_now'] else '否'}")
-    print(f"  动作：{state['action']}")
+    print(f"  动作：{state.get('actual_action') or state['action']}")
+    if state.get("actual_action") and not state.get("matches_current"):
+        print(f"  ✗ 指向旧路径；应为：{state.get('expected_action')}")
+        print("  管理员执行：hsctl serve install-task --force")
+    else:
+        print("  ✓ 指向当前启动器")
     return EXIT_OK
 
 

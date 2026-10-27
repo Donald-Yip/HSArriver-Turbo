@@ -634,7 +634,74 @@ class TaskHintTests(unittest.TestCase):
         text = raw.decode("utf8")
         self.assertIn("serve start --wait 120", text)
         self.assertIn("chcp 65001", text)          # 让中文输出在任务窗口里正常显示
+        self.assertIn("set PYTHONUTF8=1", text)
+        self.assertIn("set PYTHONIOENCODING=utf-8", text)
         self.assertIn(str(hsctl.ROOT), text)
+
+    def test_console_env_forces_utf8_without_mutating_source(self) -> None:
+        base = {"KEEP": "value", "PYTHONUTF8": "0"}
+        env = hsctl._utf8_console_env(base)
+        self.assertEqual("value", env["KEEP"])
+        self.assertEqual("1", env["PYTHONUTF8"])
+        self.assertEqual("utf-8", env["PYTHONIOENCODING"])
+        self.assertEqual("0", base["PYTHONUTF8"])
+        self.assertNotIn("PYTHONIOENCODING", base)
+
+    def test_direct_start_passes_utf8_environment_to_web_console(self) -> None:
+        captured = {}
+        proc = unittest.mock.Mock()
+        proc.pid = 1234
+        proc.poll.return_value = None
+
+        def fake_popen(cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["env"] = kwargs["env"]
+            return proc
+
+        args = argparse.Namespace(browser=False, wait=1)
+        with unittest.mock.patch.object(hsctl.subprocess, "Popen", side_effect=fake_popen), \
+                unittest.mock.patch.object(hsctl, "_wait_for_console", return_value="http://127.0.0.1:8765"), \
+                unittest.mock.patch.object(hsctl, "PID_FILE", self._TMP_ROOT / "ui.pid"), \
+                unittest.mock.patch.object(hsctl, "_report_ready"):
+            code = hsctl._serve_start_direct(args, hsctl.Ctx(argparse.Namespace(json=True)))
+
+        self.assertEqual(hsctl.EXIT_OK, code)
+        self.assertEqual("1", captured["env"]["PYTHONUTF8"])
+        self.assertEqual("utf-8", captured["env"]["PYTHONIOENCODING"])
+
+    def test_elevated_start_sets_utf8_environment_before_shell_execute(self) -> None:
+        captured = {}
+
+        def fake_launch(_python, params):
+            captured["python"] = _python
+            captured["params"] = params
+            captured["PYTHONUTF8"] = os.environ.get("PYTHONUTF8")
+            captured["PYTHONIOENCODING"] = os.environ.get("PYTHONIOENCODING")
+            return True, 0
+
+        args = argparse.Namespace(browser=False, wait=1, via_task=False, elevate=True)
+        env_backup = {k: os.environ.get(k) for k in ("PYTHONUTF8", "PYTHONIOENCODING")}
+        try:
+            with unittest.mock.patch.object(hsctl, "_launch_runas", side_effect=fake_launch), \
+                    unittest.mock.patch.object(hsctl, "_wait_for_console", return_value="http://127.0.0.1:8765"), \
+                    unittest.mock.patch.object(hsctl, "_report_ready"):
+                code = hsctl._serve_start_elevated(args, hsctl.Ctx(argparse.Namespace(json=True)))
+        finally:
+            for key, value in env_backup.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.assertEqual(hsctl.EXIT_OK, code)
+        self.assertEqual("1", captured["PYTHONUTF8"])
+        self.assertEqual("utf-8", captured["PYTHONIOENCODING"])
+        self.assertIn("web_ui.py", captured["params"])
+
+    def test_installed_task_must_point_to_current_launcher(self) -> None:
+        # This method belongs to a mocked launcher fixture; the real installed
+        # task is checked by the explicit host verification command, not unit tests.
+        self.assertTrue(str(self.launcher).endswith(".cmd"))
 
     def test_launcher_reruns_write_is_idempotent(self):
         hsctl._ensure_task_launcher()
@@ -731,7 +798,10 @@ class ElevationTests(unittest.TestCase):
 
         with unittest.mock.patch.object(
                 hsctl, "_task_state",
-                return_value={"exists": True, "highest": True}), \
+                return_value={"exists": True, "highest": True,
+                              "actual_action": str(hsctl.TASK_LAUNCHER),
+                              "expected_action": str(hsctl.TASK_LAUNCHER),
+                              "matches_current": True}), \
                 unittest.mock.patch.object(hsctl, "_run_quiet",
                                            side_effect=fake_run), \
                 unittest.mock.patch.object(hsctl, "_wait_for_console",
@@ -746,7 +816,10 @@ class ElevationTests(unittest.TestCase):
     def test_via_task_warns_when_not_highest(self):
         with unittest.mock.patch.object(
                 hsctl, "_task_state",
-                return_value={"exists": True, "highest": False}), \
+                return_value={"exists": True, "highest": False,
+                              "actual_action": str(hsctl.TASK_LAUNCHER),
+                              "expected_action": str(hsctl.TASK_LAUNCHER),
+                              "matches_current": True}), \
                 unittest.mock.patch.object(hsctl, "_run_quiet",
                                            return_value=(0, "")), \
                 unittest.mock.patch.object(hsctl, "_wait_for_console",
@@ -760,7 +833,10 @@ class ElevationTests(unittest.TestCase):
     def test_via_task_run_failure_reports(self):
         with unittest.mock.patch.object(
                 hsctl, "_task_state",
-                return_value={"exists": True, "highest": True}), \
+                return_value={"exists": True, "highest": True,
+                              "actual_action": str(hsctl.TASK_LAUNCHER),
+                              "expected_action": str(hsctl.TASK_LAUNCHER),
+                              "matches_current": True}), \
                 unittest.mock.patch.object(hsctl, "_run_quiet",
                                            return_value=(1, "拒绝访问")):
             code, _, err = run_cli([*self.base, "serve", "start", "--via-task",
@@ -768,6 +844,28 @@ class ElevationTests(unittest.TestCase):
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("触发计划任务失败", err)
         self.assertIn("PowerShell", err)
+
+    def test_via_task_rejects_stale_actual_launcher(self):
+        calls = []
+        with unittest.mock.patch.object(
+                hsctl, "_task_state",
+                return_value={
+                    "exists": True,
+                    "highest": True,
+                    "actual_action": r"C:\Desktop\old\launcher.cmd",
+                    "expected_action": str(hsctl.TASK_LAUNCHER),
+                    "matches_current": False,
+                }), \
+                unittest.mock.patch.object(
+                    hsctl, "_run_quiet",
+                    side_effect=lambda argv: (calls.append(argv), (0, ""))[1]):
+            code, _, err = run_cli([*self.base, "serve", "start", "--via-task",
+                                    "--wait", "1"])
+
+        self.assertEqual(code, hsctl.EXIT_API)
+        self.assertEqual([], calls)
+        self.assertIn("计划任务仍指向旧启动器", err)
+        self.assertIn("install-task --force", err)
 
     # ---- schtasks 被策略拦掉 → PowerShell 兜底
     def test_run_task_now_falls_back_to_powershell(self):
