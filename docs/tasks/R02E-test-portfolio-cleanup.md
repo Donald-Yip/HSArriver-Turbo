@@ -17,14 +17,16 @@ Execute the reviewed R02D cleanup ledger to reduce maintenance-heavy and low-val
 
 ## Current Increment
 
-Stage 1 executes only B1, B2, and B5 from `docs/testing/TEST_CLEANUP_PLAN.md`:
+Stage 1 (`B1/B2/B5`) is independently approved.
 
-- B1: remove A01/A02 and rewrite R06/R07 in place.
-- B2: merge M01 into existing DTO contract tests.
-- B5: rewrite R08/R09 in place.
-- Exact target: default `1,525 -> 1,523`; discover `1,688 -> 1,685`; opt-in remains `3`.
+Stage 2A executes only B6 from `docs/testing/TEST_CLEANUP_PLAN.md`:
 
-B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
+- R04: rewrite the legacy lobby timeout test using an Event-gated callback.
+- R05: rewrite the legacy action-dispatch timeout test using an Event-gated callback.
+- Remove wall-clock upper-bound assertions and real sleeps from these tests.
+- Counts remain default `1,523`, discover `1,685`, opt-in `3`.
+
+B3/B4/B7/B8/B9 are explicitly deferred to later increments.
 
 ## Non-Goals
 
@@ -61,6 +63,7 @@ B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
 - `tests/test_screen_regions.py`
 - `tests/test_roi_config_frame.py`
 - `tests/application/test_dto.py`
+- `tests/adapters/test_external_adapters.py`
 - `tests/test_web_logs_wiring.py`
 - `tests/test_web_prepare_flow.py`
 - `tests/helpers/**`
@@ -120,6 +123,7 @@ B3/B4/B6/B7/B8/B9 are explicitly deferred to later increments.
 test(R02E-B1): remove private table drift checks
 test(R02E-B2): merge duplicate DTO boundary assertions
 test(R02E-B5): replace mock-only web test assertions
+test(R02E-B6): replace wall-clock timeout assertions
 ```
 
 ## Report Paths

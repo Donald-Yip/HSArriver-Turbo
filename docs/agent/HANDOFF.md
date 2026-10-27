@@ -2,29 +2,22 @@
 
 ## Current Phase
 
-R02E stage 1 independent review.
+R02E stage 2A: B6 deterministic timeout tests.
 
 ## Current Task
 
-R02E (`ready_for_review`)
+R02E (`in_progress`)
 
-## Commits
+## Approved Stage 1
 
-- B1 `a990515`
-- B2 `cf4ab44`
-- B5 `HEAD` `test(R02E-B5): replace mock-only web test assertions`
-
-## Verified State
-
-- default headless: 1,523 run / 1,522 pass / 1 explicit skip.
-- discover: 1,685 run / 1,684 pass / 1 explicit skip.
-- opt-in: 3/3 pass.
-- B1/B2/B5 exact identities and count deltas recorded in the inventory and cleanup plan.
-- No production code changed.
+- B1 `a990515`, B2 `cf4ab44`, B5 `3f1b95f`.
+- Independent review: APPROVED.
+- default 1,523; discover 1,685; opt-in 3.
 
 ## Exact Next Action
 
-1. Fresh reviewer validates all three commits and the corrected default/discover/opt-in accounting.
-2. Fix any findings.
-3. Mark R02E stage 1 approved/committed.
-4. Defer B3/B4/B6-B9 to later increments.
+1. Rewrite R04/R05 with Event-gated callbacks and no wall-clock upper bound.
+2. Prove the worker exits after release.
+3. Run adapter tests, full headless, discover, opt-in, architecture and scope.
+4. Commit `test(R02E-B6): replace wall-clock timeout assertions`.
+5. Independently review stage 2A.

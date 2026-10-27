@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R02E: stage 1 B1/B2/B5 implemented; independent review pending.
+R02E stage 1 approved; stage 2A B6 deterministic timeout cleanup in progress.
 
 ## Branch And Environment
 
