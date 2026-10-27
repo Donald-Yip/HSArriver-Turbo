@@ -355,9 +355,9 @@
     },
     {
       "id": "R13A",
-      "status": "in_progress",
+      "status": "done",
       "owner": "controller",
-      "review_round": 0,
+      "review_round": 4,
       "branch": "feature/R13A-native-bridge",
       "depends_on": [
         "R12"

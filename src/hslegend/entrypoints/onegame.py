@@ -5,7 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from hslegend.application import OneGameCommand, OneGameStatus
 from hslegend.bootstrap import build_fake_one_game
@@ -50,12 +51,12 @@ def _non_empty_text(value: str) -> str:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hslegend-onegame",
-        description="Run exactly one headless Hearthstone game.",
+        description="Run exactly one Hearthstone game.",
     )
     parser.add_argument(
         "--fake",
         action="store_true",
-        help="use deterministic demo adapters (required until R13 native cutover)",
+        help="use deterministic demo adapters instead of the native bridge",
     )
     parser.add_argument(
         "--json",
@@ -94,11 +95,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _use_case_from_builder(builder: Callable[[], Any]) -> Any:
+    built = builder()
+    return getattr(built, "use_case", built)
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    native_builder: Callable[[], Any] | None = None,
+    fake_builder: Callable[[], Any] | None = None,
+) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if not args.fake:
-        parser.error("--fake is required; native adapters arrive in R13")
 
     try:
         command = OneGameCommand(
@@ -114,8 +123,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
+
+    if args.fake:
+        builder = fake_builder or build_fake_one_game
+    else:
+        if native_builder is None:
+            from hslegend.bootstrap.native import build_native_one_game
+
+            native_builder = build_native_one_game
+        builder = native_builder
     try:
-        result = build_fake_one_game().use_case.execute(command)
+        use_case = _use_case_from_builder(builder)
+        result = use_case.execute(command)
     except Exception as exc:
         error = {
             "command_id": command.command_id,

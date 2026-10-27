@@ -12,7 +12,7 @@
 
 ## Current Phase
 
-R13A is in progress: build the adapter-local legacy anti-corruption bridge and native composition headlessly. R13 then performs the controlled live one-game smoke and cutover.
+R13A is complete and independently approved. R13 now performs the controlled live one-game smoke, resolves any native integration defects, and decides the main cutover.
 
 ## Branch And Environment
 
@@ -56,7 +56,7 @@ R13A is in progress: build the adapter-local legacy anti-corruption bridge and n
 | R10 | done | Turn loop and reconciliation | R09 |
 | R11 | done | Settlement and one-game stop | R10 |
 | R12 | done | CLI and fake one-game E2E | R11 |
-| R13A | in_progress | Native anti-corruption adapter bridge | R12 |
+| R13A | done | Native anti-corruption adapter bridge | R12 |
 | R13 | planned | Native one-game smoke and main cutover | R13A |
 | R14 | planned | Static plugin registry expansion | R05 |
 | R15 | planned | Control-plane security | R13 |
@@ -125,4 +125,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Execute R13A from `docs/tasks/R13A-native-bridge.md`: build the adapter-local legacy bridge, Power.log snapshot mapping, authoritative lobby result, stable HSAng bridge, click dispatcher, native port bundle, and headless composition tests. Do not touch the live game until R13.
+Fast-forward `develop` to R13A and create R13. Define live-game authorization, preflight, evidence capture, stop conditions and rollback in the R13 task book before any native click. The first live run must be a bounded single game and must stop at RESULT without starting another.

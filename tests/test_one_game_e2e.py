@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from hslegend.application import LobbyPhase, OneGameCommand, OneGameStatus
@@ -13,6 +15,7 @@ from hslegend.application.use_cases.finish_battle import FinishBattleStatus
 from hslegend.application.use_cases.mulligan import MulliganStatus
 from hslegend.application.use_cases.turn import PlayTurnStatus
 from hslegend.bootstrap import build_fake_one_game
+from hslegend.entrypoints.onegame import main as cli_main
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRYPOINT = ("-m", "hslegend.entrypoints.onegame")
@@ -115,11 +118,51 @@ class OneGameCliTests(unittest.TestCase):
         self.assertIn("--fake", completed.stdout)
         self.assertEqual("", completed.stderr)
 
-    def test_missing_fake_is_usage_error_with_actionable_message(self) -> None:
-        completed = run_cli("--json")
-        self.assertEqual(2, completed.returncode)
-        self.assertIn("--fake is required", completed.stderr)
-        self.assertIn("R13", completed.stderr)
+    def test_default_selects_native_builder(self) -> None:
+        calls: list[str] = []
+
+        def native_builder():
+            calls.append("native")
+            return build_fake_one_game()
+
+        def fake_builder():
+            calls.append("fake")
+            return build_fake_one_game()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--json"],
+                native_builder=native_builder,
+                fake_builder=fake_builder,
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(["native"], calls)
+        self.assertEqual("completed", json.loads(output.getvalue())["status"])
+
+    def test_fake_selects_fake_builder(self) -> None:
+        calls: list[str] = []
+
+        def native_builder():
+            calls.append("native")
+            return build_fake_one_game()
+
+        def fake_builder():
+            calls.append("fake")
+            return build_fake_one_game()
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = cli_main(
+                ["--fake", "--json"],
+                native_builder=native_builder,
+                fake_builder=fake_builder,
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(["fake"], calls)
+        self.assertEqual("completed", json.loads(output.getvalue())["status"])
 
     def test_empty_command_id_is_usage_error(self) -> None:
         completed = run_cli("--fake", "--json", "--command-id", "")

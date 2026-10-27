@@ -75,7 +75,9 @@ uv run hslegend-onegame --fake
 ```
 
 The fake adapter path uses real application use cases and deterministic ports.
-Native adapter composition remains an explicit R13 cutover.
+R13A keeps `--fake` as the deterministic override and makes the native bridge
+the default composition without performing a live game during acceptance.
+
 ## Native Anti-Corruption Boundary
 
 `hslegend.adapters.legacy` is the only package allowed to import stable root

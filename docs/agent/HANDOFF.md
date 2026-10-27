@@ -2,27 +2,27 @@
 
 ## Current Phase
 
-R13A native anti-corruption bridge is in progress. This task is fully headless;
-it must not click, launch, or control Hearthstone.
+R13A native anti-corruption bridge is complete and independently APPROVED. R13 now owns the controlled live one-game smoke and cutover.
 
 ## Completed
 
-- R12 is independently approved, committed at `8981413`, and merged to local `develop`.
-- The fake one-game flow uses the real R08-R11 services and the installable `hslegend-onegame` CLI.
-- R12 gates: focused 23/23; default 1,500; discover 1,745; opt-in 19/19.
+- R13A is committed work in progress pending final commit on `feature/R13A-native-bridge`.
+- `hslegend.adapters.legacy` is the only package importing stable root/src legacy systems.
+- Power.log pump failure invalidates both lobby and game-state authority; the next successful INFO revision restores it.
+- EnterBattle, mulligan, turn and action families dispatch through injected legacy-click callbacks, never a global `click` alias.
+- HSAng keeps the legacy no-header, normalized-text, multi-frame stability behavior with separate mulligan/turn captures.
+- `NativePorts` contains ports only; bootstrap-native constructs the real R08-R12 graph.
+- `--help` and `--fake` stay isolated from native imports.
+- R13A gates: focused 53/53; default 1,501; discover 1,793; opt-in 19/19; architecture 53 files and 23/23 self-tests.
 
-## Current Task
+## Known Constraints
 
-- Task book: `docs/tasks/R13A-native-bridge.md`.
-- Branch: `feature/R13A-native-bridge`.
-- Only `hslegend.adapters.legacy` may import stable root/src legacy systems.
-- Build Power.log -> GameSnapshot mapping, authoritative lobby result, stable HSAng bridge, and PlanStep -> click dispatch with injected fakes.
-- Native bootstrap receives a `NativePorts` bundle and constructs the real R08-R12 use cases.
-- No live game action or main cutover in this task.
+- Native composition works from a source checkout. A non-editable wheel cannot contain the legacy root runtime; it now fails typed and supports `HSLEGEND_LEGACY_ROOT`. R13 must decide whether to package legacy or document source-checkout deployment.
+- No live game click, screenshot, OCR inference, or native smoke has been run for the new graph.
 
 ## Exact Next Action
 
-1. Dispatch one R13A implementer with the task book and anti-corruption boundary.
-2. Verify the diff and headless evidence as controller.
-3. Dispatch a fresh independent reviewer.
-4. Fix findings, run all gates, and create the single R13A feature commit.
+1. Fast-forward `develop` to R13A and create `feature/R13-native-cutover`.
+2. Write the R13 task book with explicit live-game authorization and stop conditions.
+3. Run a controlled native one-game smoke only with user approval.
+4. Capture Power.log/action evidence, fix only root integration defects, and decide main cutover.

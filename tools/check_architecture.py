@@ -84,6 +84,8 @@ PLUGIN_IO_MODULES = frozenset(
 )
 PLUGIN_IO_SEGMENTS = frozenset({"io", "input", "inputs", "io_backend", "input_backend"})
 PLUGIN_IO_CALLS = frozenset({"open", "input", "exec", "eval", "compile", "__import__"})
+LEGACY_ACL_PACKAGE = "hslegend.adapters.legacy"
+LEGACY_GOD_MODULES = frozenset({"FSM_action", "manual_controller", "web_ui"})
 
 
 @dataclass(frozen=True)
@@ -166,6 +168,22 @@ def is_legacy_root_module(target: str, root: Path) -> bool:
     return (root / f"{root_name}.py").is_file()
 
 
+def is_legacy_src_package(target: str) -> bool:
+    return target == "src" or target.startswith("src.")
+
+
+def in_legacy_acl(module: SourceModule) -> bool:
+    return module.name == LEGACY_ACL_PACKAGE or module.name.startswith(
+        LEGACY_ACL_PACKAGE + "."
+    )
+
+
+def is_forbidden_legacy_god_module(target: str, root: Path) -> bool:
+    del root
+    root_name = target.split(".", 1)[0]
+    return root_name in LEGACY_GOD_MODULES
+
+
 def domain_violation(target: str) -> str | None:
     if target == "hslegend" or target.startswith("hslegend."):
         if target == "hslegend" or not is_module_or_prefix(target, "hslegend.domain"):
@@ -245,8 +263,25 @@ def violation_for_target(
     module: SourceModule, target: str, root: Path
 ) -> tuple[str, str] | None:
     layer = module.layer
+    if is_forbidden_legacy_god_module(target, root):
+        return (
+            "imports_forbidden_legacy_god_module",
+            "FSM_action/manual_controller/web_ui are forbidden in every layer",
+        )
     if is_legacy_root_module(target, root):
-        return "imports_legacy_root_module", "New architecture modules cannot import root legacy modules"
+        if in_legacy_acl(module):
+            return None
+        return (
+            "imports_legacy_root_module",
+            "Only hslegend.adapters.legacy may import stable root legacy modules",
+        )
+    if is_legacy_src_package(target):
+        if in_legacy_acl(module):
+            return None
+        return (
+            "imports_legacy_src_package",
+            "Only hslegend.adapters.legacy may import legacy src.* packages",
+        )
 
     if layer == "domain":
         kind = domain_violation(target)
@@ -443,6 +478,7 @@ def run_self_test() -> dict[str, object]:
         "src/hslegend/application/use_case.py": "from hslegend.domain.model import dataclass\n",
         "src/hslegend/adapters/__init__.py": "",
         "src/hslegend/adapters/io.py": "from hslegend.application.use_case import dataclass\n",
+        "src/hslegend/adapters/legacy/__init__.py": "import click\nfrom src.ocr.stable_reader import StableRecommendationReader\n",
         "src/hslegend/plugins/__init__.py": "",
         "src/hslegend/plugins/plan.py": "from hslegend.domain.model import dataclass\n",
         "src/hslegend/bootstrap/__init__.py": "",
@@ -493,6 +529,17 @@ def run_self_test() -> dict[str, object]:
             "application imports plugins": {
                 "src/hslegend/application/bad.py": "from hslegend.plugins.plan import x\n",
             },
+            "all layers import legacy src": {
+                "src/hslegend/domain/bad.py": "from src.parser.recommendation_parser import x\n",
+                "src/hslegend/application/bad.py": "from src.parser.recommendation_parser import x\n",
+                "src/hslegend/adapters/bad.py": "from src.parser.recommendation_parser import x\n",
+                "src/hslegend/plugins/bad.py": "from src.parser.recommendation_parser import x\n",
+                "src/hslegend/bootstrap/bad.py": "from src.parser.recommendation_parser import x\n",
+                "src/hslegend/entrypoints/bad.py": "from src.parser.recommendation_parser import x\n",
+            },
+            "legacy ACL imports forbidden god module": {
+                "src/hslegend/adapters/legacy/bad.py": "import FSM_action\n",
+            },
             "plugin builtin IO calls": {
                 "src/hslegend/plugins/bad.py": "open('a')\ninput('x')\nexec('x')\neval('1')\ncompile('x', 'x', 'exec')\n__import__('os')\n",
             },
@@ -526,6 +573,8 @@ def run_self_test() -> dict[str, object]:
             "entrypoint imports domain": "entrypoint_imports_outside_allowlist",
             "entrypoint imports third party": "entrypoint_imports_non_stdlib",
             "all layers import legacy root": "imports_legacy_root_module",
+            "all layers import legacy src": "imports_legacy_src_package",
+            "legacy ACL imports forbidden god module": "imports_forbidden_legacy_god_module",
             "application imports plugins": "application_imports_outer_layer",
             "plugin builtin IO calls": "plugin_io_call",
             "plugin builtin input": "plugin_io_call",
@@ -542,6 +591,17 @@ def run_self_test() -> dict[str, object]:
                 "src/hslegend/plugins/bad.py",
                 "src/hslegend/bootstrap/bad.py",
                 "src/hslegend/entrypoints/bad.py",
+            },
+            "all layers import legacy src": {
+                "src/hslegend/domain/bad.py",
+                "src/hslegend/application/bad.py",
+                "src/hslegend/adapters/bad.py",
+                "src/hslegend/plugins/bad.py",
+                "src/hslegend/bootstrap/bad.py",
+                "src/hslegend/entrypoints/bad.py",
+            },
+            "legacy ACL imports forbidden god module": {
+                "src/hslegend/adapters/legacy/bad.py",
             },
         }
         expected_imports = {
@@ -581,6 +641,23 @@ def run_self_test() -> dict[str, object]:
                     "detected": sorted(kinds) if kinds else report["cycles"],
                 }
             )
+
+        acl_allowed = base / "legacy-acl-allowed"
+        acl_files = dict(clean_files)
+        acl_files["src/hslegend/adapters/legacy/allowed.py"] = (
+            "import click\n"
+            "from src.ocr.stable_reader import StableRecommendationReader\n"
+        )
+        write_fixture(acl_allowed, acl_files)
+        report = check(acl_allowed)
+        cases.append(
+            {
+                "name": "legacy imports allowed only in anti-corruption package",
+                "ok": bool(report["ok"]),
+                "expected": "pass",
+                "detected": report["violations"],
+            }
+        )
 
         false_positive = base / "false-positive-shadowed-open"
         false_positive_files = dict(clean_files)

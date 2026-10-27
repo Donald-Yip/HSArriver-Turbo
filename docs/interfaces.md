@@ -352,6 +352,35 @@ parser. The action bridge maps only the existing declarative action families to
 injected legacy click primitives and rejects unknown actions without blind
 clicks. R13A performs no live click or native smoke; R13 owns that controlled
 cutover.
+
+The bridge modules are responsibility-scoped: `paths.py` derives machine paths
+from legacy config, `powerlog.py` pumps containers and maps immutable snapshots,
+`lobby.py` applies authoritative phase precedence, `hsang.py` performs one
+multi-frame stable read per request, `input.py` maps pinned intents to injected
+click primitives, and `factory.py` returns `NativePorts`. Native legacy modules
+and the repository-root `sys.path` entry are loaded only when the native builder
+is called; importing bootstrap, the CLI entrypoint, `--help`, or `--fake` does
+not load them. A source-tree runtime is discovered from the checkout or current
+working directory; `HSLEGEND_LEGACY_ROOT` or an explicit builder override may
+select another complete legacy root. Missing runtime components raise
+`legacy_runtime_unavailable`.
+
+The HSAng factory uses no OCR header beacon, applies the parser's
+`normalize_action_text` normalizer, and uses a mulligan stability key based on
+parsed replacement slots with normalized text as fallback. The native action
+dispatcher also owns the three EnterBattle families: `enter_traditional` clicks
+only recognized `traditional.point` evidence, `select_deck` converts the
+zero-based choice index to legacy's one-based index and injects a
+runtime-click-backed callback, and `start_match` requires recognized deck-select
+evidence before invoking `match_opponent` through the injected runtime click
+module. Missing evidence rejects without clicking. Power.log container errors
+make prior state non-authoritative for lobby recognition until the next
+successful INFO container restores it.
+
+The default CLI selects `build_native_one_game`; `--fake` selects the
+deterministic demo builder. Tests inject both builders and never populate the
+real game graph.
+
 ## External Adapter Contracts
 
 R07 adapters are injection-only seams around legacy perception and input. New
