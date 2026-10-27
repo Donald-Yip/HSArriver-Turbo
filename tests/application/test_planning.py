@@ -213,6 +213,38 @@ class PlanningExecutionTests(unittest.TestCase):
     def observation(self, value: GameSnapshot) -> GameObservation:
         return GameObservation(value, 1.0)
 
+    def test_non_waiting_step_cannot_hide_postconditions(self) -> None:
+        with self.assertRaises(ValueError):
+            PlanStep(
+                step_id="bad-non-wait",
+                intent=ActionIntent("mulligan_replace", intent_id="bad"),
+                postconditions=(Condition("snapshot_changed"),),
+                wait_for_change=False,
+            )
+
+    def test_waiting_confirmation_requires_a_postcondition(self) -> None:
+        plan = self.end_turn_plan()
+        plan = replace(
+            plan,
+            steps=(replace(plan.steps[0], postconditions=()),),
+            postconditions=(),
+            confirmation_required=True,
+        )
+        dispatch = ScriptedDispatch([DispatchResult.sent("must-not-run")])
+        journal = RunJournalFake()
+
+        record = self.executor(
+            dispatch,
+            ScriptedGameState([self.observation(self.before)]),
+            journal,
+            ExecutionLedger(),
+        ).execute(plan, stop_token=StopToken(), action_gate=ActionGate())
+
+        self.assertEqual(ExecutionStatus.FAILED, record.status)
+        self.assertEqual("confirmation_postcondition_required", record.error_code)
+        self.assertEqual([], dispatch.calls)
+        self.assertEqual(1, len(journal.records))
+
     def test_successful_execution_dispatches_and_confirms(self) -> None:
         plan = self.end_turn_plan()
         dispatch = ScriptedDispatch([DispatchResult.sent("dispatch-1", "evidence-1")])
@@ -234,7 +266,10 @@ class PlanningExecutionTests(unittest.TestCase):
         self.assertEqual(ExecutionStatus.EXECUTED_CONFIRMED, record.status)
         self.assertEqual("postcondition_confirmed", record.error_code)
         self.assertEqual(1, len(dispatch.calls))
-        self.assertEqual((record,), journal.records)
+        self.assertEqual(1, len(journal.records))
+        self.assertEqual(record.record_id, journal.records[0].record_id)
+        self.assertEqual("journal-1", record.journal_record_id)
+        self.assertEqual("", record.release_error)
         self.assertEqual(ExecutionStatus.EXECUTED_CONFIRMED, ledger.last_attempt(action_key_for_plan(plan)).status)
         self.assertEqual("snap-2", record.after_snapshot_id)
         self.assertIn("evidence-1", record.evidence_ids)
@@ -758,6 +793,51 @@ class PlanningExecutionTests(unittest.TestCase):
         self.assertEqual(ExecutionStatus.EXECUTED_CONFIRMED, record.status)
         self.assertEqual([(7, 2.0)], state.wait_calls)
 
+    def test_non_waiting_steps_do_not_wait_for_intermediate_revisions(self) -> None:
+        plan = self.end_turn_plan()
+        first = PlanStep(
+            "multi-step-1",
+            plan.intent,
+            preconditions=(Condition("is_my_turn", expected=True),),
+            wait_for_change=False,
+        )
+        second = PlanStep(
+            "multi-step-2",
+            plan.intent,
+            postconditions=(Condition("snapshot_changed"),),
+            wait_for_change=True,
+        )
+        plan = replace(
+            plan,
+            plan_id="multi-plan-no-intermediate-wait",
+            steps=(first, second),
+            postconditions=(),
+        )
+        dispatch = ScriptedDispatch(
+            [
+                DispatchResult.sent("dispatch-1", "evidence-1"),
+                DispatchResult.sent("dispatch-2", "evidence-2"),
+            ]
+        )
+        state = ScriptedGameState(
+            [self.observation(self.before), self.observation(self.after)]
+        )
+        journal = RunJournalFake()
+
+        record = self.executor(dispatch, state, journal, ExecutionLedger()).execute(
+            plan,
+            stop_token=StopToken(),
+            action_gate=ActionGate(),
+        )
+
+        self.assertEqual(ExecutionStatus.EXECUTED_CONFIRMED, record.status)
+        self.assertEqual(1, len(state.wait_calls))
+        self.assertEqual(7, state.wait_calls[0][0])
+        self.assertGreater(state.wait_calls[0][1], 0.0)
+        self.assertEqual(
+            ["multi-step-1", "multi-step-2"],
+            [step.step_id for step, _ in dispatch.calls],
+        )
     def test_archived_action_is_not_executed(self) -> None:
         plan = self.end_turn_plan()
         ledger = ExecutionLedger()

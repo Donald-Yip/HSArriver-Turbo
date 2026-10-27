@@ -53,6 +53,8 @@ MulliganResult(
   snapshot_id,
   execution_record,
   journal_record_id,
+  journal_durable,
+  journal_duplicate,
   evidence_ids,
   release_error,
 )
@@ -70,7 +72,9 @@ MulliganResult(
 ## Allowed Files
 
 - `src/hslegend/domain/actions.py`
+- `src/hslegend/application/dto.py`
 - `src/hslegend/application/planning/executor.py`
+- `src/hslegend/application/planning/__init__.py`
 - `src/hslegend/application/use_cases/mulligan.py`
 - `src/hslegend/application/use_cases/__init__.py`
 - `src/hslegend/application/__init__.py`
@@ -95,6 +99,11 @@ MulliganResult(
 - OCR, capture, Win32, Power.log, Web, CLI and MCP modules
 - `.github/**`, `tools/**`, `pyproject.toml`, `uv.lock`
 - Runtime configs, logs, screenshots and coordinates
+
+## Controller Scope Approval
+
+- `src/hslegend/application/dto.py` was explicitly approved by the controller after review: durable journal/release metadata belongs on the immutable record and must not be exposed through mutable executor side channels.
+- Deferred integration hazard: the existing generic `MulliganPlugin` still emits a single generic step. R09 intentionally builds the batch plan in the use case; R14 must reconcile or retire the plugin path before routing mulligan actions through the default registry.
 
 ## Dependencies And Impact
 

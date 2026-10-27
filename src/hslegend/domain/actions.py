@@ -51,10 +51,15 @@ class PlanStep(PrimitiveMixin):
     preconditions: tuple[Condition, ...] = ()
     postconditions: tuple[Condition, ...] = ()
     timeout_seconds: float = 10.0
+    wait_for_change: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.wait_for_change) is not bool:
+            raise TypeError("wait_for_change must be a bool")
         object.__setattr__(self, "preconditions", tuple(self.preconditions))
         object.__setattr__(self, "postconditions", tuple(self.postconditions))
+        if not self.wait_for_change and self.postconditions:
+            raise ValueError("non-waiting step cannot have postconditions")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,12 +76,15 @@ class ActionPlan(PrimitiveMixin):
     postconditions: tuple[Condition, ...] = ()
     timeout_seconds: float = 10.0
     schema_version: int = 1
+    confirmation_required: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.game_generation, int) or isinstance(
             self.game_generation, bool
         ):
             raise TypeError("game_generation must be an int")
+        if type(self.confirmation_required) is not bool:
+            raise TypeError("confirmation_required must be a bool")
         object.__setattr__(self, "steps", tuple(self.steps))
         object.__setattr__(self, "preconditions", tuple(self.preconditions))
         object.__setattr__(self, "postconditions", tuple(self.postconditions))

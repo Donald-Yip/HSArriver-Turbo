@@ -224,12 +224,18 @@ class ExecutionRecord(PrimitiveMixin):
     error_code: str = ""
     elapsed_seconds: float = 0.0
     evidence_ids: tuple[str, ...] = ()
+    journal_record_id: str = ""
+    journal_durable: bool = False
+    journal_duplicate: bool = False
+    journal_evidence_ids: tuple[str, ...] = ()
+    release_error: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ExecutionStatus):
             object.__setattr__(self, "status", ExecutionStatus(self.status))
         object.__setattr__(self, "step_results", tuple(self.step_results))
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
+        object.__setattr__(self, "journal_evidence_ids", tuple(self.journal_evidence_ids))
         object.__setattr__(
             self,
             "elapsed_seconds",

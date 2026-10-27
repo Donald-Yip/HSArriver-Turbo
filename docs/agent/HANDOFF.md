@@ -2,16 +2,18 @@
 
 ## Current Phase
 
-R09 mulligan vertical slice.
+R09 complete; R10 turn-loop planning next.
 
 ## Completed
 
-- R02E final portfolio APPROVED.
-- Default 1,495; discover 1,657; CI opt-in 19; native-live 1; all real tests 1,677.
-- Test gates are deterministic, independently rollbackable, and CI-enforced.
+- R09 mulligan vertical slice independently APPROVED.
+- Focused mulligan/planning/DTO: 47/47.
+- Default: 1,495; discover: 1,675; CI opt-in: 19/19.
+- Architecture 36 files + 16/16 self-test; scope and compile pass.
+- R14 must reconcile the deferred generic MulliganPlugin path before registry cutover.
 
 ## Exact Next Action
 
-1. Read R09 task book and current application ports/use cases.
-2. Implement the minimal mulligan slice with recommendation, validation, confirmation, cancellation, and evidence.
-3. Request independent review before commit.
+1. Fast-forward `develop` to R09.
+2. Create `feature/R10-turn-loop`.
+3. Define the R10 task book and minimal one-turn action loop.

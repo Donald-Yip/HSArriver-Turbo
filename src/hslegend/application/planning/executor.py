@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from hslegend.application.dto import (
     DispatchStatus,
@@ -24,7 +24,7 @@ from hslegend.application.runtime import (
 )
 from hslegend.domain import ActionPlan, GameSnapshot, PostconditionEvaluator
 
-from .ledger import ExecutionLedger, action_key_for_plan
+from .ledger import ExecutionLedger, LedgerError, action_key_for_plan
 from .validator import PlanValidator
 
 
@@ -39,6 +39,18 @@ class _ExecutionOutcome:
     after_snapshot_id: str
     step_results: tuple[str, ...]
     evidence_ids: tuple[str, ...]
+
+
+
+class PlanExecutorError(RuntimeError):
+    """Unexpected executor failure with its eventual gate-release result."""
+
+    def __init__(self, cause: Exception, release_error: str = "") -> None:
+        self.cause = cause
+        self.release_error = release_error
+        detail = str(cause).strip()
+        message = type(cause).__name__ if not detail else f"{type(cause).__name__}: {detail}"
+        super().__init__(message)
 
 
 class PlanExecutor:
@@ -76,6 +88,7 @@ class PlanExecutor:
         session_id: str = "",
         correlation_id: str = "",
         game_id: str = "",
+        evidence_ids: Iterable[str] = (),
     ) -> ExecutionRecord:
         if not isinstance(plan, ActionPlan):
             raise TypeError("plan must be an ActionPlan")
@@ -87,12 +100,15 @@ class PlanExecutor:
         action_key = action_key_for_plan(plan)
         started_at = float(self._clock())
         lease = action_gate.acquire(session_id or "plan-executor", action_key)
+        release_error = ""
+        cause = None
         try:
             attempt = self._ledger.begin(action_key)
             outcome = self._run_attempt(
                 plan,
                 stop_token=stop_token,
                 started_at=started_at,
+                initial_evidence_ids=evidence_ids,
             )
 
             completed = self._ledger.complete(attempt, outcome.status)
@@ -112,10 +128,39 @@ class PlanExecutor:
                 elapsed_seconds=max(0.0, float(self._clock()) - started_at),
                 evidence_ids=outcome.evidence_ids,
             )
-            self._journal.append(record)
-            return record
+            journal_result = self._journal.append(record)
+            journal_record_id = str(getattr(journal_result, "record_id", "") or "")
+            journal_durable = bool(getattr(journal_result, "durable", False))
+            journal_duplicate = bool(getattr(journal_result, "duplicate", False))
+            journal_evidence_ids = tuple(
+                getattr(journal_result, "evidence_ids", ()) or ()
+            )
+        except Exception as exc:
+            cause = exc
         finally:
-            action_gate.release(lease)
+            try:
+                action_gate.release(lease)
+            except Exception as exc:
+                detail = str(exc).strip()
+                release_error = (
+                    type(exc).__name__ if not detail else f"{type(exc).__name__}: {detail}"
+                )
+        if cause is not None:
+            if isinstance(cause, LedgerError):
+                try:
+                    cause.release_error = release_error
+                except Exception:
+                    pass
+                raise cause
+            raise PlanExecutorError(cause, release_error) from cause
+        return replace(
+            record,
+            journal_record_id=journal_record_id,
+            journal_durable=journal_durable,
+            journal_duplicate=journal_duplicate,
+            journal_evidence_ids=journal_evidence_ids,
+            release_error=release_error,
+        )
 
     def _run_attempt(
         self,
@@ -123,8 +168,9 @@ class PlanExecutor:
         *,
         stop_token: StopToken,
         started_at: float,
+        initial_evidence_ids: Iterable[str] = (),
     ) -> _ExecutionOutcome:
-        evidence_ids: list[str] = []
+        evidence_ids: list[str] = list(initial_evidence_ids)
         step_results: list[str] = []
         before_snapshot_id = plan.snapshot_id
         current_snapshot_id = plan.snapshot_id
@@ -201,6 +247,22 @@ class PlanExecutor:
                     ExecutionStatus.REJECTED,
                     validation.reason_code,
                     extra_evidence=validation.details,
+                )
+            if not plan.steps[-1].wait_for_change:
+                step_results.append("plan:confirmation_step_required")
+                return outcome(
+                    ExecutionStatus.FAILED,
+                    "confirmation_step_required",
+                )
+            final_conditions = (
+                *plan.steps[-1].postconditions,
+                *plan.postconditions,
+            )
+            if plan.confirmation_required and not final_conditions:
+                step_results.append("plan:confirmation_postcondition_required")
+                return outcome(
+                    ExecutionStatus.FAILED,
+                    "confirmation_postcondition_required",
                 )
 
             for index, step in enumerate(plan.steps):
@@ -283,6 +345,9 @@ class PlanExecutor:
 
                 if stop_token.is_cancelled():
                     return cancelled_outcome()
+
+                if not step.wait_for_change:
+                    continue
 
                 remaining = remaining_budget()
                 if remaining <= 0.0:
@@ -407,4 +472,4 @@ def _unique(values: Iterable[str]) -> tuple[str, ...]:
     return tuple(result)
 
 
-__all__ = ["PlanExecutor"]
+__all__ = ["PlanExecutor", "PlanExecutorError"]

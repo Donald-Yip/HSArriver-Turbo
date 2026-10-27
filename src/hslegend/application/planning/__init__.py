@@ -7,7 +7,7 @@ from .builder import (
     PlanBuilderError,
 )
 from .contracts import PlanContext, PlanPlugin
-from .executor import PlanExecutor
+from .executor import PlanExecutor, PlanExecutorError
 from .ledger import (
     ArchivedActionError,
     AttemptLimitExceeded,
@@ -45,6 +45,7 @@ __all__ = [
     "PlanBuilderError",
     "PlanContext",
     "PlanExecutor",
+    "PlanExecutorError",
     "PlanPlugin",
     "PlanValidator",
     "PluginConflictError",

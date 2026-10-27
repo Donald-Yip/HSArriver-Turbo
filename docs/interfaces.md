@@ -43,7 +43,7 @@ Stable semantic identity:
 
 ### ActionIntent / ActionPlan
 
-`ActionIntent` describes the semantic intent. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, and timeout. It must not contain coordinates or executable callbacks.
+`ActionIntent` describes the semantic intent. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, timeout, `wait_for_change`, and an optional `confirmation_required` plan flag. A non-waiting step is dispatched sequentially but does not poll for a log revision or evaluate postconditions. The final step must wait; plans with `confirmation_required=True` must also carry a non-empty final step or plan postcondition. Plans must not contain coordinates or executable callbacks.
 
 ### Domain Results
 
@@ -60,7 +60,7 @@ All application DTOs are frozen slots dataclasses, normalize collections to tupl
 - `GameObservation`: `GameSnapshot` plus source confidence; the authoritative revision remains `snapshot.log_revision`.
 - `LobbyState`: normalized lobby phase, observation time, confidence, and evidence ID.
 - `DispatchResult`: `sent`, `rejected`, or `failed`; this is not the overall business result.
-- `ExecutionRecord`: correlation/session/game/intent/plan/action IDs, before/after snapshot IDs, execution status, step results, error code, elapsed time, and evidence IDs.
+- `ExecutionRecord`: correlation/session/game/intent/plan/action IDs, before/after snapshot IDs, execution status, step results, error code, elapsed time, evidence IDs, journal metadata (ID, durable, duplicate, journal evidence), and `release_error`.
 - `JournalAppendResult`: durable journal record ID, durability flag, duplicate flag, and evidence IDs.
 - `OneGameCommand`: command ID, deck ID, mode, and an optional maximum turn count that must be an exact positive `int` when provided.
 - `OneGameResult`: command/session IDs, terminal run status, reason code, game ID, journal record ID, and evidence IDs.
@@ -189,8 +189,15 @@ in-flight `NOT_EXECUTED` attempt rejects another `begin()` with
 `PlanExecutor` acquires one `ActionGate` lease, reads the current
 `GameStateSourcePort` observation, validates plan structure and each step's
 preconditions against the current snapshot, dispatches each approved step
-through `ActionDispatchPort`, waits for a later `log_revision`, and evaluates
-step/plan postconditions with the domain `PostconditionEvaluator`.
+through `ActionDispatchPort`, and waits for a later `log_revision` only after a
+step with `wait_for_change=True`. Non-waiting steps dispatch sequentially and
+cannot carry postconditions. The final step must be a waiting step; a plan whose
+final step is non-waiting fails closed with `confirmation_step_required`. When
+`confirmation_required=True`, a non-empty final step/plan postcondition is
+mandatory and missing confirmation fails with
+`confirmation_postcondition_required`. Waiting steps evaluate their
+postconditions, and the final waiting step also evaluates plan-level
+postconditions, with the domain `PostconditionEvaluator`.
 `plan.timeout_seconds` is a total execution budget measured by the injected
 monotonic clock; each wait and dispatch receives the remaining plan budget, and
 waits are clamped to the smaller of the step timeout and remaining plan budget.
@@ -200,8 +207,10 @@ including confirmed, unconfirmed, rejected, failed, and cancelled outcomes. The
 `ActionGate` lease is acquired before `ExecutionLedger.begin()` and is held
 through ledger completion, record construction, and the journal append; release
 happens only in the outer `finally`. The ledger is completed exactly once before
-journaling; a journal exception propagates unchanged and does not trigger a
-second completion. StopToken and remaining plan budget are checked after step
+journaling. Unexpected executor failures are wrapped as `PlanExecutorError`
+with the eventual release result; ledger exceptions retain their domain type and
+receive a `release_error` attribute. A failure does not trigger a second ledger
+completion. StopToken and remaining plan budget are checked after step
 validation and immediately before dispatch. Cancellation before any dispatch
 records `cancelled`; any exception, postcondition failure, timeout, or
 cancellation after dispatch records `executed_unconfirmed` with the original
@@ -243,6 +252,34 @@ immediately after a sent `start_match`; the use case does not claim an observed
 `bootstrap.build_container(lobby, dispatch, ...)` is a composition helper that
 constructs this use case from injected adapters and optional runtime controls. It
 does not import or construct legacy root-module adapters.
+
+### MulliganUseCase
+
+`MulliganUseCase` consumes one `RecommendationObservation` for the current
+snapshot, validates it against a fresh `GameSnapshot`, builds one pinned
+`ActionPlan`, and executes it through the injected `PlanExecutor` and
+`ExecutionLedger`. `MulliganCommand(command_id, timeout_seconds)` and
+`MulliganResult(...)` are immutable; selected indexes are sorted unique
+zero-based hand indexes.
+
+Instruction parsing is exact and deterministic: replacement lines match
+`替换N号位卡牌`, while `保留全部卡牌` selects no cards. Legacy bounds are
+preserved: a three-card hand exposes slots 1-3 and a five-card hand exposes slots
+1-4. Unknown/empty/mixed instructions, an unsupported hand size, an
+out-of-range slot, a missing `mulligan`/`mulligan_choice` choice surface, wrong
+recommendation mode, a recommendation tied to another snapshot, or a snapshot
+that changes during validation is rejected before any dispatch.
+
+Replacement steps carry the exact hand `EntityRef` and use
+`wait_for_change=False`; the final confirm step uses `wait_for_change=True` with
+a `snapshot_changed` postcondition. Keep-all dispatches only confirm. The use
+case maps executor outcomes to `completed`, `executed_unconfirmed`, `rejected`,
+`failed`, `cancelled`, or `gate_busy`. An `executed_unconfirmed` outcome is
+terminal and is never replayed automatically; the ledger blocks an immediate
+second execution unless a caller explicitly authorizes retry outside this use
+case. The journal record includes the recommendation evidence plus dispatch and
+snapshot evidence. `bootstrap.build_mulligan_use_case(...)` wires the service
+from injected ports without importing legacy modules.
 
 ## External Adapter Contracts
 

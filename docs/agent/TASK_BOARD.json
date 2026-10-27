@@ -287,9 +287,9 @@
     },
     {
       "id": "R09",
-      "status": "in_progress",
-      "owner": "implementer",
-      "review_round": 0,
+      "status": "done",
+      "owner": "controller",
+      "review_round": 2,
       "branch": "feature/R09-mulligan",
       "depends_on": [
         "R02E"
@@ -300,7 +300,7 @@
       "base_sha": "9c7746d",
       "head_sha": null,
       "blockers": [],
-      "last_verified_command": null
+      "last_verified_command": "R09 approved: focused 47; headless 1495; discover 1675; opt-in 19; architecture/scope pass"
     },
     {
       "id": "R10",

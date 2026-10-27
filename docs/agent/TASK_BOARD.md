@@ -21,7 +21,7 @@ Updated: 2026-10-27
 | R08 | done | feature/R08-enter-battle | R07 | Enter-battle slice approved |
 | R02D | done | feature/R02D-test-portfolio | R08 | Test portfolio audit committed |
 | R02E | done | feature/R02E-test-cleanup | R02D | Final portfolio approved and committed |
-| R09 | in_progress | feature/R09-mulligan | R02E | Mulligan vertical slice |
+| R09 | done | feature/R09-mulligan | R02E | Mulligan slice approved |
 | R10 | planned | feature/R10-turn-loop | R09 | Turn loop and reconciliation |
 | R11 | planned | feature/R11-settlement-stop | R10 | Settlement and stop |
 | R12 | planned | feature/R12-one-game-cli | R11 | CLI and fake full game |
