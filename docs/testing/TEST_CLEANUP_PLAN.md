@@ -50,9 +50,9 @@
 | B1 | 1,523 | 1,686 | 3 | 0 | 删除 2 个 top-level 方法 |
 | B2 | 1,523 | 1,685 | 3 | 0 | 合并 1 个 application 方法，只减少 discover |
 | B5 | 1,523 | 1,685 | 3 | 0 | 原位改写，不改变方法数 |
-| B9 | 1,522 | 1,684 | 4 | 0 | O12 从 top-level 移入 CI opt-in |
-| B8 | 1,514 | 1,676 | 13 | 0 | 9 个环境方法移入 CI opt-in，新增 1 个静态默认方法 |
-| B7 | 1,511 | 1,673 | 16 | 1 | 3 个移入 CI opt-in，O01 移入 native-live；新增 1 个静态默认方法 |
+| B9 | 1,523 | 1,685 | 4 | 0 | O12 移入 CI opt-in；新增 1 个 import-free runner-contract 方法 |
+| B8 | 1,515 | 1,677 | 13 | 0 | 9 个环境方法移入 CI opt-in，新增 1 个静态默认方法 |
+| B7 | 1,511 | 1,673 | 16 | 1 | 3 个移入 CI opt-in，O01 移入 native-live；不新增源码结构替代测试 |
 | B6 | 1,511 | 1,673 | 16 | 1 | 2 个 adapter 方法原位改写 |
 | B4 | 1,507 | 1,669 | 16 | 1 | 5 个 top-level 方法合并为 1 个默认场景 |
 | B3 | 1,495 | 1,657 | 19 | 1 | 12 个 top-level 方法由 3 个 CI opt-in JS 方法取代 |
@@ -142,7 +142,7 @@ revert B2 commit；原断言可原样恢复。
 
 **替换 / 等效门**
 
-1. 新建 `tests/native/test_web_ui_behaviors.py`，固定 3 个 opt-in Node DOM 行为方法：
+1. 新建 `tests/opt_in/test_web_ui_behaviors.py`，固定 3 个 CI opt-in Node DOM 行为方法：
    - selfcheck collapse 默认值、切换、记忆、失败展开；
    - settings controls 的提交、状态回填和非法值；
    - overlay/version 状态文案、按钮可用性和占位符。
@@ -270,10 +270,10 @@ revert B6 commit；不要用放宽 timeout 的方式“修复”不稳定。
 
 **替换 / 等效门**
 
-- 把 O01 移到 native live-window smoke；默认保留固定 reader/cache mapping 测试。
-- 把 O02/O03 移到 native MCP stdio integration；在 `tests/test_mcp_server.py` 增加 1 个静态 tool-name/schema 默认方法，不启动子进程。
-- 把 O13 移到 Windows native/CI gate；默认保留项目 `_ControlServer` 的端口独占测试。
-- 更新 `tools/run_headless_tests.py::OPT_IN_MODULES`，required skip 继续 failure。
+- 把 O01 移到 `tests/native_live/test_display_mapping_live.py`；默认保留固定 reader/cache mapping 测试。
+- 把 O02/O03 移到 `tests/opt_in/test_mcp_server.py`；由必需 CI opt-in 的真实 stdio smoke 作为等价门，不增加源码结构测试。
+- 把 O13 移到 `tests/opt_in/test_windows_port_semantics.py`；默认保留项目 `_ControlServer` 的端口独占测试。
+- `tools/run_headless_tests.py` 按目录清单发现 gate 模块；required skip 继续 failure。
 
 **Risk**
 
@@ -287,7 +287,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py --opt-in
 uv run python -m unittest discover -s tests -t .
 ```
 
-Expected：默认移除 4 个旧方法、增加 1 个静态 schema 方法，累计 default `1,514 -> 1,511`、discover `1,676 -> 1,673`；CI opt-in 增加 3 个方法，累计 `13 -> 16`；native-live 增加 O01，累计 `0 -> 1`。required skip=failure。
+Expected：默认移除 4 个旧方法、增加 0 个源码结构方法，累计 default `1,515 -> 1,511`、discover `1,677 -> 1,673`；CI opt-in 增加 3 个方法，累计 `13 -> 16`；native-live 增加 O01，累计 `0 -> 1`。required skip=failure。
 
 **Rollback**
 
@@ -303,7 +303,7 @@ revert B7 commit，恢复原模块和 opt-in manifest；不要留下重复模块
 
 **替换 / 等效门**
 
-- 新 `tests/tooling/test_environment.py`（或等价）承接已安装版本、解释器、runtime imports、真实 selfcheck。
+- 新 `tests/opt_in/test_environment.py` 承接已安装版本、解释器、runtime imports、真实 selfcheck。
 - 在 `tests/test_uv_environment.py` 增加 1 个纯静态 manifest parity 默认方法，不 import 重依赖。
 - CI/tooling job 必须显式运行新模块；缺依赖/解释器时 failure，不静默 skip。
 - 不删除 `RunChecksTests`、`DependencyManifestTests`、`DependencyItemTests` 等 fake/静态行为门。

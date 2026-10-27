@@ -37,3 +37,11 @@ Ruling: R05 may modify `window_tracker.py` only for deterministic shutdown clean
 - Decision: cleanup count gates must report `default`, `discover`, and `opt-in` separately.
 - Reason: `tests/application`, `tests/domain`, `tests/adapters`, and `tests/plugins` are not collected by the default top-level headless runner.
 - Consequence: B2 reduces `discover` but not `default`; corrected final targets are default 1,495, discover 1,657, opt-in 20.
+
+## 2026-10-27 R02E Gate Structure And Rollback
+
+- Decision: deterministic integration modules live under `tests/opt_in`; real-window modules live under `tests/native_live`.
+- Decision: default contracts inspect gate manifests by filename only and never import opt-in modules.
+- Decision: O12 requires Git exit code exactly 1; fatal repository errors fail closed.
+- Decision: MCP uses the real stdio smoke as its gate; no static source-structure replacement is added.
+- Decision: B9, B8, and B7 must each reverse-apply cleanly from final HEAD.

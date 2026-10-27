@@ -79,6 +79,14 @@ Verification:
 - Three consecutive focused runs: `OK`; independent review APPROVED.
 - Adapter tests are discoverable-only; default headless method count is unchanged.
 
+## Stage 2B Implementation
+
+- B9 `cf83d1f`: import-free gate manifests, `tests/opt_in`/`tests/native_live`, and exact O12 exit-code validation.
+- B8 `a19745e`: environment checks moved to CI opt-in; static manifest parity retained.
+- B7 `a3eca78`: live-window check moved to native-live; MCP and Windows semantics moved to CI opt-in.
+- B9/B8/B7 reverse patch checks each exit `0`, proving independent rollback from final HEAD.
+- Current verified boundaries: default 1,511; discover 1,673; CI opt-in 16; native-live 1.
+
 ## Known Risks
 
 - R06 now imports frame helpers from another test module. This is test-only coupling; a later helper move may reduce it.

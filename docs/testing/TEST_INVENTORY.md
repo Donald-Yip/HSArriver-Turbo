@@ -250,3 +250,13 @@ UnicodeDecodeError: 'gbk' codec can't decode byte 0x94 in position 8: illegal mu
 - Timeout is asserted by `TimeoutError`; after release they locate the actual deadline worker and join it.
 - Removed `time.sleep` upper-bound timing assertions.
 - Method counts remain default 1,523, discover 1,685, opt-in 3.
+
+## R02E Execution Summary
+
+- Stage 1 B1/B2/B5: independently APPROVED.
+- Stage 2A B6: independently APPROVED.
+- Stage 2B B9/B8/B7: implemented, pending independent review.
+- Current boundaries: default 1,511; discover 1,673; CI opt-in 16; native-live 1.
+- B9 established non-package `tests/opt_in` and `tests/native_live` directories and import-free manifests.
+- B8 moved installed-environment checks to CI opt-in while retaining static manifest parity in default.
+- B7 moved live-window mapping to native-live and MCP/Windows semantics to required CI opt-in.

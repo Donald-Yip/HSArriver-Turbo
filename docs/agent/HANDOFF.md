@@ -2,28 +2,30 @@
 
 ## Current Phase
 
-R02E stage 2B: B9/B8/B7 environment test isolation.
+R02E stage 2B independent review.
 
 ## Current Task
 
-R02E (`in_progress`)
+R02E (`ready_for_review`)
 
-## Approved
+## Implemented
 
-- Stage 1 B1/B2/B5.
-- Stage 2A B6, final commit `1ebd8fc`.
+- B9 `cf83d1f`: explicit `tests/opt_in`/`tests/native_live` gate directories, import-free manifests, O12 exact exit code.
+- B8 `a19745e`: environment checks moved to CI opt-in; static manifest parity retained.
+- B7 `a3eca78`: live-window, MCP, and Windows checks moved to their correct explicit gates.
 
-## Stage 2B Targets
+## Verified
 
-- B9: O12 to CI opt-in tooling.
-- B8: O04-O11/O14 to CI opt-in tooling; one static manifest default method.
-- B7: O02/O03/O13 to CI opt-in; O01 to native-live; one static MCP schema default method.
-- intermediate/final default 1,511, discover 1,673, CI opt-in 16, native-live 1.
-- live-window test is never part of ordinary CI.
+- default: 1,511 tests, all pass.
+- discover: 1,673 tests, all pass.
+- CI opt-in: 16/16 pass.
+- native-live: 1 test; missing window is a failure.
+- B9/B8/B7 each reverse-apply cleanly from final HEAD.
+- Default manifest test is import-free and launches no subprocess.
 
 ## Exact Next Action
 
-1. Implement B9 and test the split runner modes.
-2. Implement B8, retaining static manifest coverage.
-3. Implement B7, retaining static MCP schema and separate native-live smoke.
-4. Run full gates and request independent stage 2B review.
+1. Independent reviewer validates Stage 2B.
+2. Fix findings.
+3. Record approval.
+4. Continue to B4/B3.
