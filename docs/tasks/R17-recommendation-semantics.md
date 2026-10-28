@@ -92,3 +92,13 @@ text and did not retry with enhanced image preprocessing. The follow-up keeps th
 selection-screen rank contract, preserves raw OCR evidence, retries grayscale and
 binary variants, and clarifies that calibration happens on the deck-selection
 screen rather than the result screen.
+
+## Follow-up: No Per-Recommendation Circuit Breaker
+
+Field behavior showed that long opponent end-turn animations can leave a stale
+recommendation visible after control returns. The former ten-failure circuit
+breaker could then suppress all retries for that turn. The same-recommendation
+failure counter and `recommendation_stuck` observation state are removed.
+Failures always remain `RETRY`; raw OCR evidence remains deduplicated per
+unreadable episode. Turn-level deadlines, stop controls, and Hearthstone
+liveness checks remain the only mechanisms that can end the loop.

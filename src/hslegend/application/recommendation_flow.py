@@ -14,11 +14,6 @@ from hslegend.application.consumed_actions import ConsumedActionStore
 _UNSET_TURN = object()
 
 
-# 同一条推荐连续失败这么多次就熔断：不再反复点同一条，打一条带失败码的
-# 警告后只观察（等盒子/回合变化再继续）。以前是无限重试，线上反馈的“卡住”
-# 就是一条读不懂/点不动的推荐被重试到烧绳。
-SAME_RECOMMENDATION_RETRY_LIMIT = 10
-
 
 def _accepts_action_kind(hook) -> bool:
     """挂点是否接受 action_kind 参数（老挂点只接受 0 个参数）。
@@ -64,8 +59,7 @@ class RecommendationFlow:
                  consumed=None, post_action_delay=0.0,
                  post_action_pause=None,
                  hand_animation_delay=None,
-                 draw_extra_delay_per_card=0.0,
-                 same_recommendation_retry_limit=None, warn=None):
+                 draw_extra_delay_per_card=0.0):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -73,7 +67,6 @@ class RecommendationFlow:
         self.adapter = adapter
         self.validator = validator
         self.controller = controller
-        self.warn = warn or print
         self.sleep = sleep
         self.clock = clock
         # Kept for constructor compatibility; result verification no longer
@@ -109,96 +102,23 @@ class RecommendationFlow:
         self.waiting_panel_hash = None
         self.waiting_turn_number = None
         self.waiting_action_kind = None
-        # 同一条推荐连续失败计数：连续失败达到上限就熔断（见 _retry）。
-        self.same_recommendation_retry_limit = (
-            SAME_RECOMMENDATION_RETRY_LIMIT
-            if same_recommendation_retry_limit is None
-            else max(1, int(same_recommendation_retry_limit)))
-        self._retry_signature = None
-        self._retry_count = 0
-        self._stuck_signature = None
-        # 当前这一步的“推荐指纹”，失败时用来判断是不是同一条推荐。
-        self._step_signature = None
-        self._step_turn = None
-        self._step_parse_failed = False
         # 最近一次已经打到日志里的 OCR 原文：同一段原文只留一次，
         # 重试几十次时不再刷屏（见 _log_ocr_raw）。
         self._last_logged_ocr_text = None
 
-    # -------------------------------------------------- 熔断：同一条推荐反复失败
-    def _note_step_recommendation(self, proposed):
-        """记下这一步“是哪条推荐”：动作 + 目标 + 回合（回合变了重新计数）。"""
-        self._step_signature = (
-            "rec",
-            self._step_turn,
-            str(getattr(proposed, "normalized_instruction", "") or ""),
-            repr(getattr(proposed, "target", None)),
-        )
-        # 面板重新读通 = 上一段“读不懂”的插曲结束：允许下一段插曲再留一次
-        # 原文（否则同一段原文会在之后的反馈里被去重掉、raw 又变空的）。
+    def _note_readable_recommendation(self):
+        """A readable recommendation starts a new raw-evidence episode."""
         self._last_logged_ocr_text = None
 
-    def _clear_retry_tracking(self):
-        self._retry_signature = None
-        self._retry_count = 0
-        self._stuck_signature = None
+    @staticmethod
+    def _retry(code):
+        """Keep retrying until the next read becomes executable.
 
-    def _is_stuck_recommendation(self):
-        """当前这条推荐已经熔断过了吗（是就别再点）。"""
-        return (self._stuck_signature is not None
-                and self._step_signature == self._stuck_signature)
-
-    def _retry(self, code):
-        """一次失败：同一条推荐连续失败到上限就熔断，只观察不再重复点。
-
-        熔断后返回 OBSERVE（不是 RETRY），上层就不再执行同一条推荐；等盒子
-        推荐文本或回合变化后自动恢复（指纹变了计数清零）。熔断那一刻打一条
-        带失败码的 WARN，方便下一条反馈直接定位是哪一行读不懂。
+        Turn-transition animations can leave a stale recommendation visible for
+        many seconds.  Failure counts are therefore not interpreted as a stuck
+        recommendation and never suppress later retries.
         """
-        signature = self._step_signature
-        if signature is None:
-            if self._step_parse_failed:
-                # 解析失败时拿不到 ProposedAction，按「回合」累计“读不懂面板”。
-                # 不把失败码算进指纹：面板闪烁时失败码会在
-                # unsupported_spell_target / ambiguous_actions 之间跳，每跳一次
-                # 就清零的话熔断永远触发不了（2026-10-27 反馈连试 82 次、43 秒）。
-                # 也不能拿 OCR 原文当指纹：OCR 在「已方/己方」上抖一下就会清零。
-                signature = ("parse", self._step_turn)
-            else:
-                # 读推荐本身失败（面板读不稳/状态取不到）：按失败码区分。
-                signature = ("fail", self._step_turn, str(code))
-        if signature != self._retry_signature:
-            self._retry_signature = signature
-            self._retry_count = 0
-            self._stuck_signature = None
-        self._retry_count += 1
-        if self._retry_count >= self.same_recommendation_retry_limit:
-            if self._stuck_signature != signature:
-                self._stuck_signature = signature
-                self._warn_stuck(code)
-            return FlowStepResult(FlowStepStatus.OBSERVE,
-                                  "recommendation_stuck")
         return FlowStepResult(FlowStepStatus.RETRY, code)
-
-    def _warn_stuck(self, code):
-        """熔断告警（只打一次）：回合、失败次数、失败码、推荐指令。
-
-        OCR 原文由 `_log_ocr_raw` 单独留痕（`[推荐] 原文：` 前缀才会被
-        battle_record 归到 recommendation_raw、进反馈包的 raw 字段），
-        这里不再重复打，也不带 `[推荐]` 前缀，避免被当成一条新推荐指令。
-        """
-        instruction = ""
-        if self._step_signature and len(self._step_signature) > 2:
-            instruction = str(self._step_signature[2] or "")
-        message = (f"回合 {self._step_turn} 同一条推荐连续失败 "
-                   f"{self._retry_count} 次（{code}），本回合不再重试、"
-                   f"只等盒子/回合变化")
-        if instruction:
-            message += f"；推荐：{instruction}"
-        try:
-            self.warn(message)
-        except Exception:
-            pass
 
     def _log_ocr_raw(self, text):
         """把这一次读到的盒子面板原文留痕（失败时用）。
@@ -210,7 +130,7 @@ class RecommendationFlow:
         `"raw": []` 就是这么来的）。
 
         同一段原文只打一次：面板没变时会连续重试几十次，重复打印只会刷屏。
-        面板重新读通（`_note_step_recommendation`）后清零，下一次“读不懂”
+        面板重新读通（`_note_readable_recommendation`）后清零，下一次“读不懂”
         插曲还会各自留一份，新的反馈包仍然有原文。每种预处理/抖动后的新
         文本也各自留一次，最多 12 行。
         """
@@ -229,20 +149,14 @@ class RecommendationFlow:
                 break
 
     def run_player_turn_step(self):
-        # 每一步都重建“这条推荐是谁”的指纹；失败时 _retry 用它判断是不是同一条。
-        self._step_signature = None
-        self._step_turn = None
-        self._step_parse_failed = False
         try:
             state, revision = self.state_supplier()
-            self._step_turn = getattr(state, "game_num_turns_in_play", None)
             self.hand_animation_delay.observe(
                 getattr(state, "hand_entry_count", 0))
             # 回合开始的常规抽 1 张不算；这里处理“抽了 2 张以上”和上一步动作
             # 触发、日志晚几拍才写出来的抽牌。
             self._account_hand_entries(state)
             if not state.is_my_turn:
-                self._clear_retry_tracking()
                 return FlowStepResult(FlowStepStatus.OBSERVE, "opponent_turn")
             if (self.waiting_turn_number is not None
                     and self.waiting_turn_number
@@ -264,18 +178,12 @@ class RecommendationFlow:
                 # 解析失败也把 OCR 原文留痕（[推荐] 原文： → 进反馈包的 raw）。
                 # 2026-10-24「目标是已方2号位」、2026-10-27「目标是已方1号位」
                 # 都是靠这段原文才定位到 OCR 把「己」认成「已」的。
-                self._step_parse_failed = True
                 self._log_ocr_raw(getattr(evidence, "normalized_text", ""))
                 raise
             # 先留痕再适配：适配抛错时也要能看到"盒子到底写了什么"。线上出现过
             # 连续 3090 次 choose_one_name_not_unique 却一条原文都没留下的情况，
             # 就是因为这行原来打在适配之后。
-            self._note_step_recommendation(proposed)
-            if self._is_stuck_recommendation():
-                # 熔断过的那条又出现了：这次一下都不点，等盒子/回合变化。
-                # （以前熔断只把状态改成 OBSERVE，但每次还会重新执行一遍。）
-                return FlowStepResult(
-                    FlowStepStatus.OBSERVE, "recommendation_stuck")
+            self._note_readable_recommendation()
             print(f"[推荐] {proposed.normalized_instruction}")
             raw_text = getattr(proposed, "raw_instruction", "") or ""
             if raw_text and raw_text != proposed.normalized_instruction:
@@ -283,7 +191,6 @@ class RecommendationFlow:
                     if line.strip():
                         print(f"[推荐] 原文：{line.strip()}")
             if proposed.action == ActionKind.MULLIGAN:
-                self._clear_retry_tracking()
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "stale_mulligan_recommendation")
@@ -344,7 +251,6 @@ class RecommendationFlow:
                 fresh_state, fresh_revision)
             if verified == ResultStatus.COMPLETED:
                 self.consumed.mark_consumed(key)
-                self._clear_retry_tracking()
                 return FlowStepResult(FlowStepStatus.EXECUTED)
             if verified == ResultStatus.WAITING_RECOMMENDATION:
                 # A discover click is not complete while Power.log still
@@ -357,7 +263,6 @@ class RecommendationFlow:
                 self.waiting_panel_hash = current_frame.perceptual_hash
                 self.waiting_turn_number = proposed.turn_number
                 self.waiting_action_kind = proposed.action
-                self._clear_retry_tracking()
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "waiting_recommendation_update")

@@ -379,7 +379,6 @@ def initialize_recommendation_automation():
             recommendation_config.draw_extra_delay_per_card_seconds),
         post_action_pause=_human_like_post_action_pause,
         stopped=shutdown_event.is_set,
-        warn=warn_print,
     )
 
 
@@ -2386,9 +2385,6 @@ def run_automatic_battle_step():
             "opponent_turn": "等待对手操作。",
             "waiting_recommendation_update": "等待盒子更新推荐。",
             "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
-            "recommendation_stuck": (
-                "同一条推荐连续失败，已熔断：本回合不再重复点，只等盒子/"
-                "回合变化（日志里有失败码和 OCR 原文）。"),
         }
         message = observe_messages.get(
             result.diagnostics,

@@ -52,8 +52,9 @@ adapter at startup.
 
 Application recommendation contracts are `AdaptedAction`,
 `RecommendationContext`, `RecommendationAdapterPort`, and `CardSemanticsPort`.
-The application flow owns retry/circuit-breaker/evidence progression and may
-only depend on injected ports. The adapter layer owns `cards.json` loading,
+The application flow owns retry/evidence progression and may only depend on
+injected ports. Recommendation failures always remain retryable; turn deadlines,
+explicit stop controls, and liveness checks are the only loop terminators. The adapter layer owns `cards.json` loading,
 rule-pack validation, recommendation parsing, recommendation adaptation, OCR
 evidence DTOs, and legacy click-action DTOs. Root modules under `src/game_state`
 and `src/parser` are compatibility facades only.
