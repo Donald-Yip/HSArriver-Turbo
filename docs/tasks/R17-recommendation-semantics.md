@@ -102,3 +102,12 @@ failure counter and `recommendation_stuck` observation state are removed.
 Failures always remain `RETRY`; raw OCR evidence remains deduplicated per
 unreadable episode. Turn-level deadlines, stop controls, and Hearthstone
 liveness checks remain the only mechanisms that can end the loop.
+
+## Follow-up: Attack Target Name Recovery
+
+A 2026-10-29 failure bundle showed a valid attack recommendation where OCR
+retained `操作5号位随从攻击`, the source card name, and the target name
+`萨格拉斯`, but dropped the middle `目标是对方英雄` line. The parser now keeps
+the trailing target name when at least source and target names are present.
+The adapter resolves it only when exactly one enemy hero/minion name matches;
+zero or multiple matches still fail closed.

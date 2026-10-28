@@ -21,7 +21,7 @@ from hslegend.adapters.legacy.card_queries import (
     skill_index,
     skill_panel,
 )
-from hslegend.domain import ActionKind
+from hslegend.domain import ActionKind, normalize_card_name
 
 
 class RecommendationStateError(ValueError):
@@ -912,8 +912,29 @@ def _adapt_attack(proposed, state):
         source_target = Target(
             "friendly", "minion", source.collection_index, source_id)
     if proposed.target is None:
-        raise RecommendationStateError("attack_target_required")
-    if proposed.target.kind == "hero":
+        # HSAng can drop only the ``目标是对方英雄`` line while retaining the
+        # trailing entity name. Bind by name only when exactly one enemy entity
+        # matches, otherwise refuse instead of clicking a guess.
+        wanted = normalize_card_name(getattr(proposed, "target_name", None))
+        matches = []
+        if wanted:
+            hero = getattr(state, "oppo_hero", None)
+            if hero is not None and normalize_card_name(
+                    getattr(hero, "name", None)) == wanted:
+                matches.append(("hero", hero, None))
+            for entry in ordered_board(state, "enemy"):
+                if entry.kind == "minion" and normalize_card_name(
+                        getattr(entry.entity, "name", None)) == wanted:
+                    matches.append(("minion", entry.entity,
+                                    entry.collection_index))
+        if not matches:
+            raise RecommendationStateError("attack_target_required")
+        if len(matches) > 1:
+            raise RecommendationStateError("attack_target_ambiguous")
+        kind, entity, collection_index = matches[0]
+        target_id = getattr(entity, "entity_id", None)
+        manual_target = Target("enemy", kind, collection_index, target_id)
+    elif proposed.target.kind == "hero":
         hero = getattr(state, "oppo_hero", None)
         if hero is None:
             raise RecommendationStateError("enemy_hero_missing")

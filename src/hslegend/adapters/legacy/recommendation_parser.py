@@ -256,19 +256,29 @@ class RecommendationParser:
             targets = [match for match in targets if match]
             targets.extend(
                 line for line in lines if line in self._enemy_hero_targets)
-            if len(targets) > 1 or (not targets and hero_attack):
+            if len(targets) > 1:
                 raise RecommendationParseError("attack_target_required")
             source = (SlotRef("board_slot", "friendly", int(attack.group(1)))
                       if attack else SlotRef("hero", "friendly"))
             target = None
+            target_name = None
             if targets:
                 target = (SlotRef("hero", "enemy")
                           if targets[0] in self._enemy_hero_targets
                           else SlotRef("board_slot", "enemy",
                                        int(targets[0].group(1))))
+            else:
+                # OCR sometimes drops only the ``目标是对方英雄`` line while
+                # retaining the source and target card names.  The adapter can
+                # safely bind the last name only when it uniquely matches an
+                # enemy entity; keep it separate from a parsed SlotRef.
+                target_name = self._trailing_name_after_action(
+                    self._reference_a_lines(ocr.normalized_text), primary)
+                if target_name is None and hero_attack:
+                    raise RecommendationParseError("attack_target_required")
             return self._build(
                 ocr, turn_number, log_revision, ActionKind.ATTACK,
-                source=source, target=target)
+                source=source, target=target, target_name=target_name)
 
         location = self._location.fullmatch(primary)
         if location:
@@ -380,6 +390,37 @@ class RecommendationParser:
         if ref.owner == "enemy":
             return f"目标是对方{ref.index}号位"
         return f"目标是我方{ref.index}号位"
+
+
+    @classmethod
+    def _trailing_name_after_action(cls, raw_lines, anchor):
+        """Return the final non-metadata line after an action, if unambiguous.
+
+        HSAng may drop the target-slot line while keeping the source card name
+        and the target card name.  Requiring at least two retained names keeps
+        the fallback from mistaking a lone source card name for a target.
+        """
+        try:
+            start = raw_lines.index(anchor) + 1
+        except ValueError:
+            return None
+        parser = cls()
+        names = []
+        for candidate in raw_lines[start:]:
+            if (
+                not candidate
+                or "目标" in candidate
+                or candidate.startswith("放置于")
+                or candidate == "选择卡牌"
+                or parser._is_action_line(candidate)
+                or parser._select_target.fullmatch(candidate)
+                or candidate in cls._reference_a_headers
+                or candidate in cls._reference_b_headers
+                or "记牌器" in candidate
+            ):
+                continue
+            names.append(candidate)
+        return names[-1] if len(names) >= 2 else None
 
     @staticmethod
     def _line_after(raw_lines, anchor):
