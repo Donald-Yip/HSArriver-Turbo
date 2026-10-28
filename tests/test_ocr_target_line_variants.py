@@ -140,5 +140,72 @@ class OcrTargetVariantAdapterTests(unittest.TestCase):
         self.assertEqual("301", action.target.entity_id)
 
 
+class RealFeedback20261027Tests(unittest.TestCase):
+    """2026-10-27 反馈（反馈方跑的是 v2026.10.18 旧包）：法术打自己 1 号位。
+
+    面板原文（反馈截图）：打法参考A / 打出1号位法术 / 漂浮教程 /
+    目标是己方1号位 / 暮光龙卵。用工程自带的 PaddleOCR 复跑同机截图，
+    这一行会被读成「目标是**已**方1号位」；旧包的正则只认「己方|我方」，
+    于是「有目标行但匹配不到」→ `unsupported_spell_target` 连试 82 次、
+    43 秒（2026-10-24 修过同源的「目标是已方2号位」）。
+    这里按 OCR 真实读法锁住：能解析、能绑到手牌 1 与场面 1 号位随从。
+    """
+
+    PANEL = [
+        "网易炉石传说盒子", "对手记牌器", "推荐打法", "Beta",
+        "打法参考A", "打出1号位法术", "漂浮教程", "目标是已方1号位",
+        "暮光龙卵",
+    ]
+    SPELL_CARD_ID = "BE_094"      # 漂浮教程
+    TARGET_CARD_ID = "CATA_210"   # 暮光龙卵
+
+    @classmethod
+    def _state(cls):
+        return SimpleNamespace(
+            game_num_turns_in_play=10,
+            is_my_turn=True,
+            my_player_id="1",
+            discover_choice_count=None,
+            discover_choice_pending=False,
+            general_choice_cards={},
+            general_choice_entity_ids={},
+            power_options={},
+            my_hand_cards=[
+                SimpleNamespace(entity_id="100", card_id=cls.SPELL_CARD_ID,
+                                cardtype="SPELL", name="漂浮教程"),
+            ],
+            my_minions=[
+                minion("300", 1, cls.TARGET_CARD_ID, name="暮光龙卵"),
+                minion("301", 2, name="二号"),
+            ],
+            my_locations=[],
+            oppo_locations=[],
+            oppo_minions=[minion("200", 1, name="敌方一号")],
+            my_hero=SimpleNamespace(entity_id="hero"),
+            oppo_hero=SimpleNamespace(entity_id="enemy-hero"),
+        )
+
+    def test_misread_target_line_is_still_parsed(self):
+        proposed = parse(self.PANEL)
+
+        self.assertEqual(ActionKind.PLAY_CARD, proposed.action)
+        self.assertEqual("SPELL", proposed.card_type)
+        self.assertEqual(1, proposed.source.index)
+        self.assertEqual("friendly", proposed.target.owner)
+        self.assertEqual("board_slot", proposed.target.kind)
+        self.assertEqual(1, proposed.target.index)
+
+    def test_adapter_binds_hand_card_and_friendly_minion(self):
+        adapted = adapt_action(parse(self.PANEL), self._state())
+        action = adapted.manual_action
+
+        self.assertEqual(0, action.hand_index)
+        self.assertEqual(self.SPELL_CARD_ID, action.card_id)
+        self.assertEqual("friendly", action.target.side)
+        self.assertEqual("minion", action.target.kind)
+        self.assertEqual(0, action.target.index)
+        self.assertEqual("300", action.target.entity_id)
+
+
 if __name__ == "__main__":
     unittest.main()

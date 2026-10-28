@@ -237,6 +237,20 @@ class RecommendationParser:
 
         attack = self._minion_attack.fullmatch(primary)
         hero_attack = self._hero_attack.fullmatch(primary)
+        if attack and any(line == "选择卡牌" for line in lines):
+            # 古神（以及同一套面板的泰坦）把「发动技能」写成和攻击一样的一行，
+            # 只多出「选择卡牌 + 技能名」：点随从 → 选一个技能 → 有的技能还要
+            # 再点一个目标（克苏恩的凝视：对一个敌方随从造成伤害）。
+            # 盒子不给技能号位，号位由 choose_skill 的记录表按技能名反查；
+            # 认不出名字就抛错重试，一下都不点（见适配层）。
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_ability_target")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.USE_ABILITY,
+                source=SlotRef("board_slot", "friendly",
+                               int(attack.group(1))),
+                target=target,
+                choice_error="ability_name_required")
         if attack or hero_attack:
             targets = [self._target.fullmatch(line) for line in lines]
             targets = [match for match in targets if match]
@@ -415,7 +429,8 @@ class RecommendationParser:
             raise RecommendationParseError("targeted_action_unsupported")
 
     @staticmethod
-    def _build(ocr, turn_number, log_revision, action, **kwargs):
+    def _build(ocr, turn_number, log_revision, action,
+               choice_error="choose_one_name_required", **kwargs):
         action_text = RecommendationParser.normalize_action_text(
             ocr.normalized_text)
         lines = action_text.splitlines()
@@ -423,13 +438,14 @@ class RecommendationParser:
         choice_name = None
         if markers and action in (ActionKind.PLAY_CARD,
                                   ActionKind.USE_HERO_POWER,
+                                  ActionKind.USE_ABILITY,
                                   ActionKind.CHOOSE_DISCOVER):
             if len(markers) != 1 or markers[0] + 1 >= len(lines):
-                raise RecommendationParseError("choose_one_name_required")
+                raise RecommendationParseError(choice_error)
             choice_name = lines[markers[0] + 1]
             if (RecommendationParser()._is_action_line(choice_name)
                     or "目标" in choice_name or choice_name.startswith("放置于")):
-                raise RecommendationParseError("choose_one_name_required")
+                raise RecommendationParseError(choice_error)
         return ProposedAction(
             action_id=f"action-{uuid.uuid4()}", frame_id=ocr.frame_id,
             created_at=time.time(), turn_number=turn_number,

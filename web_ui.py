@@ -145,7 +145,12 @@ def _record_battle(level: str, msg: str) -> None:
             _battle_ctx["instruction"] = info.get("instruction")
             _battle_ctx["raw"] = []
         elif kind == "recommendation_raw":
-            _battle_ctx.setdefault("raw", []).append(info.get("text"))
+            # 重试期间面板没变时同一条原文会被反复打出来，这里去重：
+            # 错误.json 的 raw 只需要一份，不然几十次重试能把报告撑爆。
+            text = info.get("text") or ""
+            raw = _battle_ctx.setdefault("raw", [])
+            if text and text not in raw:
+                raw.append(text)
         if kind in ("retry", "error", "warn"):
             feedback.note_event(info, _battle_ctx)
     except Exception:

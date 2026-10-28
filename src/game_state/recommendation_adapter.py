@@ -6,7 +6,7 @@ import re
 from manual_controller import (
     AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
     LaunchStarshipAction, PlayCardAction, SelectTargetAction, Target,
-    TimelineAction, TradeCardAction, UseLocationAction,
+    TimelineAction, TradeCardAction, UseAbilityAction, UseLocationAction,
 )
 from src.recommendation_models import ActionKind
 from src.game_state.choose_one import (
@@ -14,6 +14,9 @@ from src.game_state.choose_one import (
     choose_one_card_name,
     choose_one_option_card_ids,
     is_choose_one_card,
+)
+from src.game_state.choose_skill import (
+    is_old_god_card, skill_index, skill_panel,
 )
 from src.game_state.hand_target import (
     hand_target_cardtype_mismatch,
@@ -80,6 +83,8 @@ def adapt_action(proposed, state):
             proposed, state, adapted, getattr(state, "my_hero_power", None))
     if proposed.action == ActionKind.ATTACK:
         return _adapt_attack(proposed, state)
+    if proposed.action == ActionKind.USE_ABILITY:
+        return _adapt_use_ability(proposed, state)
     if proposed.action == ActionKind.LAUNCH_STARSHIP:
         return _adapt_starship(
             board_slot(state, "friendly", proposed.source.index))
@@ -779,6 +784,79 @@ def _adapt_starship(source):
         LaunchStarshipAction(
             source.collection_index, source.entity.card_id, source_id),
         source_id, None, "starship_launched")
+
+
+def _adapt_use_ability(proposed, state):
+    """古神「选择一个技能」：点场上随从 → 点技能牌 →（盒子给了目标时）点目标。
+
+    号位只有一份来源：`choose_skill.SKILL_PANEL_ORDER` 里记录的实测面板顺序
+    （盒子只写技能名、不写号位）。卡不在表里、或技能名认不出，一律抛错拒绝
+    ——此时**一下都不点**，绝不按"大概是第几个"去点：点错技能（把 21 点伤害
+    点成召唤随从）比这一回合不出手更糟。
+    """
+    source = proposed.source
+    if (source is None or source.kind != "board_slot"
+            or source.owner != "friendly"):
+        raise RecommendationStateError("ability_source_unsupported")
+    try:
+        entry = board_slot(state, "friendly", source.index)
+    except RecommendationStateError as exc:
+        raise RecommendationStateError("ability_source_out_of_range") from exc
+    if entry.kind != "minion":
+        raise RecommendationStateError("ability_source_not_minion")
+    card_id = getattr(entry.entity, "card_id", None)
+    panel = skill_panel(card_id)
+    if not panel:
+        # 卡表里没记录过这张卡的面板顺序：不知道 1~4 号位是什么就绝不点。
+        if is_old_god_card(card_id):
+            print(f"[推荐] 古神技能面板还没适配这张卡（{card_id}），本次不点；"
+                  f"需要在 choose_skill.SKILL_PANEL_ORDER 里补一行。")
+        raise RecommendationStateError("ability_card_unknown")
+    index = skill_index(card_id, getattr(proposed, "choice_name", None))
+    if index is None:
+        raise RecommendationStateError("ability_option_unknown")
+    target = None
+    target_id = None
+    if proposed.target is not None:
+        target, target_id = _ability_target(proposed.target, state)
+    source_id = getattr(entry.entity, "entity_id", None)
+    print(f"[推荐] 古神技能：{card_id} → {index + 1}号位"
+          f"（{panel[index][0]}）")
+    return AdaptedAction(
+        UseAbilityAction(
+            source=Target("friendly", "minion", entry.collection_index,
+                          source_id),
+            card_id=card_id,
+            choice_index=index,
+            choice_count=len(panel),
+            choice_name=panel[index][0],
+            target=target,
+        ),
+        source_id, target_id, "ability_used")
+
+
+def _ability_target(target, state):
+    """技能自带的目标：只接受场上随从与英雄（技能不会让你点自己手牌）。"""
+    side = target.owner
+    if side not in {"friendly", "enemy"}:
+        raise RecommendationStateError("ability_target_unsupported")
+    if target.kind == "hero":
+        hero = (getattr(state, "my_hero", None) if side == "friendly"
+                else getattr(state, "oppo_hero", None))
+        if hero is None:
+            raise RecommendationStateError("ability_target_missing")
+        entity_id = getattr(hero, "entity_id", None)
+        return Target(side, "hero", None, entity_id), entity_id
+    if target.kind != "board_slot":
+        raise RecommendationStateError("ability_target_unsupported")
+    try:
+        entry = board_slot(state, side, target.index)
+    except RecommendationStateError as exc:
+        raise RecommendationStateError("ability_target_out_of_range") from exc
+    if entry.kind != "minion":
+        raise RecommendationStateError("target_not_minion")
+    entity_id = getattr(entry.entity, "entity_id", None)
+    return Target(side, "minion", entry.collection_index, entity_id), entity_id
 
 
 def _adapt_attack(proposed, state):

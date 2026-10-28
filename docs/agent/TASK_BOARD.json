@@ -423,6 +423,21 @@
       "last_verified_command": null
     },
     {
+      "id": "R16A",
+      "status": "done",
+      "owner": "controller",
+      "review_round": 1,
+      "branch": "feature/R16A-upstream-sync-1027",
+      "depends_on": ["R15"],
+      "task_book": "docs/tasks/R16A-upstream-1027-sync.md",
+      "implementer_report": "docs/agent/reports/R16A-implementer.md",
+      "review_report": "docs/agent/reviews/R16A-review.md",
+      "base_sha": "06a85ce",
+      "head_sha": null,
+      "blockers": [],
+      "last_verified_command": "R16A approved: focused 136; default 1558; discover 1865; opt-in 20; architecture/scope/compile/diff pass"
+    },
+    {
       "id": "R16",
       "status": "planned",
       "owner": null,

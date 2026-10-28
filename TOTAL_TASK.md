@@ -12,12 +12,12 @@
 
 ## Current Phase
 
-R15 UI parity is the active priority. The full pre-refactor Web UI must remain the operating surface and start reliably on Chinese Windows.
+R16A has synchronized and independently approved original-repository 2026.10.27 changes. R15 UI parity remains in progress pending the administrator scheduled-task rebind.
 
 ## Branch And Environment
 
 - Integration branch: `develop`
-- Current feature branch: `feature/R15-ui-parity`, based on `develop` at `8662eea`
+- Current feature branch: `feature/R16A-upstream-sync-1027`, based on `feature/R15-ui-parity` at `06a85ce`
 - Runtime/tooling: uv only
 - Canonical remote: `origin` (personal repository)
 - Upstream remote: `upstream` (read-only)
@@ -60,6 +60,7 @@ R15 UI parity is the active priority. The full pre-refactor Web UI must remain t
 | R13 | in_progress | Native one-game smoke and main cutover | R13A |
 | R14 | planned | Static plugin registry expansion | R05 |
 | R15 | in_progress | Full-feature UI parity and reliable startup | R13A |
+| R16A | done | Sync original repository 2026.10.27 update | R15 |
 | R16 | planned | Legacy migration and cleanup | R15 |
 
 ## Key Interfaces
@@ -125,4 +126,4 @@ See `docs/agent/DECISIONS.md`.
 
 ## Next Action
 
-Restore reliable startup of the complete existing Web UI: force UTF-8 in direct, elevated and scheduled-task launch paths, verify `/api/status`, and keep all existing controls and behavior unchanged. R13 live Phase B remains deferred.
+Commit R16A and report the concrete optimizations over the original 2026.10.27 tree. The remaining UI host action is the administrator rebind of the highest-privilege scheduled task, followed by one clean startup verification.

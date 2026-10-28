@@ -176,6 +176,25 @@ class DiscoverChoiceAction:
 
 
 @dataclass(frozen=True)
+class UseAbilityAction:
+    """古神/泰坦随从发动技能：点随从 → 点「选择一个技能」面板里的技能牌 → 目标。
+
+    与 `DiscoverChoiceAction` 的区别：选项面板不是屏幕中间那排发现卡，而是
+    「选择一个技能」面板（四张技能牌等距横排，坐标见 `click.SKILL_CARD_POINTS`），
+    而且第一下要先点场上的随从把面板打开。号位由适配层按技能名反查记录表得到。
+    技能自带目标时（克苏恩的凝视）在同一次手势里接着点，**末尾不右键**——
+    右键会把"等待选择目标"取消掉。
+    """
+    source: Target
+    card_id: str
+    choice_index: int
+    choice_count: int
+    choice_name: Optional[str] = None
+    target: Optional[Target] = None
+    turn_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class SelectTargetAction:
     """只点一个场上目标（选项/发现结算后的“选择随从/英雄”）。
 
@@ -245,6 +264,7 @@ ManualAction = Union[
     TradeCardAction,
     HeroPowerAction,
     DiscoverChoiceAction,
+    UseAbilityAction,
     SelectTargetAction,
     UseLocationAction,
     AttackAction,
@@ -495,6 +515,30 @@ class ClickExecutor:
             self.sleep(delay)
         self._click_target(target, my_count, oppo_count)
         self.click.cancel_click()
+
+    def use_ability(self, source, board_count, choice_index, choice_count,
+                    target=None, oppo_count=0, target_delay=0.3):
+        """古神/泰坦：点场上随从 → 点技能牌 →（可选）点目标。"""
+        return self._safe_action(lambda: self._use_ability(
+            source, board_count, choice_index, choice_count, target,
+            oppo_count, target_delay))
+
+    def _use_ability(self, source, board_count, choice_index, choice_count,
+                     target, oppo_count, target_delay):
+        # 上一次没点完的面板先右键收掉：面板是模态的，右键只会关面板/取消
+        # 悬空的选择，不会动到场面。
+        self.click.cancel_click()
+        self.click.choose_my_board_entity(source.index, board_count)
+        # 技能面板要画完才能点里面的牌（实测约 0.5~0.8s，与星舰组件面板同口径）。
+        self.sleep(0.8)
+        self.click.choose_skill_card(choice_index, choice_count)
+        if target is not None:
+            delay = 0.3 if target_delay is None else float(target_delay)
+            if delay > 0:
+                self.sleep(delay)
+            self._click_target(target, board_count, oppo_count)
+        # 故意不右键：克苏恩的凝视这类技能点完选项还在等目标，右键会把这次
+        # 选择取消掉（盒子随后会打印「选择对方N号位卡牌」，由 SELECT_TARGET 接着点）。
 
     def select_target(self, target, my_count=0, oppo_count=0, hand_count=0):
         """只点一个目标（选项/发现结算后的「选择对方N号位卡牌」）。
@@ -1087,6 +1131,34 @@ class ManualController:
                 action.choice_index, action.choice_count)
             return ActionExecutionResult(
                 True, f"已选择发现选项：{action.choice_index + 1}号位")
+
+        if isinstance(action, UseAbilityAction):
+            if not self._target_exists(action.source, state):
+                return self._reject("发动技能的随从已经不存在，未执行操作。")
+            minion = state.my_minions[action.source.index]
+            if getattr(minion, "card_id", None) != action.card_id:
+                return self._reject("发动技能的随从已经变化，未执行操作。")
+            if (action.choice_count not in (1, 2, 3, 4)
+                    or not 0 <= action.choice_index < action.choice_count):
+                return self._reject("技能号位已经失效，未执行操作。")
+            if (action.target is not None
+                    and not self._target_exists(action.target, state)):
+                # 目标没了就别点技能：点了这只手会停在"等选目标"，脚本却以为
+                # 做完了，会一直烧到回合结束。
+                return self._reject("技能目标已经不存在，未执行操作。")
+            name = action.choice_name or "技能"
+            detail = f"已发动技能：{name}（{action.choice_index + 1}号位）"
+            if action.target is not None:
+                detail += f"，{self._target_label(action.target)}"
+            self.executor.use_ability(
+                self._target_for_click(action.source, state),
+                self._board_slot_count(state, "friendly"),
+                action.choice_index, action.choice_count,
+                self._target_for_click(action.target, state),
+                self._board_slot_count(state, "enemy"),
+                self._choice_target_delay(),
+            )
+            return ActionExecutionResult(True, detail)
 
         if isinstance(action, SelectTargetAction):
             if action.target is None or not self._target_exists(action.target, state):

@@ -143,6 +143,9 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(4, hit["turn"])
         self.assertEqual("对局", hit["phase"])
         self.assertEqual("打出1号位随从", hit["instruction"])
+        # OCR 原文必须跟着事件走（错误.json 的 raw）——2026-10-27 的反馈包里
+        # raw 是空的，只能靠截图反推盒子面板写了什么。
+        self.assertEqual(["原文"], hit["raw"])
 
     def test_error_outside_a_turn_is_recorded_but_not_captured(self):
         for phase in ("对局结束", "未对局", "换牌", "匹配", ""):

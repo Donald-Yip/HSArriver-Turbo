@@ -410,8 +410,11 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
         # ActionKind 是 str 枚举，所以字符串 "attack" 也能匹配上。
         # MULLIGAN 是防御性兜底：换牌流程本来就不挂这个挂点。
         # SELECT_TARGET 是同一次出牌的收尾（选项结算后点目标），不额外看手牌。
+        # USE_ABILITY 是古神随从的场面动作（点随从 → 点技能 → 目标），和攻击/
+        # 星舰同类，同样不看手牌。
         if action_kind in (ActionKind.ATTACK, ActionKind.LAUNCH_STARSHIP,
-                           ActionKind.MULLIGAN, ActionKind.SELECT_TARGET):
+                           ActionKind.MULLIGAN, ActionKind.SELECT_TARGET,
+                           ActionKind.USE_ABILITY):
             return False
         click.human_like_pause()
         return True
@@ -878,8 +881,13 @@ def ChoosingCardAction():
 
     if auto_mulligan_flow is not None:
         auto_mulligan_flow.reset_delay()  # 每局首次用 ready(7)，重试用 post_ocr(5)
+        # ready 是**固定计时**：到点那一刻换牌面板可能还在淡入（每局第一把、
+        # 炉石刚起来/动画没结束时最明显）。以前这里只探一次就判「确认按钮
+        # 未检测到」再傻等 5s，日志上就表现成“第一次换牌检测总失败”。先按
+        # 0.4s 短轮询等按钮真画出来；等不到再回落到下面的重试逻辑。
+        _wait_confirm_panel_ready()
         # 换牌自动流（理想流程）：
-        #   每局 ready(20s) 等待后进入循环 → 每隔 mulligan_retry(5s) 一次：
+        #   每局 ready(20s) 等待 + 面板就绪轮询后进入循环 → 每隔 mulligan_retry(5s) 一次：
         #     ① 先检测屏幕中间“确认”按钮是否在场（面板就绪的物理信号）
         #     ② 在    → OCR 左侧留牌建议并执行换牌（替换+确认）
         #        不在 → 等 mulligan_retry_delay 再试
@@ -1772,6 +1780,40 @@ def confirm_button_present() -> bool:
         for line in evidence.lines)
 
 
+# 「换牌前等待」到点后最多再等这么久让面板画出来；间隔即短轮询节奏。
+# 实测失败样本：ready 到点那次 OCR 读 0 行（面板还没画好），5s 后同一块
+# 区域就读到「确认」0.99 —— 只探一次会白等一个重试间隔。
+_MULLIGAN_PANEL_WAIT_SECONDS = 6.0
+_MULLIGAN_PANEL_POLL_SECONDS = 0.4
+
+
+def _wait_confirm_panel_ready(timeout=None, interval=None,
+                              probe=None, sleep=None) -> bool:
+    """等换牌面板的「确认」按钮出现（= 面板就绪的物理信号）。
+
+    「换牌前等待」是固定计时，到点时面板有时还差一两秒才画好（淡入、首局
+    加载、盒子面板刷新）。只探一次就判「确认按钮未检测到」会白等一个 5s
+    重试间隔，日志也像“第一次检测必失败”。这里先短轮询，按钮一出现就
+    返回 True；超时返回 False，交回原来的重试逻辑（节奏不变）。
+    """
+    timeout = (_MULLIGAN_PANEL_WAIT_SECONDS if timeout is None
+               else float(timeout))
+    interval = (_MULLIGAN_PANEL_POLL_SECONDS if interval is None
+                else float(interval))
+    probe = confirm_button_present if probe is None else probe
+    sleep = time.sleep if sleep is None else sleep
+    interval = max(0.01, interval)
+    attempts = max(1, int(round(timeout / interval)) + 1)
+    for index in range(attempts):
+        if quitting_flag:
+            sys.exit(0)
+        if probe():
+            return True
+        if index + 1 < attempts:
+            sleep(interval)
+    return False
+
+
 # ---------------------------------------------------------------- 自动投降检测
 # 盒子浮动条“AI胜率 X%”的截图区域（1920x1080 实测）：主区域 + 放宽的兜底区域。
 # 这是代码默认值；用户用校准工具改过之后走 ui_config.json 的
@@ -2284,6 +2326,9 @@ def run_automatic_battle_step():
             "opponent_turn": "等待对手操作。",
             "waiting_recommendation_update": "等待盒子更新推荐。",
             "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
+            "recommendation_stuck": (
+                "同一条推荐连续失败，已熔断：本回合不再重复点，只等盒子/"
+                "回合变化（日志里有失败码和 OCR 原文）。"),
         }
         message = observe_messages.get(
             result.diagnostics,

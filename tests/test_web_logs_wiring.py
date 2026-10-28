@@ -454,5 +454,41 @@ class OverlayWiringTests(unittest.TestCase):
         self.assertNotIn("出错存档", detail)
 
 
+class BattleFeedbackContextTests(unittest.TestCase):
+    """日志行 → 反馈上下文（错误.json 的 instruction / raw）。"""
+
+    def setUp(self):
+        self._saved_ctx = dict(web_ui._battle_ctx)
+        web_ui._battle_ctx.clear()
+
+    def tearDown(self):
+        web_ui._battle_ctx.clear()
+        web_ui._battle_ctx.update(self._saved_ctx)
+
+    def test_repeated_raw_lines_enter_the_context_once(self):
+        # 重试期间同一段 OCR 原文会被反复打出来：错误.json 的 raw 只留一份，
+        # 几十次重试不该把报告撑爆（2026-10-27 反馈：raw 一条都没有，反过来了）。
+        events = []
+        with (
+            patch.object(web_ui.battle_record, "record"),
+            patch.object(web_ui.feedback, "mark_success"),
+            patch.object(
+                web_ui.feedback, "note_event",
+                side_effect=lambda info, ctx: events.append((info, dict(ctx))),
+            ),
+        ):
+            web_ui._record_battle("INFO", "[推荐] 打出1号位法术")
+            for _ in range(3):
+                web_ui._record_battle("INFO", "[推荐] 原文：目标是已方1号位")
+            web_ui._record_battle(
+                "SYS", "当前推荐暂不可执行，继续重试：unsupported_spell_target")
+
+        self.assertEqual(1, len(events))
+        info, ctx = events[0]
+        self.assertEqual("retry", info["kind"])
+        self.assertEqual("打出1号位法术", ctx["instruction"])
+        self.assertEqual(["目标是已方1号位"], ctx["raw"])
+
+
 if __name__ == "__main__":
     unittest.main()

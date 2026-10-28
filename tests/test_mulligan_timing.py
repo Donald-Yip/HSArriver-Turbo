@@ -145,5 +145,49 @@ class MulliganTimingTests(unittest.TestCase):
         self.assertEqual(0.0, elapsed[0])
 
 
+class ConfirmPanelReadyWaitTests(unittest.TestCase):
+    """换牌前等待到点后先等「确认」按钮画出来，不再探一次就判"未检测到"。"""
+
+    def setUp(self):
+        self._quitting = FSM_action.quitting_flag
+        FSM_action.quitting_flag = False
+
+    def tearDown(self):
+        FSM_action.quitting_flag = self._quitting
+
+    def test_panel_rendering_late_is_picked_up_without_the_retry_penalty(self):
+        readings = []
+        sleeps = []
+
+        def probe():
+            readings.append(1)
+            return len(readings) >= 3
+
+        self.assertTrue(FSM_action._wait_confirm_panel_ready(
+            timeout=6.0, interval=0.4, probe=probe, sleep=sleeps.append))
+        # 前两次没画好只等 0.4s，第三次出现即返回（不再白等 5s）
+        self.assertEqual(3, len(readings))
+        self.assertEqual([0.4, 0.4], sleeps)
+
+    def test_panel_that_never_renders_falls_back_after_the_wait_window(self):
+        readings = []
+
+        def probe():
+            readings.append(1)
+            return False
+
+        self.assertFalse(FSM_action._wait_confirm_panel_ready(
+            timeout=2.0, interval=0.5, probe=probe, sleep=lambda _s: None))
+        # 2.0s / 0.5s = 4 个间隔 → 5 次探测，之后交回重试逻辑
+        self.assertEqual(5, len(readings))
+
+    def test_already_ready_panel_costs_no_extra_wait(self):
+        sleeps = []
+        self.assertTrue(FSM_action._wait_confirm_panel_ready(
+            timeout=6.0, interval=0.4, probe=lambda: True,
+            sleep=sleeps.append))
+        self.assertEqual([], sleeps)
+
+
 if __name__ == "__main__":
     unittest.main()

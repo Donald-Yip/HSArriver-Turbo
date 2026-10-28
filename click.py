@@ -387,6 +387,28 @@ DISCOVER_CARD_X = {
     4: (400, 775, 1150, 1525),
 }
 
+# 古神「选择一个技能」面板（点场上随从后弹出的模态面板，标题「选择一个技能」）。
+# 1920×1080 客户区实测（2026-10-27 截图，逐像素量牌心）：四张技能牌等距横排，
+# 牌心 x ≈ 480 / 790 / 1100 / 1410（间距 310，牌宽≈290），落点取牌面美术区
+# y=450（四个点都落在牌面内）。和上面 DISCOVER_CARD_X[4] 不是一套布局。
+SKILL_CARD_POINTS = {
+    4: ((480, 450), (790, 450), (1100, 450), (1410, 450)),
+}
+
+
+def choose_skill_card(choice_index, choice_count):
+    """点「选择一个技能」面板里的第 N 张技能牌（0 基）。
+
+    只认实测记录过的布局；选项数没记录过就断言失败（上层据此拒绝重试），
+    绝不按别的面板布局去猜位置。
+    """
+    points = SKILL_CARD_POINTS.get(choice_count)
+    assert points is not None, f"未记录 {choice_count} 选项的技能面板布局"
+    assert 0 <= choice_index < len(points)
+    rand_sleep(OPERATE_INTERVAL)
+    x, y = points[choice_index]
+    left_click(x, y)
+
 
 def choose_discover_card(choice_index, choice_count):
     """Click a centered 1920x1080 discover choice for its layout size."""

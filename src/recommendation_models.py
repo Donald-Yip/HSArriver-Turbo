@@ -13,6 +13,10 @@ class ActionKind(str, Enum):
     ATTACK = "attack"
     USE_LOCATION = "use_location"
     LAUNCH_STARSHIP = "launch_starship"
+    # 古神（以及同一套面板的泰坦）：随从不能普通攻击，点它弹「选择一个技能」
+    # 面板再点一张技能牌。盒子把这一步写成和攻击一样的一行，只多出
+    # 「选择卡牌 + 技能名」，所以它必须是独立动作，不能混进 ATTACK。
+    USE_ABILITY = "use_ability"
     CHOOSE_DISCOVER = "choose_discover"
     # 四选一/发现选完选项后，游戏还要你再点一个目标（克苏恩「凝视」、鲍勃
     # 「招募随从」）。盒子会打成「选择对方N号位卡牌」，与选项面板的「选择我方

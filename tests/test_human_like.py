@@ -345,6 +345,13 @@ class PostActionPauseHookTests(unittest.TestCase):
         self.assertFalse(handled)
         self.assertEqual([], self.areas)
 
+    def test_use_ability_skips_the_pause(self):
+        """古神技能是场面动作（点随从 → 点技能 → 目标），操作完不看手牌。"""
+        handled = self._pause(ActionKind.USE_ABILITY)
+
+        self.assertFalse(handled)
+        self.assertEqual([], self.areas)
+
     def test_non_attack_actions_still_look_at_the_hand(self):
         for kind in (ActionKind.PLAY_CARD, ActionKind.USE_HERO_POWER,
                      ActionKind.TRADE_CARD, ActionKind.USE_LOCATION,

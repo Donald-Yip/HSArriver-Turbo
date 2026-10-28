@@ -33,7 +33,7 @@ from src.game_state.recommendation_adapter import (
 from src.parser.recommendation_parser import RecommendationParser
 from src.recommendation_models import ActionKind, SlotRef
 
-# cards.json 里「选择你手牌中的一张…」的随从（当前共 14 张），
+# cards.json 里「选择你手牌中的一张…」的随从（当前共 15 张），
 # 守护巨龙之厅是同类地标，走另一条路径，见 test_targeted_locations.py。
 HAND_TARGET_MINION_CARDS = (
     ("CATA_490", "魔眼秘术师"),
@@ -50,6 +50,7 @@ HAND_TARGET_MINION_CARDS = (
     ("CORE_REV_511", "案卷书虫"),
     ("JAIL_313", "偷贩炼金师"),
     ("REV_511", "案卷书虫"),
+    ("BE_566", "虫蛀缠蟒"),
 )
 HAND_TARGET_LOCATION_CARD_ID = "CATA_477"
 # 卡面不写「选择手牌中一张」，但打出去后同样要点一张自己手牌的卡：
