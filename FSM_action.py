@@ -1401,6 +1401,39 @@ def _ocr_lines(box, scale: float, tag: str):
     return list(evidence.lines)
 
 
+def _ocr_lines_preprocessed(box, scale: float, tag: str):
+    """Retry rank OCR with contrast/binary variants when the raw read misses digits.
+
+    Rank numerals are often gold-on-gold against the badge background.  The raw
+    colour read can confidently return only the label (for example ``传说``),
+    so use the same versioned preprocessing candidates as recommendation OCR.
+    """
+    reader = mulligan_reader
+    img = _grab_region(box, scale)
+    if img is None or reader is None:
+        return None
+    try:
+        from src.ocr.preprocess import iter_preprocess_recommendation
+        best = None
+        for name, candidate in iter_preprocess_recommendation(img, 1.0):
+            if name == "scaled_color_v1":
+                continue
+            try:
+                evidence = reader.backend.recognize(
+                    candidate, f"{tag}-{name}-{time.time():.3f}", f"{tag}_{name}")
+            except Exception:
+                continue
+            current = list(evidence.lines)
+            if best is None:
+                best = current
+            if any(any(ch.isdigit() for ch in str(getattr(line, "text", "")))
+                   for line in current):
+                return current
+        return best
+    except Exception:
+        return None
+
+
 def _region_is_blank(img) -> bool:
     """段位区域是不是「没有数字」的纯背景（未上传说）。
 
@@ -1493,24 +1526,49 @@ def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
         # 真正截到图且亮像素太少时只是 empty，同样交给调用方决定重试几次。
         result["empty"] = img is not None
         return result
+
+    def _parse_lines(lines):
+        for line in lines or ():
+            text = str(getattr(line, "text", "") or "").strip()
+            confidence = float(getattr(line, "confidence", 0.0) or 0.0)
+            if min_confidence and confidence < float(min_confidence):
+                continue
+            if not text or not any(ch.isdigit() for ch in text):
+                continue
+            if strict and not is_pure_rank_text(text):
+                continue
+            parsed = parse_rank_text(text)
+            if parsed["number"] is not None:
+                parsed["blank"] = False
+                parsed["bright"] = result["bright"]
+                return parsed
+        return None
+
     lines = _ocr_lines(box, _POST_GAME_OCR_SCALE, "rank")
     if lines is None:
         return result
-    for line in lines:
-        text = str(getattr(line, "text", "") or "").strip()
-        confidence = float(getattr(line, "confidence", 0.0) or 0.0)
-        if min_confidence and confidence < float(min_confidence):
-            continue
-        if not text or not any(ch.isdigit() for ch in text):
-            # 没有数字的行（文字标签之类）一律忽略：判定只看数字。
-            continue
-        if strict and not is_pure_rank_text(text):
-            continue
-        parsed = parse_rank_text(text)
-        if parsed["number"] is not None:
-            parsed["blank"] = False
-            parsed["bright"] = result["bright"]
+    raw_texts = [str(getattr(line, "text", "") or "").strip()
+                 for line in lines if str(getattr(line, "text", "") or "").strip()]
+    parsed = _parse_lines(lines)
+    if parsed is not None:
+        return parsed
+
+    # A confident label-only read is exactly the failure mode seen in the field
+    # (`传说`, confidence 1.0).  Retry enhanced variants before declaring that
+    # the player is not Legend.  Strict mode intentionally stays single-pass.
+    if not strict:
+        retry_lines = _ocr_lines_preprocessed(
+            box, _POST_GAME_OCR_SCALE, "rank")
+        for line in retry_lines or ():
+            text_value = str(getattr(line, "text", "") or "").strip()
+            if text_value and text_value not in raw_texts:
+                raw_texts.append(text_value)
+        parsed = _parse_lines(retry_lines)
+        if parsed is not None:
+            parsed["raw"] = "\n".join(raw_texts) or parsed["raw"]
             return parsed
+
+    result["raw"] = "\n".join(raw_texts) or None
     return result
 
 
@@ -1620,7 +1678,8 @@ def _read_rank_target(attempts=None, wait=None, label="选择套牌界面",
     number = reading.get("number")
     if number is None:
         if reading.get("raw") is not None:
-            reason = f"读到的内容里没有名次数字（「{reading['raw']}」）"
+            reason = (f"读到的内容里没有名次数字（OCR 原文：「{reading['raw']}」；"
+                      f"已用增强预处理重试）")
         elif reading.get("empty") \
                 and 0 <= reading.get("bright", -1) < _RANK_MIN_BRIGHT_PIXELS:
             reason = (f"段位位置还是空白（亮像素 {reading['bright']} 个，"

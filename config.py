@@ -898,7 +898,7 @@ class RecommendationConfig:
     # 可通过 ui_config.json 的 post_game_start_roi 覆盖（校准工具写入）。
     post_game_start_roi: tuple[int, int, int, int] = (1325, 865, 1475, 935)
 
-    # 结算界面右上角的段位名次数字区域（每局结束读一次，用于按段位停止）。
+    # 选择套牌界面右上角的段位名次数字区域（点「开始匹配」前读取）。
     # 未上传说时这里是空白（靠"亮像素太少"跳过 OCR）；上了传说后框内是名次
     # 数字本身。不同分辨率/窗口位置下这个位置会偏，所以**可校准**：
     # 可通过 ui_config.json 的 post_game_rank_roi 覆盖（校准窗口里能拖）。

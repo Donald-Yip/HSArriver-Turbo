@@ -18,8 +18,8 @@ from PIL import ImageGrab  # noqa: E402
 OUT = os.path.join(ROOT, "tmp_screens")
 os.makedirs(OUT, exist_ok=True)
 
-RANK_ROI = (1230, 180, 1385, 225)
-CTX_ROI = (1080, 120, 1560, 300)
+RANK_ROI = None
+CTX_ROI = None
 
 
 def save(img, name, scale):
@@ -31,6 +31,12 @@ def save(img, name, scale):
 
 
 def main():
+    import FSM_action
+    global RANK_ROI, CTX_ROI
+    RANK_ROI = FSM_action._post_game_rank_box()
+    left, top, right, bottom = RANK_ROI
+    CTX_ROI = (max(0, left - 150), max(0, top - 60),
+               right + 150, bottom + 60)
     try:
         full = ImageGrab.grab(all_screens=False)
     except Exception as exc:  # pragma: no cover - 取证脚本
@@ -49,7 +55,6 @@ def main():
 
     # 顺带用脚本自己的读数逻辑看一眼（纯读，不点击）
     try:
-        import FSM_action
         reading = FSM_action.read_rank_region()
         print("read_rank_region ->", reading)
     except Exception as exc:

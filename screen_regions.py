@@ -172,7 +172,7 @@ CALIBRATION_TARGETS = (
     {"key": "rank", "config_key": "post_game_rank_roi",
      "label": "段位数字（名次）", "short": "段位", "color": RANK_COLOR,
      "default": POST_GAME_RANK_REGION,
-     "hint": "框住结算界面右上角的段位数字：有数字=已上传说，数字就是名次"},
+     "hint": "在选择套牌界面框住右上角的段位数字：有数字=已上传说，数字就是名次"},
     # 下面三个是「界面识别」用的（battle_entry）：认出界面才决定点什么。
     {"key": "main_menu_battle", "config_key": "main_menu_battle_roi",
      "label": "主界面「传统对战」（识别+点击）", "short": "传统对战",

@@ -33,6 +33,9 @@ Move card semantics and recommendation adaptation into domain/application/adapte
 ## Allowed Files
 
 - `FSM_action.py`
+- `README.md`
+- `config.py`
+- `screen_regions.py`
 - `manual_controller.py`
 - `src/**`
 - `rules/**`
@@ -51,7 +54,6 @@ Move card semantics and recommendation adaptation into domain/application/adapte
 - `cards.json`
 - `web_ui.py`
 - `click.py`
-- `config.py`
 - `log_state.py`
 - `pyproject.toml`
 - `uv.lock`
@@ -81,3 +83,12 @@ uv run python tools/run_headless_tests.py --native-live
 ## Rollback
 
 Each layer extraction has a thin root shim, so the branch can be reverted as one R17 commit without changing external callers.
+
+## Follow-up: Rank OCR
+
+Field logs showed a confident label-only OCR result (`1` line, confidence `1.00`)
+but no digit, followed by “按还没上传说处理”. The rank reader discarded the raw
+text and did not retry with enhanced image preprocessing. The follow-up keeps the
+selection-screen rank contract, preserves raw OCR evidence, retries grayscale and
+binary variants, and clarifies that calibration happens on the deck-selection
+screen rather than the result screen.

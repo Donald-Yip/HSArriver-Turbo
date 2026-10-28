@@ -114,7 +114,7 @@ class ReadRankRegionTests(unittest.TestCase):
 
                 self.assertEqual(number, reading["number"])
                 self.assertEqual(legend, reading["legend"])
-                self.assertEqual(number is None, reading["raw"] is None)
+                self.assertEqual(ocr_lines is None, reading["raw"] is None)
 
     def test_strict_needs_a_line_that_is_only_the_number(self):
         """严格模式：整行只有数字才算（用于"必须拦住点击"的那次检测）。"""
@@ -147,6 +147,34 @@ class ReadRankRegionTests(unittest.TestCase):
             self.assertEqual(4321, FSM_action.read_rank_region()["number"])
             self.assertIsNone(
                 FSM_action.read_rank_region(min_confidence=0.5)["number"])
+
+    def test_non_numeric_text_is_kept_for_diagnostics(self):
+        with (
+            patch.object(FSM_action, "_grab_region", return_value=object()),
+            patch.object(FSM_action, "_region_is_blank", return_value=False),
+            patch.object(FSM_action, "_ocr_lines",
+                         return_value=lines(("传说", 0.99))),
+        ):
+            reading = FSM_action.read_rank_region()
+
+        self.assertIsNone(reading["number"])
+        self.assertEqual("传说", reading["raw"])
+
+    def test_preprocessed_retry_recovers_a_number_first_pass_missed(self):
+        with (
+            patch.object(FSM_action, "_grab_region", return_value=object()),
+            patch.object(FSM_action, "_region_is_blank", return_value=False),
+            patch.object(FSM_action, "_ocr_lines",
+                         return_value=lines(("传说", 0.99))),
+            patch.object(FSM_action, "_ocr_lines_preprocessed",
+                         return_value=lines(("905", 0.96))),
+        ):
+            reading = FSM_action.read_rank_region()
+
+        self.assertEqual(905, reading["number"])
+        self.assertTrue(reading["legend"])
+        self.assertIn("传说", reading["raw"])
+        self.assertIn("905", reading["raw"])
 
     def test_the_calibrated_rank_box_is_what_gets_read(self):
         """回归：段位数字必须从**用户校准过的**框里读（用户报告它没法校准）。"""
