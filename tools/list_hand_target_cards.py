@@ -21,9 +21,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.game_state.hand_target import (          # noqa: E402
+from hslegend.adapters.cards import (              # noqa: E402
     _AUTOMATIC_PICK, _describe, _match_hand_pattern, _sentence_of,
-    hand_target_allowed_cardtypes, hand_target_rule,
+    default_card_semantics,
 )
 
 CARDS_PATH = ROOT / "cards.json"
@@ -44,6 +44,7 @@ def main() -> int:
         print(f"找不到卡表：{CARDS_PATH}")
         return 1
     cards = load_cards()
+    semantics = default_card_semantics()
     included, excluded = [], []
     for card in cards:
         text = _describe(card)
@@ -64,8 +65,8 @@ def main() -> int:
 
     print("== 收录：会按「点自己手牌」处理 ==")
     for card, match in sorted(included, key=lambda item: item[0]["id"]):
-        rule = hand_target_rule(card["id"])
-        types = ",".join(sorted(hand_target_allowed_cardtypes(card["id"])))
+        rule = semantics.hand_target_rule(card["id"])
+        types = ",".join(sorted(semantics.hand_target_allowed_cardtypes(card["id"])))
         print(f"  [{rule['kind']:<14}] {card['id']:<16} {card.get('name')}"
               f"{'  目标类型=' + types if types else ''}")
         print(f"      命中：{_sentence_of(_describe(card), match)}")

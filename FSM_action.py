@@ -22,15 +22,15 @@ import log_state as log_state_module
 from log_state import *
 from src.capture.desktop_capture import DesktopCapture
 from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
-from src.flow.recommendation_flow import (
+from hslegend.application.recommendation_flow import (
     FlowStepStatus, RecommendationFlow,
 )
-from src.game_state.recommendation_adapter import adapt_action
+from hslegend.adapters.legacy.recommendation import RecommendationAdapter
 from src.ocr.paddle_adapter import PaddleOcrAdapter
 from src.ocr.stable_reader import OcrRejectedError, StableRecommendationReader
-from src.parser.recommendation_parser import RecommendationParser
+from hslegend.adapters.legacy.recommendation_parser import RecommendationParser
 from src.recommendation_config import RecommendationConfig
-from src.recommendation_models import ActionKind
+from hslegend.domain import ActionKind
 from src.safety.hearthstone_liveness import default_monitor
 from src.safety.recommendation_validator import RecommendationValidator
 from src.safety.restart_watchdog import default_watchdog
@@ -369,7 +369,7 @@ def initialize_recommendation_automation():
         reader=recommendation_reader,
         parser=recommendation_parser,
         state_supplier=_automation_state_with_revision,
-        adapter=adapt_action,
+        adapter=RecommendationAdapter(),
         validator=recommendation_validator,
         controller=manual_controller,
         result_timeout=recommendation_config.result_timeout_seconds,
@@ -379,6 +379,7 @@ def initialize_recommendation_automation():
             recommendation_config.draw_extra_delay_per_card_seconds),
         post_action_pause=_human_like_post_action_pause,
         stopped=shutdown_event.is_set,
+        warn=warn_print,
     )
 
 

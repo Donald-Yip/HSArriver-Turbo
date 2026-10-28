@@ -62,6 +62,7 @@ R16A has synchronized and independently approved original-repository 2026.10.27 
 | R15 | in_progress | Full-feature UI parity and reliable startup | R13A |
 | R16A | done | Sync original repository 2026.10.27 update | R15 |
 | R16 | planned | Legacy migration and cleanup | R15 |
+| R17 | in_progress | Layered recommendation semantics | R16A |
 
 ## Key Interfaces
 

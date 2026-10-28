@@ -1,7 +1,8 @@
 """Validate recommendation evidence immediately before execution."""
 
 from src.recommendation_config import RecommendationConfig
-from src.recommendation_models import ValidationResult
+from hslegend.application.consumed_actions import ConsumedActionStore
+from hslegend.domain import ValidationResult
 
 
 def _live_client_size():
@@ -40,25 +41,6 @@ def _client_size_matches(frame, config) -> bool:
         return frame_size == live
     # 拿不到实时几何（离线/测试）时退回基准：帧按基准客户区截的才算新鲜。
     return frame_size == tuple(int(v) for v in config.desktop_size)
-
-
-class ConsumedActionStore:
-    def __init__(self):
-        self._keys = set()
-
-    @staticmethod
-    def key_for(proposed, adapted):
-        return (
-            proposed.turn_number, proposed.log_revision,
-            proposed.normalized_instruction, adapted.source_entity_id,
-            adapted.target_entity_id,
-        )
-
-    def contains(self, key):
-        return key in self._keys
-
-    def mark_consumed(self, key):
-        self._keys.add(key)
 
 
 class RecommendationValidator:

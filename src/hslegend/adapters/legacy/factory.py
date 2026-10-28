@@ -13,7 +13,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 from hslegend.adapters.artifacts import FileArtifactStore
-from hslegend.adapters.cards import JsonCardCatalog
+from hslegend.adapters.cards import DEFAULT_RULES_PATH, JsonCardCatalog
 from hslegend.adapters.config import JsonConfigRepository
 from hslegend.adapters.journal import JsonlRunJournal
 
@@ -273,7 +273,8 @@ def build_native_ports(
 
     paths = legacy_paths(runtime.config)
     config_repository = JsonConfigRepository(paths.config_path)
-    card_catalog = JsonCardCatalog(paths.cards_path)
+    rules_path = paths.root / "rules" / DEFAULT_RULES_PATH.name
+    card_catalog = JsonCardCatalog(paths.cards_path, rules_path=rules_path)
     journal = JsonlRunJournal(paths.journal_path)
     artifact_store = FileArtifactStore(paths.artifact_root)
 

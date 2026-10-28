@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cards": {
+    "BE_013": {
+      "ability_panel": ["BE_013t1", "BE_013t2", "BE_013t3", "BE_013t4"]
+    }
+  }
+}

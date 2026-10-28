@@ -24,13 +24,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.game_state.choose_one import (          # noqa: E402
-    card_text, choose_one_card_ids, choose_one_card_names,
-    choose_one_option_card_ids,
-)
-from src.game_state.recommendation_adapter import (  # noqa: E402
-    _CHOICE_TARGET_TEXT,
-)
+from hslegend.adapters.cards import default_card_semantics  # noqa: E402
+from hslegend.adapters.legacy.recommendation import _CHOICE_TARGET_TEXT  # noqa: E402
 
 CARDS_PATH = ROOT / "cards.json"
 # 发现类里值得复核的写法（卡面同时出现这些词，说明发现前后可能还要点目标）。
@@ -43,8 +38,29 @@ def load_cards():
         return json.load(source)
 
 
+SEMANTICS = default_card_semantics()
+
+
 def needs_target(card_id) -> bool:
-    return bool(_CHOICE_TARGET_TEXT.search(card_text(card_id)))
+    return bool(_CHOICE_TARGET_TEXT.search(SEMANTICS.card_text(card_id)))
+
+
+def choose_one_card_ids():
+    return frozenset(
+        card_id for card_id, card in SEMANTICS.definitions.items()
+        if card.capabilities.choose_one
+    )
+
+
+def choose_one_card_names():
+    return {
+        card_id: card.name for card_id, card in SEMANTICS.definitions.items()
+        if card.capabilities.choose_one
+    }
+
+
+def choose_one_option_card_ids(card_id):
+    return SEMANTICS.choose_one_option_card_ids(card_id)
 
 
 def main() -> int:

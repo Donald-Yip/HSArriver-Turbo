@@ -1,7 +1,12 @@
-"""Public pure-domain API."""
-
 from .actions import ActionIntent, ActionPlan, Condition, PlanStep
-from .cards import CardCapabilitySet, CardDefinition
+from .cards import (
+    CardCapabilitySet,
+    CardDefinition,
+    TargetScope,
+    card_names_close,
+    card_names_match,
+    normalize_card_name,
+)
 from .models import (
     SUPPORTED_SCHEMA_VERSIONS,
     ChoiceView,
@@ -10,28 +15,17 @@ from .models import (
     PlayerView,
 )
 from .primitives import canonical_json, deep_freeze_primitive, to_primitive
-from .results import ActionVerdict, PostconditionResult, ValidationResult
+from .recommendation import ActionKind, ProposedAction, SlotRef, ValidationResult
+from .results import ActionVerdict, PostconditionResult
 from .rules import PlanRuleValidator, PostconditionEvaluator, TargetResolver
 
 __all__ = [
-    "ActionIntent",
-    "ActionPlan",
-    "ActionVerdict",
-    "CardCapabilitySet",
-    "CardDefinition",
-    "ChoiceView",
-    "Condition",
-    "EntityRef",
-    "GameSnapshot",
-    "PlanRuleValidator",
-    "PlanStep",
-    "PlayerView",
-    "PostconditionEvaluator",
-    "PostconditionResult",
-    "SUPPORTED_SCHEMA_VERSIONS",
-    "TargetResolver",
-    "ValidationResult",
-    "canonical_json",
-    "deep_freeze_primitive",
+    "ActionIntent", "ActionKind", "ActionPlan", "ActionVerdict",
+    "CardCapabilitySet", "CardDefinition", "ChoiceView", "Condition",
+    "EntityRef", "GameSnapshot", "PlanRuleValidator", "PlanStep", "PlayerView",
+    "PostconditionEvaluator", "PostconditionResult", "ProposedAction",
+    "SUPPORTED_SCHEMA_VERSIONS", "SlotRef", "TargetResolver", "TargetScope",
+    "ValidationResult", "canonical_json", "card_names_close",
+    "card_names_match", "deep_freeze_primitive", "normalize_card_name",
     "to_primitive",
 ]

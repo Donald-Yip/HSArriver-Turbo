@@ -13,6 +13,8 @@ from .dto import (
     RecommendationMode,
     RecommendationObservation,
 )
+from .recommendation import AdaptedAction, RecommendationContext
+from .recommendation_ports import CardSemanticsPort, RecommendationAdapterPort
 from .ports import (
     ActionDispatchPort,
     ArtifactStorePort,
@@ -63,12 +65,14 @@ __all__ = [
     "FinishBattleStatus",
     "FinishBattleUseCase",
     "ActionDispatchPort",
+    "AdaptedAction",
     "ActionGate",
     "ActionLease",
     "ActionLeaseError",
     "ActionLeaseHeld",
     "ArtifactStorePort",
     "CardCatalogPort",
+    "CardSemanticsPort",
     "ConfigRepositoryPort",
     "ConfigSnapshot",
     "DispatchResult",
@@ -89,6 +93,8 @@ __all__ = [
     "OperationCancelled",
     "RecommendationMode",
     "RecommendationObservation",
+    "RecommendationAdapterPort",
+    "RecommendationContext",
     "RecommendationSourcePort",
     "RunContext",
     "RunJournalPort",

@@ -14,7 +14,7 @@ import numpy as np
 from PIL import ImageGrab
 
 from src.recommendation_config import RecommendationConfig
-from src.recommendation_models import FrameEvidence
+from hslegend.adapters.legacy.evidence import FrameEvidence
 
 
 class CaptureEnvironmentError(RuntimeError):

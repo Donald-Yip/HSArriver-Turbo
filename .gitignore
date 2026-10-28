@@ -15,6 +15,7 @@ tmp*/
 *.txt
 !requirements.txt
 !tests/fixtures/recommendations/manifest.json
+!rules/card_rules.json
 
 dist/
 build/

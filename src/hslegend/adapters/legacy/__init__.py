@@ -20,6 +20,7 @@ _LAZY_EXPORTS = {
     "PreflightCheck": (".preflight", "PreflightCheck"),
     "PreflightProbes": (".preflight", "PreflightProbes"),
     "PreflightReport": (".preflight", "PreflightReport"),
+    "RecommendationAdapter": (".recommendation", "RecommendationAdapter"),
     "StableHsangRecommendationSource": (".hsang", "StableHsangRecommendationSource"),
     "build_native_ports": (".factory", "build_native_ports"),
     "build_native_preflight": (".preflight", "build_native_preflight"),

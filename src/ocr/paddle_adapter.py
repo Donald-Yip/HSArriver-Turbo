@@ -9,7 +9,7 @@ import sys
 import time
 
 from src.recommendation_config import RecommendationConfig
-from src.recommendation_models import OcrEvidence, OcrLine
+from hslegend.adapters.legacy.evidence import OcrEvidence, OcrLine
 
 from config import OCR_MODEL_ROOT
 

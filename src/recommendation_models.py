@@ -1,109 +1,23 @@
-"""Immutable evidence and action protocol shared across pipeline layers."""
+"""Compatibility exports for recommendation models.
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Any, Optional
+Semantic action types live in ``hslegend.domain``; frame/OCR evidence lives in
+the legacy adapter package.
+"""
 
+from hslegend.adapters.legacy.evidence import FrameEvidence, OcrEvidence, OcrLine
+from hslegend.domain.recommendation import (
+    ActionKind,
+    ProposedAction,
+    SlotRef,
+    ValidationResult,
+)
 
-class ActionKind(str, Enum):
-    MULLIGAN = "mulligan"
-    PLAY_CARD = "play_card"
-    TRADE_CARD = "trade_card"
-    USE_HERO_POWER = "use_hero_power"
-    ATTACK = "attack"
-    USE_LOCATION = "use_location"
-    LAUNCH_STARSHIP = "launch_starship"
-    # 古神（以及同一套面板的泰坦）：随从不能普通攻击，点它弹「选择一个技能」
-    # 面板再点一张技能牌。盒子把这一步写成和攻击一样的一行，只多出
-    # 「选择卡牌 + 技能名」，所以它必须是独立动作，不能混进 ATTACK。
-    USE_ABILITY = "use_ability"
-    CHOOSE_DISCOVER = "choose_discover"
-    # 四选一/发现选完选项后，游戏还要你再点一个目标（克苏恩「凝视」、鲍勃
-    # 「招募随从」）。盒子会打成「选择对方N号位卡牌」，与选项面板的「选择我方
-    # N号位卡牌」不是一回事：这个动作不点选项，只点场上目标。
-    SELECT_TARGET = "select_target"
-    END_TURN = "end_turn"
-    TIMELINE_UNDO = "timeline_undo"
-    TIMELINE_KEEP = "timeline_keep"
-
-
-@dataclass(frozen=True)
-class SlotRef:
-    kind: str
-    owner: Optional[str] = None
-    index: Optional[int] = None
-
-
-@dataclass(frozen=True)
-class FrameEvidence:
-    frame_id: str
-    captured_at: float
-    desktop_size: tuple[int, int]
-    dpi: int
-    window_handle: int
-    foreground: bool
-    recommendation_roi: tuple[int, int, int, int]
-    exact_hash: str
-    perceptual_hash: str
-    panel_visible: bool
-    pixels: Any = None
-    # 抓这一帧时的炉石客户区尺寸（参考帧口径，见 display_mapping.REFERENCE_CLIENT）。
-    # None = 未知（旧证据/测试构造），此时跳过客户区一致性校验。
-    client_size: Optional[tuple[int, int]] = None
-
-
-@dataclass(frozen=True)
-class OcrLine:
-    text: str
-    confidence: float
-    box: tuple[tuple[float, float], ...] = ()
-
-
-@dataclass(frozen=True)
-class OcrEvidence:
-    frame_id: str
-    created_at: float
-    lines: tuple[OcrLine, ...]
-    normalized_text: str
-    confidence: float
-    backend: str
-    preprocessing: str
-
-
-@dataclass(frozen=True)
-class ProposedAction:
-    action_id: str
-    frame_id: str
-    created_at: float
-    turn_number: int
-    log_revision: int
-    raw_instruction: str
-    normalized_instruction: str
-    action: ActionKind
-    source: Optional[SlotRef] = None
-    destination: Optional[SlotRef] = None
-    target: Optional[SlotRef] = None
-    mulligan_slots: tuple[int, ...] = ()
-    card_type: Optional[str] = None
-    ocr_confidence: float = 0.0
-    semantic_confidence: float = 0.0
-    choice_name: Optional[str] = None
-    # 真实面板在目标行后面还会打印一行「目标卡名」（不带前缀，会被
-    # normalize_action_text 过滤掉），单独留一份给「手牌/场面两可」的目标判定用。
-    target_name: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class ValidationResult:
-    accepted: bool
-    code: str
-    diagnostics: tuple[str, ...] = ()
-    value: Any = None
-
-    @classmethod
-    def allow(cls, value: Any) -> "ValidationResult":
-        return cls(True, "accepted", value=value)
-
-    @classmethod
-    def reject(cls, code: str, *diagnostics: str) -> "ValidationResult":
-        return cls(False, code, diagnostics)
+__all__ = [
+    "ActionKind",
+    "FrameEvidence",
+    "OcrEvidence",
+    "OcrLine",
+    "ProposedAction",
+    "SlotRef",
+    "ValidationResult",
+]

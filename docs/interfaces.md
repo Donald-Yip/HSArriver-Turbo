@@ -41,6 +41,23 @@ Stable semantic identity:
 
 `CardDefinition` contains static metadata only. `CardCapabilitySet` contains normalized booleans for targetable, hand_target, board_target, choose_one, discover, starship, location, trade, and timeline.
 
+### Recommendation Semantics
+
+`ActionKind`, `SlotRef`, `ProposedAction`, and `ValidationResult` are pure domain
+contracts. `CardDefinition` extends static metadata with `TargetScope`,
+`target_card_types`, `choose_one_options`, and `ability_panel`. Code must not
+key behavior on concrete card IDs; measured facts that cannot be derived from
+`cards.json` belong in `rules/card_rules.json` and are validated by the card
+adapter at startup.
+
+Application recommendation contracts are `AdaptedAction`,
+`RecommendationContext`, `RecommendationAdapterPort`, and `CardSemanticsPort`.
+The application flow owns retry/circuit-breaker/evidence progression and may
+only depend on injected ports. The adapter layer owns `cards.json` loading,
+rule-pack validation, recommendation parsing, recommendation adaptation, OCR
+evidence DTOs, and legacy click-action DTOs. Root modules under `src/game_state`
+and `src/parser` are compatibility facades only.
+
 ### ActionIntent / ActionPlan
 
 `ActionIntent` describes the semantic intent. It carries an optional zero-based `destination` placement index; the R10 parser only sets it for `放置于我方N号位` on a play-card instruction. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, timeout, `wait_for_change`, and an optional `confirmation_required` plan flag. A non-waiting step is dispatched sequentially but does not poll for a log revision or evaluate postconditions. The final step must wait; plans with `confirmation_required=True` must also carry a non-empty final step or plan postcondition. Plans must not contain coordinates or executable callbacks.

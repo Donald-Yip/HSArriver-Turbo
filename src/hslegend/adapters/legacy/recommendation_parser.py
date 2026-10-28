@@ -1,0 +1,459 @@
+"""Deterministic recommendation grammar; never guesses key digits."""
+
+import re
+import time
+import uuid
+
+from hslegend.domain import ActionKind, ProposedAction, SlotRef
+
+
+class RecommendationParseError(ValueError):
+    pass
+
+
+class RecommendationParser:
+    _mulligan = re.compile(r"^替换([1-9]\d*)号位卡牌$")
+    _keep_all = "保留全部卡牌"
+    _play = re.compile(r"^打出([1-9]\d*)号位(随从|法术|武器|地标|英雄)$")
+    _trade = re.compile(r"^(?:交易|锻造|预备)([1-9]\d*)号位卡牌$")
+    _destination = re.compile(r"^放置于我方([1-9]\d*)号位$")
+    _minion_attack = re.compile(r"^操作([1-9]\d*)号位随从攻击$")
+    _hero_attack = re.compile(r"^操作我方英雄攻击$")
+    # 目标行的阵营词放宽 OCR 常见误认：实测把「己方」认成「已方/巳方」后，
+    # 整条法术推荐会被判成 unsupported_spell_target 永久重试（2026-10-24
+    # 反馈包：「打出2号位法术 / 目标是已方2号位」连试 70+ 次）。只放宽阵营
+    # 词与「的/随从/卡牌」这些修饰，**数字和号位仍然严格**，判不出阵营照旧拒绝。
+    _target = re.compile(
+        r"^目标是(?:对方|敌方|故方)([1-9]\d*)号位(?:的)?(?:随从|卡牌)?$")
+    _friendly_hand_target = re.compile(
+        r"^目标是(?:己方|已方|巳方|我方)([1-9]\d*)号位(?:的)?(?:随从|卡牌)?$")
+    _enemy_hero_targets = {"目标是对方英雄", "目标是敌方英雄", "目标是故方英雄"}
+    _friendly_hero_targets = {
+        "目标是己方英雄", "目标是我方英雄",
+        "目标是已方英雄", "目标是巳方英雄",
+    }
+    _location = re.compile(r"^操作([1-9]\d*)号位地标$")
+    # 星舰发射：盒子的明确写法是「发射1号位星舰」，也可能写成「操作1号位星舰」
+    # 或「发射我方1号位星舰」（我方前缀可选）。
+    _starship = re.compile(r"^(?:发射|操作)(?:我方)?([1-9]\d*)号位星舰$")
+    _discover = re.compile(
+        r"^(?:选择我方([1-4])号位卡牌|选(?:择)?第([1-4])个选项)$")
+    # 选项/发现结算后，游戏还要你再点一个目标时盒子的写法（真实面板实测）：
+    #   「选择对方2号位卡牌」+ 下一行目标卡名（克苏恩「凝视」、鲍勃「招募随从」）。
+    # 与发现面板的「选择我方N号位卡牌」区别：带「对方/敌方」的只能是场面目标；
+    # 「选择我方N号位随从」用「随从」二字，也不会和面板的「卡牌」混淆。
+    # 「选择我方N号位卡牌」仍按发现选项解析，没有选项面板时才由适配层按卡名
+    # 判定它其实是“选自己的随从/手牌”（见 recommendation_adapter）。
+    _select_target = re.compile(
+        r"^(?:选择(对方|敌方)([1-9]\d*)号位(?:卡牌|随从)"
+        r"|选择(我方)([1-9]\d*)号位随从"
+        r"|选择(对方|敌方|我方)英雄)$")
+    _select_target_sides = {"我方": "friendly", "对方": "enemy", "敌方": "enemy"}
+    # HSAng 时间线提示字：按钮文案可能是纯「回溯/维持」，也可能是带标题的
+    # 「回溯时间线/维持时间线」（OCR 也可能把两者读成「回溯」+「时间线」两行，
+    # 其中「时间线」非动作行会被过滤，只剩「回溯」）。
+    _timeline = re.compile(r"^(回溯|维持)\s*(?:时间线)?$")
+    _reference_a_headers = {"打法参考A", "打法参考Ａ"}
+    _reference_b_headers = {"打法参考B", "打法参考Ｂ"}
+
+    @classmethod
+    def normalize_action_text(cls, text):
+        parser = cls()
+        lines = parser._reference_a_lines(text or "")
+        retained = []
+        for index, line in enumerate(lines):
+            if (parser._is_action_line(line)
+                    or parser._destination.fullmatch(line)
+                    or parser._target.fullmatch(line)
+                    or parser._friendly_hand_target.fullmatch(line)
+                    or line in parser._enemy_hero_targets
+                    or parser._select_target.fullmatch(line)
+                    or "目标" in line
+                    or line == "选择卡牌"
+                    or (index > 0 and lines[index - 1] == "选择卡牌")):
+                retained.append(line)
+        return "\n".join(retained)
+
+    def parse(self, ocr, turn_number, log_revision):
+        action_text = self.normalize_action_text(ocr.normalized_text)
+        lines = self._lines(action_text)
+        if not lines:
+            raise RecommendationParseError("empty_recommendation")
+        action_lines = [line for line in lines if self._is_action_line(line)]
+        # 「选择对方N号位卡牌」有两种用法：
+        #   * 面板上只有它 → 它本身就是一条动作（SELECT_TARGET）；
+        #   * 和别的动作同屏 → 它只是那个动作的目标，改写成现成的
+        #     「目标是对方N号位」，让打出/攻击/发现/地标/技能等原有分支直接复用。
+        select_lines = [line for line in lines
+                        if self._select_target.fullmatch(line)]
+        if select_lines:
+            if len(select_lines) > 1:
+                raise RecommendationParseError("ambiguous_target")
+            select_line = select_lines[0]
+            select_match = self._select_target.fullmatch(select_line)
+            if not action_lines:
+                return self._build(
+                    ocr, turn_number, log_revision, ActionKind.SELECT_TARGET,
+                    target=self._select_target_ref(select_match),
+                    target_name=self._line_after(
+                        self._reference_a_lines(ocr.normalized_text),
+                        select_line))
+            target_line = self._as_target_line(select_match)
+            lines = [target_line if line == select_line else line
+                     for line in lines]
+        if self._keep_all in action_lines:
+            if len(action_lines) != 1:
+                raise RecommendationParseError("ambiguous_actions")
+            return self._build(
+                ocr, turn_number, log_revision,
+                ActionKind.MULLIGAN, mulligan_slots=())
+        timeline = [line for line in action_lines
+                    if self._timeline_of(line) is not None]
+        if timeline:
+            # HSAng 时间线提示出现时，面板上其它文字都是上一步已完成动作的残留
+            # （盒子先给上一步的推荐、特效完成后弹时间线框、再追加一行时间线字
+            # 告诉点哪个按钮）。弹框是模态的——不点掉它什么都做不了，所以共存
+            # 内容一律忽略：出现「回溯」就点回溯、出现「维持」就点维持，不再要求
+            # 共存的是不是打出/选择。唯一无法判定的是回溯/维持同屏时该点哪个。
+            choices = {self._timeline_of(line) for line in timeline}
+            if choices == {"undo", "keep"}:
+                raise RecommendationParseError("ambiguous_actions")
+            action = (ActionKind.TIMELINE_UNDO
+                      if "undo" in choices else ActionKind.TIMELINE_KEEP)
+            return self._build(ocr, turn_number, log_revision, action)
+        mulligans = [self._mulligan.fullmatch(line) for line in action_lines]
+        if action_lines and all(match is not None for match in mulligans):
+            slots = tuple(sorted({int(match.group(1)) for match in mulligans}))
+            return self._build(ocr, turn_number, log_revision,
+                               ActionKind.MULLIGAN, mulligan_slots=slots)
+        if len(action_lines) != 1:
+            raise RecommendationParseError("ambiguous_actions")
+        primary = action_lines[0]
+
+        starship = self._starship.fullmatch(primary)
+        if starship:
+            self._reject_target_lines(lines)
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.LAUNCH_STARSHIP,
+                source=SlotRef("board_slot", "friendly",
+                               int(starship.group(1))))
+
+        play = self._play.fullmatch(primary)
+        if play:
+            slot = int(play.group(1))
+            card_type = {"随从": "MINION", "法术": "SPELL",
+                         "武器": "WEAPON", "地标": "LOCATION",
+                         "英雄": "HERO"}[play.group(2)]
+            target = None
+            target_name = None
+            if card_type == "SPELL":
+                enemy_board_targets = [
+                    match for line in lines
+                    if (match := self._target.fullmatch(line))
+                ]
+                friendly_board_targets = [
+                    match for line in lines
+                    if (match := self._friendly_hand_target.fullmatch(line))
+                ]
+                enemy_hero_targets = sum(
+                    line in self._enemy_hero_targets for line in lines)
+                friendly_hero_targets = sum(
+                    line in self._friendly_hero_targets for line in lines)
+                target_lines = [line for line in lines if "目标" in line]
+                if len(target_lines) > 1:
+                    raise RecommendationParseError("ambiguous_target")
+                target_count = (
+                    len(enemy_board_targets) + len(friendly_board_targets)
+                    + enemy_hero_targets + friendly_hero_targets)
+                if target_lines and target_count != 1:
+                    raise RecommendationParseError("unsupported_spell_target")
+                if enemy_board_targets:
+                    target = SlotRef(
+                        "board_slot", "enemy",
+                        int(enemy_board_targets[0].group(1)))
+                elif friendly_board_targets:
+                    target = SlotRef(
+                        "board_slot", "friendly",
+                        int(friendly_board_targets[0].group(1)))
+                elif enemy_hero_targets:
+                    target = SlotRef("hero", "enemy")
+                elif friendly_hero_targets:
+                    target = SlotRef("hero", "friendly")
+            elif card_type == "MINION":
+                # Card identity in the adapter disambiguates the special
+                # battlecries whose friendly slot actually means a hand card.
+                target = self._optional_board_or_hero_target(
+                    lines, "unsupported_minion_target")
+                target_name = self._target_name(
+                    self._lines(ocr.normalized_text),
+                    self._target_line(lines))
+            else:
+                self._reject_target_lines(lines)
+            destinations = [self._destination.fullmatch(line) for line in lines]
+            destinations = [match for match in destinations if match]
+            if len(destinations) > 1:
+                raise RecommendationParseError("ambiguous_destination")
+            destination = (SlotRef("board_slot", "friendly",
+                                   int(destinations[0].group(1)))
+                           if destinations else None)
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.PLAY_CARD,
+                source=SlotRef("hand_slot", "friendly", slot),
+                destination=destination,
+                target=target,
+                target_name=target_name,
+                card_type=card_type)
+
+        trade = self._trade.fullmatch(primary)
+        if trade:
+            self._reject_target_lines(lines)
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.TRADE_CARD,
+                source=SlotRef(
+                    "hand_slot", "friendly", int(trade.group(1))))
+
+        if primary == "使用英雄技能":
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_hero_power_target")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.USE_HERO_POWER,
+                source=SlotRef("hero_power", "friendly"), target=target)
+
+        discover = self._discover.fullmatch(primary)
+        if discover:
+            # 发现/选项菜单有时候自己还要再点一个目标（酒馆老板鲍勃「招募随从」：
+            # 选完这一项游戏会让你点一个对方随从），所以这里不再拒绝目标行。
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_discover_target")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.CHOOSE_DISCOVER,
+                source=SlotRef("discover_slot", "friendly",
+                               int(discover.group(1) or discover.group(2))),
+                target=target,
+                # 下一行卡名：没有选项面板时，适配层用它判断「选择我方N号位
+                # 卡牌」到底指自己的哪个随从/哪张手牌（两边都能对上就拒绝）。
+                target_name=self._line_after(
+                    self._reference_a_lines(ocr.normalized_text), primary))
+
+        attack = self._minion_attack.fullmatch(primary)
+        hero_attack = self._hero_attack.fullmatch(primary)
+        if attack and any(line == "选择卡牌" for line in lines):
+            # 古神（以及同一套面板的泰坦）把「发动技能」写成和攻击一样的一行，
+            # 只多出「选择卡牌 + 技能名」：点随从 → 选一个技能 → 有的技能还要
+            # 再点一个目标（克苏恩的凝视：对一个敌方随从造成伤害）。
+            # 盒子不给技能号位，号位由 choose_skill 的记录表按技能名反查；
+            # 认不出名字就抛错重试，一下都不点（见适配层）。
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_ability_target")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.USE_ABILITY,
+                source=SlotRef("board_slot", "friendly",
+                               int(attack.group(1))),
+                target=target,
+                choice_error="ability_name_required")
+        if attack or hero_attack:
+            targets = [self._target.fullmatch(line) for line in lines]
+            targets = [match for match in targets if match]
+            targets.extend(
+                line for line in lines if line in self._enemy_hero_targets)
+            if len(targets) > 1 or (not targets and hero_attack):
+                raise RecommendationParseError("attack_target_required")
+            source = (SlotRef("board_slot", "friendly", int(attack.group(1)))
+                      if attack else SlotRef("hero", "friendly"))
+            target = None
+            if targets:
+                target = (SlotRef("hero", "enemy")
+                          if targets[0] in self._enemy_hero_targets
+                          else SlotRef("board_slot", "enemy",
+                                       int(targets[0].group(1))))
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.ATTACK,
+                source=source, target=target)
+
+        location = self._location.fullmatch(primary)
+        if location:
+            target = self._optional_board_or_hero_target(
+                lines, "unsupported_location_target")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.USE_LOCATION,
+                source=SlotRef("board_slot", "friendly",
+                               int(location.group(1))),
+                target=target)
+
+        if primary == "结束回合":
+            self._reject_target_lines(lines)
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.END_TURN)
+        raise RecommendationParseError("unsupported_recommendation")
+
+    def _lines(self, text):
+        translation = str.maketrans("０１２３４５６７８９", "0123456789")
+        return [line.strip().translate(translation) for line in text.splitlines()
+                if line.strip()]
+
+    def _reference_a_lines(self, text):
+        lines = self._lines(text)
+        has_reference_a = any(
+            line in self._reference_a_headers for line in lines)
+        retained = []
+        reading_a = not has_reference_a
+        for line in lines:
+            if line in self._reference_a_headers:
+                reading_a = True
+                continue
+            if line in self._reference_b_headers:
+                if reading_a:
+                    break
+                continue
+            if reading_a:
+                retained.append(line)
+        return retained
+
+    def _is_action_line(self, line):
+        if self._timeline_of(line) is not None:
+            return True
+        return bool(self._mulligan.fullmatch(line) or self._play.fullmatch(line)
+                    or self._trade.fullmatch(line)
+                    or self._minion_attack.fullmatch(line)
+                    or self._hero_attack.fullmatch(line)
+                    or self._location.fullmatch(line)
+                    or self._starship.fullmatch(line)
+                    or self._discover.fullmatch(line)
+                    or line in {self._keep_all, "使用英雄技能", "结束回合"})
+
+    def _timeline_of(self, line):
+        match = self._timeline.fullmatch(line)
+        if match is None:
+            return None
+        return "undo" if match.group(1) == "回溯" else "keep"
+
+    @staticmethod
+    def _target_line(lines):
+        """推荐里那一行目标（调用前已确认最多一行）。"""
+        target_lines = [line for line in lines if "目标" in line]
+        return target_lines[0] if target_lines else None
+
+    @staticmethod
+    def _target_name(raw_lines, target_line):
+        """取目标行后面那行目标卡名。
+
+        真实面板顺序是：动作行 → 出牌名 → 目标行 → 目标名 → 放置行（对真实运行
+        日志统计过：带目标行的推荐比不带的多正好一行）。卡名行不在
+        normalize_action_text 的保留范围内，只能从原始 OCR 文本里取。
+        """
+        if not target_line:
+            return None
+        parser = RecommendationParser()
+        for index, line in enumerate(raw_lines):
+            if line != target_line or index + 1 >= len(raw_lines):
+                continue
+            candidate = raw_lines[index + 1]
+            if (not candidate or "目标" in candidate
+                    or candidate.startswith("放置于")
+                    or parser._is_action_line(candidate)
+                    or parser._select_target.fullmatch(candidate)
+                    or candidate in parser._reference_a_headers
+                    or candidate in parser._reference_b_headers
+                    or "记牌器" in candidate):
+                return None
+            return candidate
+        return None
+
+    @classmethod
+    def _select_target_ref(cls, match):
+        """把「选择对方N号位卡牌/我方N号位随从/对方英雄」变成 SlotRef。"""
+        if match is None:
+            return None
+        side = match.group(1) or match.group(3) or match.group(5)
+        index = match.group(2) or match.group(4)
+        owner = cls._select_target_sides[side]
+        if index:
+            return SlotRef("board_slot", owner, int(index))
+        return SlotRef("hero", owner)
+
+    @classmethod
+    def _as_target_line(cls, match):
+        """把目标选择行改写成既有目标句式（复用打出/攻击/发现等目标逻辑）。"""
+        ref = cls._select_target_ref(match)
+        if ref.kind == "hero":
+            return "目标是对方英雄" if ref.owner == "enemy" else "目标是我方英雄"
+        if ref.owner == "enemy":
+            return f"目标是对方{ref.index}号位"
+        return f"目标是我方{ref.index}号位"
+
+    @staticmethod
+    def _line_after(raw_lines, anchor):
+        """取 anchor 后面那一行卡名（过滤动作/目标/标题等）；没有则 None。"""
+        if not anchor:
+            return None
+        parser = RecommendationParser()
+        for index, line in enumerate(raw_lines):
+            if line != anchor or index + 1 >= len(raw_lines):
+                continue
+            candidate = raw_lines[index + 1]
+            if (not candidate or "目标" in candidate
+                    or candidate.startswith("放置于")
+                    or parser._is_action_line(candidate)
+                    or parser._select_target.fullmatch(candidate)
+                    or candidate in parser._reference_a_headers
+                    or candidate in parser._reference_b_headers
+                    or "记牌器" in candidate):
+                return None
+            return candidate
+        return None
+
+    def _optional_board_or_hero_target(self, lines, unsupported_code):
+        target_lines = [line for line in lines if "目标" in line]
+        if len(target_lines) > 1:
+            raise RecommendationParseError("ambiguous_target")
+        if not target_lines:
+            return None
+        target_line = target_lines[0]
+        enemy_board = self._target.fullmatch(target_line)
+        friendly_board = self._friendly_hand_target.fullmatch(target_line)
+        if target_line in self._enemy_hero_targets:
+            return SlotRef("hero", "enemy")
+        if target_line in self._friendly_hero_targets:
+            return SlotRef("hero", "friendly")
+        if enemy_board:
+            return SlotRef(
+                "board_slot", "enemy", int(enemy_board.group(1)))
+        if friendly_board:
+            return SlotRef(
+                "board_slot", "friendly", int(friendly_board.group(1)))
+        raise RecommendationParseError(unsupported_code)
+
+    @staticmethod
+    def _reject_target_lines(lines):
+        if any("目标" in line for line in lines):
+            raise RecommendationParseError("targeted_action_unsupported")
+
+    @staticmethod
+    def _build(ocr, turn_number, log_revision, action,
+               choice_error="choose_one_name_required", **kwargs):
+        action_text = RecommendationParser.normalize_action_text(
+            ocr.normalized_text)
+        lines = action_text.splitlines()
+        markers = [i for i, line in enumerate(lines) if line == "选择卡牌"]
+        choice_name = None
+        if markers and action in (ActionKind.PLAY_CARD,
+                                  ActionKind.USE_HERO_POWER,
+                                  ActionKind.USE_ABILITY,
+                                  ActionKind.CHOOSE_DISCOVER):
+            if len(markers) != 1 or markers[0] + 1 >= len(lines):
+                raise RecommendationParseError(choice_error)
+            choice_name = lines[markers[0] + 1]
+            if (RecommendationParser()._is_action_line(choice_name)
+                    or "目标" in choice_name or choice_name.startswith("放置于")):
+                raise RecommendationParseError(choice_error)
+        return ProposedAction(
+            action_id=f"action-{uuid.uuid4()}", frame_id=ocr.frame_id,
+            created_at=time.time(), turn_number=turn_number,
+            log_revision=log_revision,
+            # 原始 OCR 文本（不是过滤后的动作行）：卡死排查时最需要看到的就是
+            # 「盒子到底写了什么」，[推荐] 那行日志直接打印这个字段。
+            raw_instruction=str(ocr.normalized_text or ""),
+            normalized_instruction=action_text, action=action,
+            ocr_confidence=ocr.confidence, semantic_confidence=1.0,
+            choice_name=choice_name,
+            **kwargs)

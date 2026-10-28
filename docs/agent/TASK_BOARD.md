@@ -31,6 +31,7 @@ Updated: 2026-10-28
 | R15 | in_progress | feature/R15-ui-parity | R13A | Full-feature UI parity and reliable startup |
 | R16A | done | feature/R16A-upstream-sync-1027 | R15 | Original repository 2026.10.27 update synced and approved |
 | R16 | planned | feature/R16-legacy-retirement | R15 | Legacy cleanup |
+| R17 | in_progress | feature/R17-recommendation-semantics | R16A | Layered recommendation semantics |
 
 ## WIP Limit
 

@@ -27,7 +27,7 @@ from hslegend.application import (
     JournalAppendResult,
     RunJournalPort,
 )
-from hslegend.domain import CardCapabilitySet, CardDefinition
+from hslegend.domain import CardCapabilitySet, CardDefinition, TargetScope
 
 
 SRC_ROOT = Path(__file__).resolve().parents[2] / "src"
@@ -276,6 +276,7 @@ class JsonCardCatalogTests(unittest.TestCase):
                         board_target=True,
                         discover=True,
                     ),
+                    target_scope=TargetScope.BOARD,
                 ),
                 first,
             )
