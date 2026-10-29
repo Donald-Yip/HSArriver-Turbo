@@ -3,16 +3,20 @@ import win32api
 import win32con
 import pywintypes
 import time
+import contextvars
 from pynput.mouse import Button, Controller
 import random
 from contextlib import contextmanager
+from hslegend.adapters.legacy.actions import ActionCancelled
 # import get_screen
 
 from constants.constants import *
 from print_info import *
 from get_screen import *
 from get_screen import _bitblt_region
-from config import DEFAULT_HUMAN_LIKE, human_like_settings
+from config import (
+    DEFAULT_HUMAN_LIKE, human_like_settings, load_battle_click_points,
+)
 from display_mapping import to_screen as _to_screen
 from display_mapping import display_mapping as _display_mapping
 
@@ -63,10 +67,41 @@ from display_mapping import display_mapping as _display_mapping
 
 
 
+_CANCEL_EVENT = contextvars.ContextVar("hearthstone_cancel_event", default=None)
+
+
+@contextmanager
+def action_cancellation(stop_event=None):
+    """Make click delays and click boundaries cooperative with Ctrl+Q."""
+    token = _CANCEL_EVENT.set(stop_event)
+    try:
+        yield
+    finally:
+        _CANCEL_EVENT.reset(token)
+
+
+def _raise_if_cancelled():
+    event = _CANCEL_EVENT.get()
+    if event is not None and event.is_set():
+        raise ActionCancelled("stopped")
+
+
+def _wait_delay(seconds):
+    _raise_if_cancelled()
+    seconds = max(0.0, float(seconds))
+    event = _CANCEL_EVENT.get()
+    if event is not None:
+        if event.wait(seconds):
+            raise ActionCancelled("stopped")
+    elif seconds > 0:
+        time.sleep(seconds)
+    _raise_if_cancelled()
+
+
 def rand_sleep(interval):
     base_time = interval * 0.75
     rand_time = interval * 0.5 * random.random()  # avg = 0.25 * interval
-    time.sleep(base_time + rand_time)
+    _wait_delay(base_time + rand_time)
 
 
 # 鼠标复位点（只移动、不点击的待命位）：屏幕左上角空白处。
@@ -150,7 +185,7 @@ def _random_hand_hover_point(last=None):
     return (960, HAND_HOVER_Y)
 
 
-def human_like_pause(mouse=None, settings=None):
+def human_like_pause(mouse=None, settings=None, stop_event=None):
     """活人感延时：0.5~3s 随机等待，期间鼠标在手牌区随机悬停。
 
     每处悬停时长同样随机（默认 0.2~1s，见 config.DEFAULT_HUMAN_LIKE）。
@@ -159,6 +194,8 @@ def human_like_pause(mouse=None, settings=None):
     cfg = settings or human_like_settings()
     if mouse is None:
         mouse = Controller()
+    if stop_event is not None and stop_event.is_set():
+        return 0.0
     total = random.uniform(cfg["post_delay_min"], cfg["post_delay_max"])
     # 这句同时驱动浮窗底部的延时进度条（log_overlay 解析“延时 X s 后”取总时长），
     # 措辞保持“延时 X.Xs 后”，剩下的文字会作为进度条下方的说明显示。
@@ -176,7 +213,15 @@ def human_like_pause(mouse=None, settings=None):
         mouse.position = point
         last = point
         hover = random.uniform(cfg["hover_min"], cfg["hover_max"])
-        time.sleep(min(hover, remaining))
+        if stop_event is not None:
+            if stop_event.wait(min(hover, remaining)):
+                break
+        else:
+            time.sleep(min(hover, remaining))
+        if stop_event is not None and stop_event.is_set():
+            break
+    if stop_event is not None and stop_event.is_set():
+        return total
     center_mouse(mouse)
     # 与固定延时一致的收尾标记：让浮窗进度条立刻清空、显示“延时：无”。
     sys_print("[SYS] 延时结束")
@@ -240,10 +285,15 @@ def park_mouse(mouse=None):
 @contextmanager
 def hearthstone_action_session():
     """Park the pointer after every complete Hearthstone action."""
+    cancelled = False
     try:
         yield
+    except ActionCancelled:
+        cancelled = True
+        raise
     finally:
-        park_mouse()
+        if not cancelled:
+            park_mouse()
 
 
 def run_hearthstone_action(action):
@@ -252,11 +302,16 @@ def run_hearthstone_action(action):
 
 
 def _send_physical_click(mouse, x, y, button):
+    _raise_if_cancelled()
     mouse.position = (x, y)
     rand_sleep(0.1)
+    _raise_if_cancelled()
     mouse.press(button)
-    rand_sleep(0.1)
-    mouse.release(button)
+    try:
+        rand_sleep(0.1)
+    finally:
+        # Never leave the physical button held when Ctrl+Q arrives mid-click.
+        mouse.release(button)
 
 
 def click_button(x, y, button, require_hearthstone=True):
@@ -265,6 +320,7 @@ def click_button(x, y, button, require_hearthstone=True):
     这是"屏幕坐标出口"：调用方传进来的必须已经是屏幕坐标。客户区相对坐标
     请走 left_click / right_click（它们负责换算），别在这里再换一次。
     """
+    _raise_if_cancelled()
     try:
         x, y = int(x), int(y)
         hearthstone_hwnd = get_HS_hwnd() if require_hearthstone else 0
@@ -279,6 +335,7 @@ def click_button(x, y, button, require_hearthstone=True):
 
     mouse = Controller()
     rand_sleep(0.1)
+    _raise_if_cancelled()
     if (require_hearthstone
             and win32gui.GetForegroundWindow() != hearthstone_hwnd):
         # The first physical click on a background Unity window can be
@@ -293,6 +350,7 @@ def click_button(x, y, button, require_hearthstone=True):
         _send_physical_click(
             mouse, activate_x, activate_y, Button.right)
         rand_sleep(0.25)
+        _raise_if_cancelled()
     _send_physical_click(mouse, x, y, button)
     return True
 
@@ -606,18 +664,24 @@ def emoj(target=None):
     rand_sleep(OPERATE_INTERVAL)
 
 
-def click_skill():
+def hero_power_point(slot="primary"):
+    key = "hero_power_secondary" if slot == "secondary" else "hero_power_primary"
+    points = load_battle_click_points()
+    return tuple(points.get(key, (1150, 850)))
+
+
+def click_skill(slot="primary"):
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1150, 850)
+    left_click(*hero_power_point(slot))
 
 
-def use_skill_no_point():
-    click_skill()
+def use_skill_no_point(slot="primary"):
+    click_skill(slot)
     cancel_click()
 
 
-def use_skill_point_mine(my_index, my_num):
-    click_skill()
+def use_skill_point_mine(my_index, my_num, slot="primary"):
+    click_skill(slot)
 
     if my_index < 0:
         choose_my_hero()

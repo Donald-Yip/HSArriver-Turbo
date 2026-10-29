@@ -16,6 +16,11 @@ def card_text(card_id):
     return _semantics().card_text(card_id)
 
 
+def card_name(card_id):
+    card = _semantics().get_card(card_id or "")
+    return card.name if card is not None else ""
+
+
 @lru_cache(maxsize=1)
 def choose_one_card_ids():
     return frozenset(
@@ -34,6 +39,11 @@ def choose_one_card_names():
 
 def choose_one_option_card_ids(source_card_id):
     return _semantics().choose_one_option_card_ids(source_card_id)
+
+
+def choose_one_option_card_ids_ordered(source_card_id):
+    card = _semantics().get_card(source_card_id or "")
+    return tuple(card.choose_one_options) if card is not None else ()
 
 
 def is_choose_one_card(card_id):
@@ -65,6 +75,14 @@ def skill_name_at(card_id, index):
 
 def skill_index(card_id, name):
     return _semantics().skill_index(card_id, name)
+
+
+def ability_requires_target(card_id, index):
+    return _semantics().ability_requires_target(card_id, index)
+
+
+def hero_power_slot(card_id):
+    return _semantics().hero_power_slot(card_id)
 
 
 def is_choose_skill_card(card_id):

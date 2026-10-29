@@ -108,6 +108,17 @@ MODE_POINT_LABEL = {
     "casual": "休闲",
 }
 
+# 战斗界面可校准点击点（客户区相对坐标）。校准框的中心就是实际点击点。
+BATTLE_POINTS = {
+    "hero_power_primary": (1150, 850),
+    "hero_power_secondary": (1235, 730),
+}
+BATTLE_POINT_COLOR = "#ff8c42"
+BATTLE_POINT_LABEL = {
+    "hero_power_primary": "第一英雄技能",
+    "hero_power_secondary": "第二英雄技能",
+}
+
 
 def mode_click_points() -> dict:
     """模式切换的四个点击点（客户区相对坐标，唯一来源）。
@@ -117,6 +128,11 @@ def mode_click_points() -> dict:
     `mode_click` 覆盖，所以改这一份就等于改所有调用方的默认值。
     """
     return {key: tuple(value) for key, value in MODE_POINTS.items()}
+
+
+def battle_click_points() -> dict:
+    """战斗界面点击点；ui_config.json 的 battle_click 可逐项覆盖。"""
+    return {key: tuple(value) for key, value in BATTLE_POINTS.items()}
 
 
 def mode_point_box(point) -> tuple[int, int, int, int]:
@@ -134,6 +150,8 @@ def mode_point_box(point) -> tuple[int, int, int, int]:
 # 单独提取成常量是为了让 CALIBRATION_TARGETS 的 default 与 mode_click_points() 同源。
 MODE_TARGET_BOX = {key: mode_point_box(point)
                    for key, point in MODE_POINTS.items()}
+BATTLE_TARGET_BOX = {key: mode_point_box(point)
+                     for key, point in BATTLE_POINTS.items()}
 
 
 # 可用校准工具拖拽并保存到 ui_config.json 的区域（校准目标登记表）。
@@ -198,21 +216,31 @@ CALIBRATION_TARGETS = (
     # 下面四个是「手动切换对战模式」（hsctl mode）用的**点**：保存到 ui_config.json
     # 的 `mode_click` 段（键就是 point_key），值为 [x, y]；框中心即点击点。
     {"key": "mode_menu_open", "config_key": "mode_menu_open", "point_key": "menu_open",
+     "point_group": "mode_click",
      "label": "模式按钮（选卡组界面右上角）", "short": "模式按钮",
      "color": MODE_POINT_COLOR, "default": MODE_TARGET_BOX["menu_open"],
      "hint": "框住选卡组界面右上角的模式按钮：点它弹出狂野/标准/休闲菜单"},
     {"key": "mode_wild", "config_key": "mode_wild", "point_key": "wild",
+     "point_group": "mode_click",
      "label": "模式「狂野」盾牌", "short": "狂野", "color": MODE_POINT_COLOR,
      "default": MODE_TARGET_BOX["wild"],
      "hint": "框住弹出菜单左边的无限符号盾牌（狂野模式）：框中心=实际点击点"},
     {"key": "mode_standard", "config_key": "mode_standard", "point_key": "standard",
+     "point_group": "mode_click",
      "label": "模式「标准」盾牌", "short": "标准", "color": MODE_POINT_COLOR,
      "default": MODE_TARGET_BOX["standard"],
      "hint": "框住弹出菜单中间的圣甲虫盾牌（标准模式）：框中心=实际点击点"},
     {"key": "mode_casual", "config_key": "mode_casual", "point_key": "casual",
+     "point_group": "mode_click",
      "label": "模式「休闲」盾牌", "short": "休闲", "color": MODE_POINT_COLOR,
      "default": MODE_TARGET_BOX["casual"],
      "hint": "框住弹出菜单右边的太阳盾牌（休闲模式）：框中心=实际点击点"},
+    {"key": "hero_power_secondary", "config_key": "hero_power_secondary",
+     "point_key": "hero_power_secondary", "point_group": "battle_click",
+     "label": "第二英雄技能按钮（吸血鬼之吻）", "short": "第二技能",
+     "color": BATTLE_POINT_COLOR,
+     "default": BATTLE_TARGET_BOX["hero_power_secondary"],
+     "hint": "框住战斗界面右侧、第一英雄技能右上方的第二技能按钮：框中心=实际点击点"},
 )
 
 # get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
@@ -287,6 +315,26 @@ def _mode_boxes() -> dict:
     return boxes
 
 
+def _battle_boxes() -> dict:
+    """第二英雄技能等战斗点击点的当前生效方框。"""
+    points = None
+    try:
+        from config import load_battle_click_points
+        points = load_battle_click_points()
+    except Exception:
+        points = None
+    if not isinstance(points, dict):
+        return dict(BATTLE_TARGET_BOX)
+    boxes = {}
+    for point_key in BATTLE_TARGET_BOX:
+        point = points.get(point_key) or BATTLE_POINTS[point_key]
+        try:
+            boxes[point_key] = mode_point_box(point)
+        except Exception:
+            boxes[point_key] = BATTLE_TARGET_BOX[point_key]
+    return boxes
+
+
 def calibration_targets(config=None) -> list[dict]:
     """可校准区域清单（校准工具/叠加层/AI胜率读取共用的唯一来源）。
 
@@ -296,12 +344,17 @@ def calibration_targets(config=None) -> list[dict]:
     """
     cfg = config if config is not None else _default_config()
     mode_boxes = _mode_boxes()
+    battle_boxes = _battle_boxes()
     targets = []
     for item in CALIBRATION_TARGETS:
         target = dict(item)
         point_key = target.get("point_key")
         if point_key:
-            target["box"] = _box(mode_boxes.get(point_key), target["default"])
+            if target.get("point_group") == "battle_click":
+                point_box = battle_boxes.get(point_key)
+            else:
+                point_box = mode_boxes.get(point_key)
+            target["box"] = _box(point_box, target["default"])
         else:
             target["box"] = _box(getattr(cfg, item["config_key"], None),
                                  item["default"])

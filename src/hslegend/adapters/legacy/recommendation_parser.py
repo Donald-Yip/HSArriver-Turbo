@@ -70,6 +70,9 @@ class RecommendationParser:
                     or parser._select_target.fullmatch(line)
                     or "目标" in line
                     or line == "选择卡牌"
+                    or (index > 0 and lines[index - 1] == "使用英雄技能"
+                        and (index + 1 >= len(lines)
+                             or lines[index + 1] != "选择卡牌"))
                     or (index > 0 and lines[index - 1] == "选择卡牌")):
                 retained.append(line)
         return "\n".join(retained)
@@ -215,9 +218,14 @@ class RecommendationParser:
         if primary == "使用英雄技能":
             target = self._optional_board_or_hero_target(
                 lines, "unsupported_hero_power_target")
+            source_name = (None if any(line == "选择卡牌" for line in lines)
+                           else self._line_after(
+                               self._reference_a_lines(ocr.normalized_text),
+                               primary))
             return self._build(
                 ocr, turn_number, log_revision, ActionKind.USE_HERO_POWER,
-                source=SlotRef("hero_power", "friendly"), target=target)
+                source=SlotRef("hero_power", "friendly"), target=target,
+                source_name=source_name)
 
         discover = self._discover.fullmatch(primary)
         if discover:

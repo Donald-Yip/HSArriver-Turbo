@@ -255,6 +255,21 @@ class AdapterTests(unittest.TestCase):
                                     "ability_target_out_of_range"):
             adapt_action(parse(bad), state())
 
+    def test_target_contract_rejects_partial_ability_gestures(self):
+        missing_target = PANEL_B.replace(
+            "目标是对方2号位\n导航员伊莉斯\n", "")
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    "ability_target_required"):
+            adapt_action(parse(missing_target), state())
+
+        unexpected_target = (
+            "打法参考A\n操作2号位随从攻击\n克苏恩，帝国之眼\n"
+            "目标是对方2号位\n导航员伊莉斯\n选择卡牌\n克苏恩的愤怒"
+        )
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    "ability_target_unexpected"):
+            adapt_action(parse(unexpected_target), state())
+
     def test_enemy_hero_target_is_supported(self):
         text = ("打法参考A\n操作2号位随从攻击\n目标是对方英雄\n"
                 "选择卡牌\n克苏恩的凝视")
@@ -338,8 +353,8 @@ def _flow(text, states):
 
 
 class VerifyResultTests(unittest.TestCase):
-    def test_no_log_change_retries(self):
-        """日志一点没动 = 面板没弹/点空了：重试是安全的。"""
+    def test_no_log_change_waits_for_confirmation(self):
+        """No immediate evidence must wait instead of replaying the same click."""
         proposed = parse(PANEL_A)
         adapted = adapt_action(proposed, state())
         before = state()
@@ -348,7 +363,7 @@ class VerifyResultTests(unittest.TestCase):
 
         result = flow._verify_result(proposed, adapted, before_frame, before, 7)
 
-        self.assertEqual(ResultStatus.RETRY, result)
+        self.assertEqual(ResultStatus.UNCONFIRMED, result)
 
     def test_settled_ability_waits_for_the_next_recommendation(self):
         """技能结算有日志痕迹（这里用敌方随从掉血）：当已发动，等盒子更新。"""

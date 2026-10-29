@@ -3,6 +3,7 @@
 from hslegend.application.recommendation_flow import (
     FlowStepResult,
     FlowStepStatus,
+    PendingRecommendationAction,
     RecommendationFlow,
     ResultStatus,
     _UNSET_TURN,
@@ -12,6 +13,7 @@ from hslegend.application.recommendation_flow import (
 __all__ = [
     "FlowStepResult",
     "FlowStepStatus",
+    "PendingRecommendationAction",
     "RecommendationFlow",
     "ResultStatus",
     "_UNSET_TURN",

@@ -8,7 +8,7 @@
   * 自检：python calibrate_roi.py --selftest —— 窗口打开约 1 秒自动退出
   * 只拖框不跑 OCR：python calibrate_roi.py --no-ocr
 
-十三个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
+十四个可校准目标（按 Tab 切换，或直接点屏幕正中央的目标条）：
 
 | # | 目标 | 写入 ui_config.json | 对齐方法 |
 | --- | --- | --- | --- |
@@ -22,6 +22,7 @@
 | 8 | 选择套牌「选择套牌」标题（粉） | `deck_select_title_roi` | 框住顶部那四个字。**判界面靠它，绝不能用右下角「开始」**（没选中卡组时「开始」不出现） |
 | 9 | 选择套牌 9 个卡组（天蓝） | `deck_grid_roi` | 框住 9 个卡组**整块**区域：脚本按 3×3 均分得到 9 个点击点，只有名牌上有字的格子才会被点 |
 | 10-13 | 模式按钮 + 三个盾牌（红） | `mode_click` 段 | 选卡组界面的模式按钮、以及狂野/标准/休闲三个盾牌：**框中心=点击点** |
+| 14 | 第二英雄技能按钮（橙） | `battle_click.hero_power_secondary` | 框住第一英雄技能右上方的第二技能按钮：**框中心=点击点** |
 
 目标 7/8/9 是「界面识别」用的：拖它们的时候顶部提示条会实时显示判定结果
 （`框内文字匹配 1.00（阈值 0.80），对准了` / `9 格里 9 格有卡组名牌文字`），
@@ -960,6 +961,8 @@ class CalibrationSession:
         self._sync_boxes(mapping)
         from display_mapping import box_from_screen
         for target in self.targets:
+            if target.get("point_key"):
+                continue
             key = target["config_key"]
             # 先把屏幕框收进屏幕内（不然存下来的是屏幕外的死框），再换算成
             # **客户区相对坐标** —— ui_config.json 统一存这个口径。
@@ -974,9 +977,32 @@ class CalibrationSession:
                     expand_box(boxes[key], AI_WIN_RATE_WIDE_MARGIN))
         return boxes
 
+    def _click_points_to_save(self, mapping=None) -> dict:
+        """把点目标按 point_group 分组保存为 [x, y]，不影响 ROI 框。"""
+        mapping = self._mapping() if mapping is None else mapping
+        self._sync_boxes(mapping)
+        from display_mapping import box_from_screen
+        sections = {}
+        for target in self.targets:
+            point_key = target.get("point_key")
+            if not point_key:
+                continue
+            screen_box = self._clamp(target["box"])
+            target["box"] = list(screen_box)
+            target["client_box"] = list(
+                box_from_screen(screen_box, mapping, clamp=False))
+            left, top, right, bottom = target["client_box"]
+            group = target.get("point_group") or "mode_click"
+            sections.setdefault(group, {})[point_key] = [
+                (int(left) + int(right)) // 2,
+                (int(top) + int(bottom)) // 2,
+            ]
+        return sections
+
     def save(self, flash: bool = False) -> bool:
         mapping = self._mapping()
         boxes = self._boxes_to_save(mapping)
+        click_sections = self._click_points_to_save(mapping)
         path = _user_config_path()
         try:
             cfg = json.loads(path.read_text(encoding="utf-8"))
@@ -985,6 +1011,12 @@ class CalibrationSession:
         except Exception:
             cfg = {}
         cfg.update(boxes)
+        for group, values in click_sections.items():
+            section = cfg.get(group)
+            if not isinstance(section, dict):
+                section = {}
+            section.update(values)
+            cfg[group] = section
         if mapping is None:
             # 没有客户区几何时换算退化成恒等：这次存下来的其实是**屏幕坐标**，
             # 绝不能标成 client（否则下次炉石一显示，所有框都会被整体偏移一次）。
@@ -1010,9 +1042,13 @@ class CalibrationSession:
         if flash:
             self.saved_flash_until = time.time() + 1.5
         self.dirty = True
-        print(f"[校准] 已保存 {len(boxes)} 个区域 -> {path}")
+        point_count = sum(len(values) for values in click_sections.values())
+        print(f"[校准] 已保存 {len(boxes)} 个区域 / {point_count} 个点击点 -> {path}")
         for key, box in boxes.items():
             print(f"[校准]   {key} = {tuple(box)}")
+        for group, values in click_sections.items():
+            for key, point in values.items():
+                print(f"[校准]   {group}.{key} = {tuple(point)}")
         print("[校准] 下次「开始对战」生效（不覆盖名字/日志目录/延时等其它配置）")
         return True
 

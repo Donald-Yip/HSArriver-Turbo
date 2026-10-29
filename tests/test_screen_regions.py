@@ -37,7 +37,8 @@ class RegionRegistryTests(unittest.TestCase):
              "win_rate", "win_rate_wide",
              "post_game_start", "rank", "main_menu_battle", "deck_select_title",
              "deck_grid",
-             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
+             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual",
+             "hero_power_secondary"],
             [region["key"] for region in self.regions])
 
     def test_boxes_come_from_the_config(self):
@@ -115,14 +116,15 @@ class CalibrationTargetTests(unittest.TestCase):
                           "post_game_start", "rank",
                           "main_menu_battle", "deck_select_title", "deck_grid",
                           "mode_menu_open", "mode_wild", "mode_standard",
-                          "mode_casual"],
+                          "mode_casual", "hero_power_secondary"],
                          [target["key"] for target in targets])
         self.assertEqual(
             ["recommendation_roi", "mulligan_recommendation_roi",
              "mulligan_confirm_roi", "ai_win_rate_roi",
              "post_game_start_roi", "post_game_rank_roi",
              "main_menu_battle_roi", "deck_select_title_roi", "deck_grid_roi",
-             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual"],
+             "mode_menu_open", "mode_wild", "mode_standard", "mode_casual",
+             "hero_power_secondary"],
             [target["config_key"] for target in targets])
         for target in targets:
             self.assertTrue(target["label"])
@@ -131,12 +133,16 @@ class CalibrationTargetTests(unittest.TestCase):
             self.assertRegex(target["color"], r"^#[0-9a-fA-F]{6}$")
         # 模式点击点带 point_key（保存进 ui_config.json 的 `mode_click` 段，
         # 而不是 ROI 框），且框大小固定、中心就是点击点。
-        mode_targets = [t for t in targets if t.get("point_key")]
-        self.assertEqual(4, len(mode_targets))
-        for target in mode_targets:
+        point_targets = [t for t in targets if t.get("point_key")]
+        self.assertEqual(5, len(point_targets))
+        for target in point_targets:
             left, top, right, bottom = target["box"]
             self.assertEqual(screen_regions.MODE_MARK_SIZE, right - left)
             self.assertEqual(screen_regions.MODE_MARK_SIZE, bottom - top)
+        battle = next(t for t in point_targets
+                      if t["key"] == "hero_power_secondary")
+        left, top, right, bottom = battle["box"]
+        self.assertEqual((1235, 730), ((left + right) // 2, (top + bottom) // 2))
 
     def test_calibratable_config_keys_are_unique(self):
         """config_key 是 ui_config.json 的顶层键，重了就会互相覆盖。"""

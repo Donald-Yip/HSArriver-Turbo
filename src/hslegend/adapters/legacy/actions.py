@@ -42,6 +42,9 @@ class HeroPowerAction:
     target: Optional[Target] = None
     turn_number: Optional[int] = None
     choose_one: Optional["DiscoverChoiceAction"] = None
+    card_id: Optional[str] = None
+    hero_power_entity_id: Optional[str] = None
+    hero_power_slot: str = "primary"
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,9 @@ class DiscoverChoiceAction:
     # 选中选项的实体 id（日志里那个 subOption 的 id）：执行前再核对一次，
     # 选项位置/内容变了就拒绝，避免点错选项。
     choice_entity_id: Optional[str] = None
+    # The child card that must occupy this choice slot. Later evidence can bind
+    # its entity id without requiring Power.log to be ready before the card play.
+    choice_card_id: Optional[str] = None
     # 这个选项属于哪个父实体（抉择牌 = 手牌实体 id）：有它才能精确复核
     # "选项还是原来那批"，不会被日志里同号位的其它残留实体影响。
     choice_parent_entity_id: Optional[str] = None
@@ -143,6 +149,11 @@ class ActionExecutionResult:
     executed: bool
     message: str
     recovery_needed: bool = False
+    cancelled: bool = False
+
+
+class ActionCancelled(RuntimeError):
+    """Raised when a cooperative global stop interrupts a click gesture."""
 
 
 ManualAction = Union[

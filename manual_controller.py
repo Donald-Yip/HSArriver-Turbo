@@ -126,6 +126,7 @@ def cancellable_console_input(
 # root facade so existing callers retain identity-compatible imports.
 from hslegend.adapters.legacy.actions import (
     ActionExecutionResult,
+    ActionCancelled,
     AttackAction,
     DiscoverChoiceAction,
     EndTurnAction,
@@ -146,7 +147,7 @@ class ClickExecutor:
     """Translate validated actions into the project's click primitives."""
 
     def __init__(self, click_module=None, focus_func=None, sleep_func=None,
-                 action_context=None):
+                 action_context=None, stop_event=None, choice_waiter=None):
         if click_module is None:
             import click as click_module
         self.click = click_module
@@ -160,18 +161,35 @@ class ClickExecutor:
         if sleep_func is None:
             import time
             sleep_func = time.sleep
-        self.sleep = sleep_func
+        self.stop_event = stop_event
+        self.choice_waiter = choice_waiter
+        self._sleep_func = sleep_func
+        self.sleep = self._cancellable_sleep if stop_event is not None else sleep_func
+
+    def _cancellable_sleep(self, seconds):
+        seconds = max(0.0, float(seconds))
+        if self.stop_event.wait(seconds):
+            raise ActionCancelled("stopped")
 
     def _safe_action(self, action):
+        cancellation = getattr(self.click, "action_cancellation", None)
         with self.action_context():
+            if callable(cancellation):
+                with cancellation(self.stop_event):
+                    return self._run_safe(action)
+            return self._run_safe(action)
+
+    def _run_safe(self, action):
+        try:
+            return action()
+        except ActionCancelled:
+            raise
+        except Exception:
             try:
-                return action()
+                self.click.cancel_click()
             except Exception:
-                try:
-                    self.click.cancel_click()
-                except Exception:
-                    pass
-                raise
+                pass
+            raise
 
     def _click_target(self, target: Target, my_count: int, oppo_count: int):
         if target.side == "friendly":
@@ -333,14 +351,16 @@ class ClickExecutor:
         self.click.choose_card(hand_index, hand_count)
         self.click.drag_card_to_deck()
 
-    def use_hero_power(self, target=None, my_count=0, oppo_count=0, choose_one=None):
+    def use_hero_power(self, target=None, my_count=0, oppo_count=0,
+                       choose_one=None, hero_power_slot="primary"):
         return self._safe_action(lambda: self._use_hero_power(
-            target, my_count, oppo_count, choose_one))
+            target, my_count, oppo_count, choose_one, hero_power_slot))
 
-    def _use_hero_power(self, target, my_count, oppo_count, choose_one=None):
+    def _use_hero_power(self, target, my_count, oppo_count, choose_one=None,
+                        hero_power_slot="primary"):
         if choose_one is not None:
             self.click.cancel_click()
-            self.click.click_skill()
+            self._click_hero_power(hero_power_slot)
             self._select_choose_one(choose_one)
             if target is not None:
                 self.sleep(0.3)
@@ -348,16 +368,35 @@ class ClickExecutor:
             self.click.cancel_click()
             return
         if target is None:
-            self.click.use_skill_no_point()
+            self._use_hero_power_no_point(hero_power_slot)
             return
-        self.click.click_skill()
+        self._click_hero_power(hero_power_slot)
         self._click_target(target, my_count, oppo_count)
         self.click.cancel_click()
 
     def _select_choose_one(self, choice):
         if choice is not None:
+            if (self.choice_waiter is not None
+                    and choice.choice_entity_id is None
+                    and choice.choice_card_id is not None):
+                ready = self.choice_waiter(
+                    choice.choice_parent_entity_id,
+                    choice.choice_card_id,
+                )
+                if not ready:
+                    raise RuntimeError("choose_one_options_pending")
             self.sleep(0.3)
             self.click.choose_discover_card(choice.choice_index, choice.choice_count)
+
+    def _click_hero_power(self, slot):
+        if slot == "primary":
+            return self.click.click_skill()
+        return self.click.click_skill(slot)
+
+    def _use_hero_power_no_point(self, slot):
+        if slot == "primary":
+            return self.click.use_skill_no_point()
+        return self.click.use_skill_no_point(slot)
 
     def choose_discover_card(self, choice_index, choice_count, target=None,
                              my_count=0, oppo_count=0, choice_delay=None):
@@ -748,6 +787,27 @@ class ManualController:
                 or getattr(collection[target.index], "entity_id", None)
                 == target.entity_id)
 
+    @staticmethod
+    def _hero_power_exists(action: HeroPowerAction, state) -> bool:
+        powers = list(getattr(state, "my_hero_powers", None) or ())
+        if not powers:
+            fallback = getattr(state, "my_hero_power", None)
+            if fallback is not None:
+                powers = [fallback]
+        wanted_entity = getattr(action, "hero_power_entity_id", None)
+        wanted_card = getattr(action, "card_id", None)
+        if wanted_entity is None and wanted_card is None:
+            return True
+        for power in powers:
+            if (wanted_entity is not None
+                    and getattr(power, "entity_id", None) != wanted_entity):
+                continue
+            if (wanted_card is not None
+                    and getattr(power, "card_id", None) != wanted_card):
+                continue
+            return True
+        return False
+
     def _reject(self, message: str) -> ActionExecutionResult:
         self.output(message)
         return ActionExecutionResult(False, message)
@@ -784,21 +844,33 @@ class ManualController:
         任意父实体的同号位，只在"确实查过且有冲突"时才拒绝。
         """
         wanted = action.choice_entity_id
-        if wanted is None:
+        wanted_card_id = getattr(action, "choice_card_id", None)
+        if wanted is None and wanted_card_id is None:
             return True
         parent_id = action.choice_parent_entity_id
         if parent_id is not None:
             parent = (getattr(state, "power_options", {}) or {}).get(parent_id)
             if parent is not None:
                 choice = (parent.get("choices") or {}).get(action.choice_index)
-                return choice is None or choice.get("entity_id") == wanted
+                if choice is None:
+                    return True
+                if wanted is not None and choice.get("entity_id") != wanted:
+                    return False
+                if (wanted_card_id is not None
+                        and choice.get("card_id") != wanted_card_id):
+                    return False
         for option in (getattr(state, "power_options", {}) or {}).values():
             choice = (option.get("choices") or {}).get(action.choice_index)
-            if choice is not None and choice.get("entity_id") != wanted:
-                return False
+            if choice is not None:
+                if wanted is not None and choice.get("entity_id") != wanted:
+                    return False
+                if (wanted_card_id is not None
+                        and choice.get("card_id") != wanted_card_id):
+                    return False
         # 发现/选择一项菜单（通用选择）走的是另一份映射。
         general = getattr(state, "general_choice_entity_ids", {}) or {}
-        if action.choice_index in general and general[action.choice_index] != wanted:
+        if (wanted is not None and action.choice_index in general
+                and general[action.choice_index] != wanted):
             return False
         return True
 
@@ -822,6 +894,10 @@ class ManualController:
     def execute(self, action: ManualAction, state) -> ActionExecutionResult:
         try:
             return self._execute(action, state)
+        except ActionCancelled:
+            self.output("已收到停止指令，鼠标动作立即中止。")
+            return ActionExecutionResult(
+                False, "已收到停止指令。", cancelled=True)
         except Exception as exc:
             message = f"鼠标操作失败，未执行或无法确认：{exc}"
             self.output(message)
@@ -942,10 +1018,13 @@ class ManualController:
             return ActionExecutionResult(True, detail)
 
         if isinstance(action, HeroPowerAction):
+            if not self._hero_power_exists(action, state):
+                return self._reject("英雄技能已经变化，未执行操作。")
             choice_args = ({"choose_one": action.choose_one}
                            if action.choose_one is not None else {})
             if action.target is None:
-                self.executor.use_hero_power(**choice_args)
+                self.executor.use_hero_power(
+                    hero_power_slot=action.hero_power_slot, **choice_args)
             else:
                 if not self._target_exists(action.target, state):
                     return self._reject(
@@ -954,6 +1033,7 @@ class ManualController:
                     self._target_for_click(action.target, state),
                     self._board_slot_count(state, "friendly"),
                     self._board_slot_count(state, "enemy"),
+                    hero_power_slot=action.hero_power_slot,
                     **choice_args,
                 )
             return ActionExecutionResult(True, "已使用英雄技能。")

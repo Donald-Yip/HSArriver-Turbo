@@ -2,7 +2,14 @@
   "schema_version": 1,
   "cards": {
     "BE_013": {
-      "ability_panel": ["BE_013t1", "BE_013t2", "BE_013t3", "BE_013t4"]
+      "ability_panel": ["BE_013t1", "BE_013t2", "BE_013t3", "BE_013t4"],
+      "ability_target_required": [false, false, true, false]
+    },
+    "AV_205p": {
+      "choose_one_options": ["AV_205pb", "AV_205a"]
+    },
+    "JAIL_446hp": {
+      "hero_power_slot": "secondary"
     }
   }
 }

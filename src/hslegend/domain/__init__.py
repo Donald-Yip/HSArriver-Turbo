@@ -2,6 +2,7 @@ from .actions import ActionIntent, ActionPlan, Condition, PlanStep
 from .cards import (
     CardCapabilitySet,
     CardDefinition,
+    HeroPowerSlot,
     TargetScope,
     card_names_close,
     card_names_match,
@@ -23,7 +24,7 @@ __all__ = [
     "ActionIntent", "ActionKind", "ActionPlan", "ActionVerdict",
     "CardCapabilitySet", "CardDefinition", "ChoiceView", "Condition",
     "EntityRef", "GameSnapshot", "PlanRuleValidator", "PlanStep", "PlayerView",
-    "PostconditionEvaluator", "PostconditionResult", "ProposedAction",
+    "HeroPowerSlot", "PostconditionEvaluator", "PostconditionResult", "ProposedAction",
     "SUPPORTED_SCHEMA_VERSIONS", "SlotRef", "TargetResolver", "TargetScope",
     "ValidationResult", "canonical_json", "card_names_close",
     "card_names_match", "deep_freeze_primitive", "normalize_card_name",

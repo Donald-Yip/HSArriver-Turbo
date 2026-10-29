@@ -35,7 +35,10 @@ Move card semantics and recommendation adaptation into domain/application/adapte
 - `FSM_action.py`
 - `README.md`
 - `config.py`
+- `calibrate_roi.py`
+- `click.py`
 - `screen_regions.py`
+- `strategy.py`
 - `manual_controller.py`
 - `src/**`
 - `rules/**`
@@ -53,7 +56,6 @@ Move card semantics and recommendation adaptation into domain/application/adapte
 
 - `cards.json`
 - `web_ui.py`
-- `click.py`
 - `log_state.py`
 - `pyproject.toml`
 - `uv.lock`
@@ -111,3 +113,15 @@ retained `操作5号位随从攻击`, the source card name, and the target name
 the trailing target name when at least source and target names are present.
 The adapter resolves it only when exactly one enemy hero/minion name matches;
 zero or multiple matches still fail closed.
+
+## Follow-up: Secondary Hero Power And Confirmation
+
+`JAIL_446hp` (“吸血鬼之吻”) is declared in the rule pack as the fixed
+`secondary` hero-power slot; no ordering heuristic is used. Its calibrated
+client-relative button point defaults to `(1235, 730)` and can be overridden in
+the `battle_click.hero_power_secondary` section of `ui_config.json`.
+
+Dispatched recommendations now enter a pending confirmation state when the
+immediate result is not observable. The same recommendation is never replayed
+while pending. Ctrl+Q uses the shared shutdown event and is checked between
+coordinate clicks and cancellable delays.

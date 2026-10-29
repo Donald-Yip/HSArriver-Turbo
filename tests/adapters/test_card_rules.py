@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hslegend.adapters.cards import CardCatalogError, JsonCardCatalog
+from hslegend.adapters.cards import CardCatalogError, JsonCardSemantics
 from hslegend.domain import TargetScope
 
 
@@ -73,14 +73,20 @@ class CardRulePackTests(unittest.TestCase):
     def _catalog(self, cards):
         rules = self.root / "rules.json"
         write_json(rules, {"schema_version": 1, "cards": cards})
-        return JsonCardCatalog(self.cards, rules_path=rules)
+        return JsonCardSemantics(self.cards, rules_path=rules)
 
     def test_rule_pack_supplies_measured_ability_order(self) -> None:
         catalog = self._catalog({
-            "MINION_1": {"ability_panel": ["MINION_1t1", "MINION_1t2"]}
+            "MINION_1": {
+                "ability_panel": ["MINION_1t1", "MINION_1t2"],
+                "ability_target_required": [False, True],
+            }
         })
         card = catalog.get_card("MINION_1")
         self.assertEqual(("MINION_1t1", "MINION_1t2"), card.ability_panel)
+        self.assertEqual((False, True), card.ability_target_required)
+        self.assertFalse(catalog.ability_requires_target("MINION_1", 0))
+        self.assertTrue(catalog.ability_requires_target("MINION_1", 1))
 
     def test_metadata_derives_choose_one_options(self) -> None:
         catalog = self._catalog({})
@@ -111,6 +117,34 @@ class CardRulePackTests(unittest.TestCase):
         with self.assertRaisesRegex(CardCatalogError, "duplicate ability panel child"):
             self._catalog({
                 "MINION_1": {"ability_panel": ["MINION_1t1", "MINION_1t1"]}
+            }).get_card("MINION_1")
+
+    def test_hero_power_slot_is_declared_data(self) -> None:
+        cards = json.loads(self.cards.read_text(encoding="utf-8"))
+        cards.append({
+            "id": "HERO_POWER_2",
+            "name": "第二技能",
+            "type": "HERO_POWER",
+            "text": "使一个随从获得+3攻击力。",
+        })
+        cards_path = self.root / "cards_with_hero_power.json"
+        rules_path = self.root / "hero_power_rules.json"
+        write_json(cards_path, cards)
+        write_json(rules_path, {"schema_version": 1, "cards": {
+            "HERO_POWER_2": {"hero_power_slot": "secondary"}
+        }})
+        catalog = JsonCardSemantics(cards_path, rules_path=rules_path)
+        self.assertEqual("secondary",
+                         catalog.hero_power_slot("HERO_POWER_2").value)
+
+    def test_target_contract_length_must_match_panel(self) -> None:
+        with self.assertRaisesRegex(CardCatalogError,
+                                    "ability_target_required must match"):
+            self._catalog({
+                "MINION_1": {
+                    "ability_panel": ["MINION_1t1", "MINION_1t2"],
+                    "ability_target_required": [True],
+                }
             }).get_card("MINION_1")
 
 

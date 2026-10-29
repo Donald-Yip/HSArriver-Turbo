@@ -3,6 +3,7 @@
 import json
 import inspect
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -115,6 +116,21 @@ class HumanLikeSettingsTests(unittest.TestCase):
 
 
 class HumanLikePauseTests(unittest.TestCase):
+    def test_global_stop_exits_without_moving_the_mouse(self):
+        stopped = threading.Event()
+        stopped.set()
+        mouse = RecordingMouse()
+
+        total = hearthstone_click.human_like_pause(
+            mouse,
+            {"post_delay_min": 1.0, "post_delay_max": 1.0,
+             "hover_min": 0.2, "hover_max": 0.2},
+            stop_event=stopped,
+        )
+
+        self.assertEqual(0.0, total)
+        self.assertEqual([], mouse.events)
+
     def setUp(self):
         self.clock = FakeClock()
         self.mouse = RecordingMouse()
@@ -280,7 +296,7 @@ class PostActionPauseHookTests(unittest.TestCase):
         with (
             patch.object(self.fsm, "human_like_settings", return_value=cfg),
             patch.object(self.fsm.click, "human_like_pause",
-                         side_effect=lambda: self.areas.append(1)),
+                         side_effect=lambda **_kwargs: self.areas.append(1)),
         ):
             return self.fsm._human_like_post_action_pause(action_kind)
 
@@ -309,7 +325,7 @@ class PostActionPauseHookTests(unittest.TestCase):
             patch.object(self.fsm, "human_like_settings",
                          return_value={"enabled": True}),
             patch.object(self.fsm.click, "human_like_pause",
-                         side_effect=lambda: self.areas.append(1)),
+                         side_effect=lambda **_kwargs: self.areas.append(1)),
         ):
             handled = self.fsm._human_like_post_action_pause()
 

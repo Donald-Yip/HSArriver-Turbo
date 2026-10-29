@@ -163,7 +163,7 @@ class RecommendationRetryTests(unittest.TestCase):
         self.assertTrue(all("boom: adapter rejected" in result.diagnostics
                             for result in results))
 
-    def test_unconfirmed_action_keeps_executing_each_retry(self):
+    def test_unconfirmed_action_executes_once_then_waits_for_confirmation(self):
         controller = RecordingController()
         flow = build_flow(
             ScriptedReader(["结束回合"]),
@@ -171,11 +171,29 @@ class RecommendationRetryTests(unittest.TestCase):
             controller=controller,
         )
 
-        statuses = [run_step(flow)[0].status for _ in range(12)]
+        results = [run_step(flow)[0] for _ in range(12)]
 
-        self.assertTrue(all(status is FlowStepStatus.RETRY
-                            for status in statuses))
-        self.assertEqual(12, len(controller.executed))
+        self.assertEqual(1, len(controller.executed))
+        self.assertTrue(all(result.status is FlowStepStatus.OBSERVE
+                            for result in results))
+        self.assertEqual("awaiting_action_confirmation",
+                         results[-1].diagnostics)
+
+    def test_changed_recommendation_clears_pending_without_replaying_old_action(self):
+        reader = ScriptedReader(["结束回合"])
+        controller = RecordingController()
+        flow = build_flow(reader, adapter=AcceptingAdapter(),
+                          controller=controller)
+
+        first = run_step(flow)[0]
+        self.assertEqual(FlowStepStatus.OBSERVE, first.status)
+        self.assertEqual(1, len(controller.executed))
+
+        reader.texts = ["打出1号位随从"]
+        second = run_step(flow)[0]
+
+        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
+        self.assertEqual(2, len(controller.executed))
 
     def test_readable_recommendation_executes_after_long_transition(self):
         reader = ScriptedReader([PARSE_FAIL_TEXT])
@@ -186,11 +204,11 @@ class RecommendationRetryTests(unittest.TestCase):
             self.assertEqual(FlowStepStatus.RETRY, run_step(flow)[0].status)
         self.assertEqual([], controller.executed)
 
-        reader.texts = ["结束回合", "结束回合", "等待对手操作"]
+        reader.texts = ["结束回合", "结束回合", "结束回合"]
         flow.adapter = AcceptingAdapter()
         result, _ = run_step(flow)
 
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
         self.assertEqual(1, len(controller.executed))
 
     def test_parse_failure_raw_is_logged_once_per_episode(self):

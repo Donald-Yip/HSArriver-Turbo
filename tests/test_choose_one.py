@@ -94,6 +94,7 @@ class ChooseOneTests(unittest.TestCase):
         manual = adapt_action(self.proposed(), self.state(log)).manual_action
         # 号位按可用布局算（1 号位仍对应 2 号选项），并绑上选项/父实体 id 供执行前复核。
         self.assertEqual(DiscoverChoiceAction(1, 2, choice_entity_id='154',
+                                             choice_card_id='AV_205a',
                                              choice_parent_entity_id='152'),
                          manual.choose_one)
         with self.assertRaisesRegex(RecommendationStateError, 'choose_one_option_unavailable'):
@@ -104,28 +105,24 @@ class ChooseOneTests(unittest.TestCase):
         adapted = adapt_action(self.proposed(), state)
         self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
 
-    def test_unknown_or_ambiguous_name_never_guesses_or_deadlocks(self):
-        """判不出选项时只出牌、不点选项，不再抛错进死循环。
-
-        线上实测这里抛 `choose_one_name_not_unique` 会连续重试 3090 次、最长空转
-        1 分半（面板每 0.3~1 秒被重读一次），所以改成"退化成正常打牌"。
-        """
+    def test_unknown_or_ambiguous_name_is_rejected_before_clicking(self):
+        """判不出唯一选项时零点击拒绝，不能先出牌再停在半途。"""
         log = self.options()
-        adapted = adapt_action(self.proposed(name='错误名称'), self.state(log))
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
-        self.assertEqual('hero_power_changed', adapted.postcondition)
-        # 两个选项同名时同样不猜。
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    'choose_one_name_not_unique'):
+            adapt_action(self.proposed(name='错误名称'), self.state(log))
         self.feed(log, '    subOption 2 entity=[entityName=冰雪绽放 id=155 zone=SETASIDE zonePos=0 cardId=AV_205a player=1] error=NONE errorParam=')
-        adapted = adapt_action(self.proposed(), self.state(log))
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    'choose_one_name_not_unique'):
+            adapt_action(self.proposed(), self.state(log))
 
-    def test_new_options_block_and_enemy_options_cannot_reuse_old_choices(self):
+    def test_missing_or_enemy_power_options_do_not_block_metadata_resolution(self):
         log = self.options()
         self.feed(log, 'id=24')
-        with self.assertRaisesRegex(RecommendationStateError, 'choose_one_options'):
-            adapt_action(self.proposed(), self.state(log))
-        with self.assertRaisesRegex(RecommendationStateError, 'choose_one_options'):
-            adapt_action(self.proposed(), self.state(self.options(player='2')))
+        adapted = adapt_action(self.proposed(), self.state(log))
+        self.assertEqual('AV_205a', adapted.manual_action.choose_one.choice_card_id)
+        adapted = adapt_action(self.proposed(), self.state(self.options(player='2')))
+        self.assertEqual('AV_205a', adapted.manual_action.choose_one.choice_card_id)
 
     # ------------------------------------------------ 选项定位的四档（线上死循环修复）
     def troubles(self, choices, source='EDR_570', name='凶险梦魇'):
@@ -175,13 +172,66 @@ class ChooseOneTests(unittest.TestCase):
                                self.trouble_state(log))
         self.assertEqual(1, adapted.manual_action.choose_one.choice_index)
 
+    def test_options_can_be_resolved_before_power_log_is_ready(self):
+        state = self.trouble_state(LogState())
+        state.power_options = {}
+
+        adapted = adapt_action(self.trouble_proposed('动荡能量'), state)
+
+        self.assertEqual(1, adapted.manual_action.choose_one.choice_index)
+        self.assertEqual('EDR_570B',
+                         adapted.manual_action.choose_one.choice_card_id)
+        self.assertIsNone(adapted.manual_action.choose_one.choice_entity_id)
+
+    def test_delayed_option_is_awaited_before_the_choice_click(self):
+        state = self.trouble_state(LogState())
+        state.power_options = {}
+        adapted = adapt_action(self.trouble_proposed('动荡能量'), state)
+        events = []
+        waits = []
+
+        class Clicks:
+            def cancel_click(self):
+                events.append('cancel')
+
+            def choose_card(self, index, count):
+                events.append(('hand', index, count))
+
+            def click_middle(self):
+                events.append('play')
+
+            def choose_discover_card(self, index, count):
+                events.append(('choice', index, count))
+
+        def wait_for_choice(parent_id, card_id):
+            waits.append((parent_id, card_id))
+            events.append('choice_ready')
+            return True
+
+        executor = ClickExecutor(
+            click_module=Clicks(), action_context=nullcontext,
+            sleep_func=lambda _seconds: None,
+            choice_waiter=wait_for_choice,
+        )
+        result = ManualController(
+            executor=executor, output_func=lambda _message: None,
+        ).execute(adapted.manual_action, state)
+
+        self.assertTrue(result.executed, result.message)
+        self.assertEqual([('152', 'EDR_570B')], waits)
+        self.assertEqual([
+            'cancel', ('hand', 0, 1), 'play', 'choice_ready',
+            ('choice', 1, 2), 'cancel',
+        ], events)
+
     def test_ambiguous_near_names_never_guess(self):
-        """两个名字都只差一个字：判不唯一就只出牌，不点选项。"""
+        """两个名字都只差一个字：判不唯一就零点击拒绝。"""
         log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
                              ('噩梦暴发', 'EDR_570B', 'NONE')))
-        adapted = adapt_action(self.trouble_proposed('动荡能量'),
-                               self.trouble_state(log))
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    'choose_one_name_not_unique'):
+            adapt_action(self.trouble_proposed('动荡能量'),
+                         self.trouble_state(log))
 
     def test_named_option_that_is_unavailable_is_refused(self):
         """盒子点名的选项当前不可选：拒绝重试，绝不静默改成另一个选项。"""
@@ -206,14 +256,14 @@ class ChooseOneTests(unittest.TestCase):
         self.assertEqual(0, without_target.manual_action.choose_one.choice_index)
 
     def test_panel_card_name_without_discriminator_is_not_guessed(self):
-        """两个选项的"要不要目标"一样时，母卡名兜底也分不出 → 只出牌。"""
+        """两个选项的"要不要目标"一样时，母卡名兜底也分不出 → 零点击拒绝。"""
         log = self.troubles(
             (('梦中入侵', 'AV_205pb', 'NONE'), ('梦中奇袭', 'AV_205a', 'NONE')),
             source='AV_205p', name='培育')
-        adapted = adapt_action(self.trouble_proposed('培育'),
-                               self.trouble_state(log, source='AV_205p',
-                                                  name='培育'))
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+        with self.assertRaisesRegex(RecommendationStateError,
+                                    'choose_one_name_not_unique'):
+            adapt_action(self.trouble_proposed('培育'),
+                         self.trouble_state(log, source='AV_205p', name='培育'))
 
     def test_single_option_choose_one_is_not_clicked(self):
         """只有一个选项时游戏自动结算，多点一下反而会误选。"""

@@ -16,6 +16,7 @@ from typing import Any, Mapping
 from hslegend.domain import (
     CardCapabilitySet,
     CardDefinition,
+    HeroPowerSlot,
     TargetScope,
     card_names_close,
     card_names_match,
@@ -214,6 +215,8 @@ def _validate_rule(card_id: str, rule: Mapping[str, Any]) -> None:
         "target_card_types",
         "choose_one_options",
         "ability_panel",
+        "ability_target_required",
+        "hero_power_slot",
     }
     unknown = set(rule) - allowed
     if unknown:
@@ -249,6 +252,8 @@ def _definition(
     scope, target_types = _target_scope_and_types(card, capabilities.targetable)
     choose_one = _derive_choose_one_options(card, ids, types)
     panel: tuple[str, ...] = ()
+    ability_target_required: tuple[bool, ...] = ()
+    hero_power_slot: HeroPowerSlot | None = None
     if rule is not None:
         _validate_rule(card_id, rule)
         if "target_scope" in rule:
@@ -262,10 +267,27 @@ def _definition(
             choose_one = _rule_strings(card_id, rule["choose_one_options"], "choose_one_options")
         if "ability_panel" in rule:
             panel = _rule_strings(card_id, rule["ability_panel"], "ability_panel")
+        if "ability_target_required" in rule:
+            raw_targets = rule["ability_target_required"]
+            if (not isinstance(raw_targets, list)
+                    or not all(type(value) is bool for value in raw_targets)):
+                raise CardCatalogError(
+                    f"ability_target_required for {card_id} must be booleans")
+            ability_target_required = tuple(raw_targets)
+        if "hero_power_slot" in rule:
+            try:
+                hero_power_slot = HeroPowerSlot(rule["hero_power_slot"])
+            except (TypeError, ValueError) as exc:
+                raise CardCatalogError(
+                    f"invalid hero_power_slot for {card_id}") from exc
     if len(set(choose_one)) != len(choose_one):
         raise CardCatalogError(f"duplicate choose-one child for {card_id}")
     if len(set(panel)) != len(panel):
         raise CardCatalogError(f"duplicate ability panel child for {card_id}")
+    if (ability_target_required
+            and len(ability_target_required) != len(panel)):
+        raise CardCatalogError(
+            f"ability_target_required must match ability_panel for {card_id}")
     for child in choose_one:
         if child not in ids:
             raise CardCatalogError(f"unknown choose-one child: {child}")
@@ -283,6 +305,8 @@ def _definition(
         target_card_types=target_types,
         choose_one_options=choose_one,
         ability_panel=panel,
+        ability_target_required=ability_target_required,
+        hero_power_slot=hero_power_slot,
     )
 
 
@@ -436,6 +460,16 @@ class JsonCardSemantics(JsonCardCatalog):
             if card_names_close(wanted, normalize_card_name(option))
         ]
         return near[0] if len(near) == 1 else None
+
+    def ability_requires_target(self, card_id: str | None, index: int) -> bool:
+        card = self.get_card(card_id or "")
+        if card is None or not 0 <= index < len(card.ability_target_required):
+            return False
+        return bool(card.ability_target_required[index])
+
+    def hero_power_slot(self, card_id: str | None) -> HeroPowerSlot | None:
+        card = self.get_card(card_id or "")
+        return card.hero_power_slot if card is not None else None
 
     def hand_target_rule(self, card_id: str | None) -> dict[str, object]:
         card = self.get_card(card_id or "")

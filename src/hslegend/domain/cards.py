@@ -19,6 +19,13 @@ class TargetScope(str, Enum):
     HAND_OR_BOARD = "hand_or_board"
 
 
+class HeroPowerSlot(str, Enum):
+    """Stable UI slot for a hero power button."""
+
+    PRIMARY = "primary"
+    SECONDARY = "secondary"
+
+
 @dataclass(frozen=True, slots=True)
 class CardCapabilitySet(PrimitiveMixin):
     """Normalized card facts used by rule and plan generation."""
@@ -48,6 +55,8 @@ class CardDefinition(PrimitiveMixin):
     target_card_types: tuple[str, ...] = ()
     choose_one_options: tuple[str, ...] = ()
     ability_panel: tuple[str, ...] = ()
+    ability_target_required: tuple[bool, ...] = ()
+    hero_power_slot: HeroPowerSlot | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -63,6 +72,19 @@ class CardDefinition(PrimitiveMixin):
         object.__setattr__(self, "target_card_types", tuple(normalized_types))
         object.__setattr__(self, "choose_one_options", tuple(self.choose_one_options))
         object.__setattr__(self, "ability_panel", tuple(self.ability_panel))
+        object.__setattr__(
+            self,
+            "ability_target_required",
+            tuple(bool(value) for value in self.ability_target_required),
+        )
+        if (self.ability_target_required
+                and len(self.ability_target_required) != len(self.ability_panel)):
+            raise ValueError("ability_target_required must match ability_panel")
+        if self.hero_power_slot is not None:
+            slot = (self.hero_power_slot
+                    if isinstance(self.hero_power_slot, HeroPowerSlot)
+                    else HeroPowerSlot(self.hero_power_slot))
+            object.__setattr__(self, "hero_power_slot", slot)
 
 
 _NOISE = re.compile(r"[\s\W_]+", re.UNICODE)
@@ -127,6 +149,7 @@ def card_names_match(left: object, right: object) -> bool:
 __all__ = [
     "CardCapabilitySet",
     "CardDefinition",
+    "HeroPowerSlot",
     "TargetScope",
     "card_names_close",
     "card_names_match",

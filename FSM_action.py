@@ -25,6 +25,7 @@ from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
 from hslegend.application.recommendation_flow import (
     FlowStepStatus, RecommendationFlow,
 )
+from hslegend.adapters.legacy.actions import ActionCancelled
 from hslegend.adapters.legacy.recommendation import RecommendationAdapter
 from src.ocr.paddle_adapter import PaddleOcrAdapter
 from src.ocr.stable_reader import OcrRejectedError, StableRecommendationReader
@@ -52,7 +53,12 @@ choose_hero_count = 0
 manual_controller = ManualController(
     input_func=GlobalHotkeyInput(
         keyboard, shutdown_event=shutdown_event),
-    executor=ClickExecutor(click),
+    executor=ClickExecutor(
+        click,
+        stop_event=shutdown_event,
+        choice_waiter=lambda parent_id, card_id: _wait_for_choice_option(
+            parent_id, card_id),
+    ),
 )
 auto_mulligan_flow = None
 recommendation_flow = None
@@ -159,6 +165,29 @@ def _automation_state():
 def _automation_state_with_revision():
     snapshot = _automation_state()
     return snapshot, log_state.revision
+
+
+def _wait_for_choice_option(parent_id, card_id):
+    """Wait for the played choose-one card's sub-options to reach Power.log."""
+    timeout = float(getattr(
+        recommendation_config, "result_timeout_seconds", 5.0) or 5.0)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() <= deadline:
+        if shutdown_event.is_set():
+            raise ActionCancelled("stopped")
+        try:
+            option = (getattr(_automation_state(), "power_options", {})
+                      or {}).get(parent_id)
+        except Exception:
+            option = None
+        choices = (option or {}).get("choices") or {}
+        if any(choice.get("card_id") == card_id
+               and choice.get("error") in (None, "NONE")
+               for choice in choices.values()):
+            return True
+        if shutdown_event.wait(0.05):
+            raise ActionCancelled("stopped")
+    return False
 
 
 def _mulligan_stability_key(evidence):
@@ -416,7 +445,7 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
                            ActionKind.MULLIGAN, ActionKind.SELECT_TARGET,
                            ActionKind.USE_ABILITY):
             return False
-        click.human_like_pause()
+        click.human_like_pause(stop_event=shutdown_event)
         return True
     except Exception as exc:
         try:
@@ -2385,6 +2414,8 @@ def run_automatic_battle_step():
             "opponent_turn": "等待对手操作。",
             "waiting_recommendation_update": "等待盒子更新推荐。",
             "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
+            "awaiting_action_confirmation": "动作已发出，等待结果确认，不重复点击。",
+            "stopped": "已收到停止指令。",
         }
         message = observe_messages.get(
             result.diagnostics,

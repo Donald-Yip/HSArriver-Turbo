@@ -9,10 +9,14 @@ from hslegend.adapters.legacy.actions import (
     TimelineAction, TradeCardAction, UseAbilityAction, UseLocationAction,
 )
 from hslegend.adapters.legacy.card_queries import (
+    ability_requires_target,
+    card_name,
     card_text,
     choose_one_card_name,
     choose_one_option_card_ids,
+    choose_one_option_card_ids_ordered,
     hand_target_cardtype_mismatch,
+    hero_power_slot,
     is_choose_one_card,
     is_friendly_hand_target_card,
     is_hand_or_board_target_card,
@@ -21,7 +25,7 @@ from hslegend.adapters.legacy.card_queries import (
     skill_index,
     skill_panel,
 )
-from hslegend.domain import ActionKind, normalize_card_name
+from hslegend.domain import ActionKind, card_names_match, normalize_card_name
 
 
 class RecommendationStateError(ValueError):
@@ -414,15 +418,13 @@ def _logged_timeline(state, card_id):
 def _with_choose_one(proposed, state, adapted, source):
     """把「选择卡牌 X」变成「打出去之后点第 N 个选项」。
 
-    选项定位分四档，任何一档判不出来都**退回原动作**（正常打牌/用技能、不点
-    选项），绝不抛错进死循环——线上实测 `choose_one_name_not_unique` 连续重试
-    过 3090 次、最长空转 1 分半，就是这里抛错导致的。
+    选项定位分四档；判不出唯一选项时在首次点击前拒绝，不能先出牌再停在半途。
 
       1. 名字全等（归一化后比较，容忍 OCR 的空格/标点/全角差异）；
       2. 小差异容错（编辑距离 ≤1 且长度 ≥3）：OCR 认错一两个字仍然认得出；
       3. 盒子写的是**牌名**（如「暮光侵扰」）：日志里这批 subOption 必须全部属于
          这张卡的选项子卡，才允许用盒子自己的号位；
-      4. 都判不出 → 只出牌，不点选项。
+      4. 都判不出 → 零点击拒绝。
 
     安全约束：盒子点名了某个选项时，该选项必须是唯一命中的那一个；命中多个或
     名字对不上号位，一律拒绝而不是猜——抉择牌两个选项常常差很远（凶险梦魇：
@@ -441,28 +443,50 @@ def _with_choose_one(proposed, state, adapted, source):
         raise RecommendationStateError("choose_one_cardtype_unsupported")
     option = getattr(state, "power_options", {}).get(
         getattr(source, "entity_id", None))
-    if (option is None or option.get("card_id") != card_id
-            or option.get("player") != getattr(state, "my_player_id", None)):
-        raise RecommendationStateError("choose_one_options_unavailable")
-    choices = option["choices"]
-    count = len(choices)
-    if count not in (1, 2, 3, 4) or set(choices) != set(range(count)):
+    ready = (option is not None and option.get("card_id") == card_id
+             and option.get("player") == getattr(state, "my_player_id", None)
+             and isinstance(option.get("choices"), dict)
+             and set(option["choices"]) == set(range(len(option["choices"])))
+             and len(option["choices"]) in (1, 2, 3, 4))
+    options = choose_one_option_card_ids_ordered(card_id)
+    if not ready and not options:
+        raise RecommendationStateError("choose_one_metadata_unavailable")
+    if ready:
+        choices = option["choices"]
+        count = len(choices)
+        usable = {index for index, choice in choices.items()
+                  if _choice_available(choice)}
+        index, _named = _resolve_choice_index(
+            name, card_id, choices, usable,
+            has_target=proposed.target is not None)
+        if index is None:
+            raise RecommendationStateError("choose_one_name_not_unique")
+        selected_card_id = choices[index].get("card_id")
+    else:
+        metadata_choices = {
+            index: {
+                "card_id": child_id,
+                "name": card_name(child_id),
+                "text": card_text(child_id),
+                "error": "NONE",
+            }
+            for index, child_id in enumerate(options)
+        }
+        count = len(metadata_choices)
+        usable = set(metadata_choices)
+        index, _named = _resolve_choice_index(
+            name, card_id, metadata_choices, usable,
+            has_target=proposed.target is not None)
+        if index is None:
+            raise RecommendationStateError("choose_one_name_not_unique")
+        selected_card_id = options[index]
+        choices = metadata_choices
+
+    if count not in (1, 2, 3, 4):
         raise RecommendationStateError("choose_one_options_incomplete")
     if count < 2:
-        # 单选项抉择游戏自己就结算了，不需要玩家再点一下。
         return adapted
-
-    usable = {index for index, choice in choices.items()
-              if _choice_available(choice)}
-    index, named = _resolve_choice_index(
-        name, card_id, choices, usable, has_target=proposed.target is not None)
-    if index is None:
-        # 判不出来：只出牌，不点选项（退回改动前的"能打出去"行为，不再死循环）。
-        print(f"[推荐] 抉择选项未能确定（面板：{name}），本次只出牌、不点选项。")
-        return adapted
-    if index not in usable:
-        # 盒子点名的那个选项当前不可选（`REQ_ENOUGH_MANA` 之类）：拒绝重试，
-        # 绝不静默改成另一个选项——抉择牌两个选项常常差很远。
+    if ready and index not in usable:
         raise RecommendationStateError("choose_one_option_unavailable")
     print(f"[推荐] 抉择：{card_id} → {index + 1}号位"
           f"（{choices[index].get('name') or '?'}）")
@@ -470,6 +494,7 @@ def _with_choose_one(proposed, state, adapted, source):
         adapted.manual_action, choose_one=DiscoverChoiceAction(
             index, count,
             choice_entity_id=choices[index].get("entity_id"),
+            choice_card_id=selected_card_id,
             choice_parent_entity_id=getattr(source, "entity_id", None))))
 
 
@@ -769,7 +794,38 @@ def _adapt_trade_card(proposed, state):
 
 
 def _adapt_hero_power(proposed, state):
-    power = getattr(state, "my_hero_power", None)
+    powers = list(getattr(state, "my_hero_powers", None) or ())
+    if not powers:
+        fallback = getattr(state, "my_hero_power", None)
+        if fallback is not None:
+            powers = [fallback]
+    if not powers:
+        raise RecommendationStateError("hero_power_missing")
+    source_name = getattr(proposed, "source_name", None)
+    if source_name:
+        matches = [
+            power for power in powers
+            if card_names_match(source_name, card_name(
+                getattr(power, "card_id", None)))
+        ]
+        if not matches:
+            raise RecommendationStateError("hero_power_name_unknown")
+        if len(matches) != 1:
+            raise RecommendationStateError("hero_power_name_not_unique")
+        power = matches[0]
+    elif len(powers) == 1:
+        power = powers[0]
+    else:
+        raise RecommendationStateError("hero_power_name_required")
+
+    card_id = getattr(power, "card_id", None)
+    slot = hero_power_slot(card_id)
+    if slot is None:
+        if len(powers) != 1:
+            raise RecommendationStateError("hero_power_slot_unknown")
+        slot_name = "primary"
+    else:
+        slot_name = slot.value
     target = None
     target_id = None
     if proposed.target is not None:
@@ -794,7 +850,12 @@ def _adapt_hero_power(proposed, state):
         else:
             raise RecommendationStateError("hero_power_target_unsupported")
     return AdaptedAction(
-        HeroPowerAction(target=target),
+        HeroPowerAction(
+            target=target,
+            card_id=card_id,
+            hero_power_entity_id=getattr(power, "entity_id", None),
+            hero_power_slot=slot_name,
+        ),
         getattr(power, "entity_id", None), target_id,
         "hero_power_changed")
 
@@ -835,14 +896,19 @@ def _adapt_use_ability(proposed, state):
         # 卡表里没记录过这张卡的面板顺序：不知道 1~4 号位是什么就绝不点。
         if is_old_god_card(card_id):
             print(f"[推荐] 古神技能面板还没适配这张卡（{card_id}），本次不点；"
-                  f"需要在 choose_skill.SKILL_PANEL_ORDER 里补一行。")
+                  f"需要在 rules/card_rules.json 里补一条 ability_panel。")
         raise RecommendationStateError("ability_card_unknown")
     index = skill_index(card_id, getattr(proposed, "choice_name", None))
     if index is None:
         raise RecommendationStateError("ability_option_unknown")
+    requires_target = ability_requires_target(card_id, index)
+    if requires_target and proposed.target is None:
+        raise RecommendationStateError("ability_target_required")
+    if not requires_target and proposed.target is not None:
+        raise RecommendationStateError("ability_target_unexpected")
     target = None
     target_id = None
-    if proposed.target is not None:
+    if requires_target:
         target, target_id = _ability_target(proposed.target, state)
     source_id = getattr(entry.entity, "entity_id", None)
     print(f"[推荐] 古神技能：{card_id} → {index + 1}号位"

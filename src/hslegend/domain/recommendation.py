@@ -50,6 +50,7 @@ class ProposedAction(PrimitiveMixin):
     ocr_confidence: float = 0.0
     semantic_confidence: float = 0.0
     choice_name: str | None = None
+    source_name: str | None = None
     target_name: str | None = None
 
     def __post_init__(self) -> None:

@@ -621,6 +621,40 @@ def default_mode_click_points() -> dict:
     return {key: tuple(value) for key, value in _MODE_CLICK_DEFAULTS.items()}
 
 
+def _battle_click_defaults() -> dict:
+    try:
+        from screen_regions import battle_click_points
+
+        return {key: tuple(point) for key, point in battle_click_points().items()}
+    except Exception:
+        return {}
+
+
+_BATTLE_CLICK_DEFAULTS = _battle_click_defaults()
+
+
+def load_battle_click_points() -> dict:
+    """读取 ui_config.json 的 `battle_click` 点击点覆盖（默认值打底）。"""
+    points = {key: tuple(value) for key, value in _BATTLE_CLICK_DEFAULTS.items()}
+    section = _load_ui_config().get("battle_click")
+    if not isinstance(section, dict):
+        return points
+    for key, default in _BATTLE_CLICK_DEFAULTS.items():
+        raw = section.get(key)
+        if (
+            isinstance(raw, (list, tuple))
+            and len(raw) == 2
+            and all(isinstance(v, (int, float)) for v in raw)
+        ):
+            points[key] = (float(raw[0]), float(raw[1]))
+    return points
+
+
+def default_battle_click_points() -> dict:
+    """代码默认的战斗界面点击点（不含用户覆盖）。"""
+    return {key: tuple(value) for key, value in _BATTLE_CLICK_DEFAULTS.items()}
+
+
 # ---------------------------------------------------------------- 日志 / 快照
 # 读取 Power.log 到尾部(EOF)后、等待下一新行的轮询间隔（秒）。
 # 原先 0.2s 且连续两次 EOF 才返回，静止时每轮阻塞 0.4s；缩短后主循环对

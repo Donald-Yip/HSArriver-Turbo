@@ -42,6 +42,7 @@ class FlowStepStatus(str, Enum):
 class ResultStatus(str, Enum):
     COMPLETED = "completed"
     WAITING_RECOMMENDATION = "waiting_recommendation"
+    UNCONFIRMED = "unconfirmed"
     RETRY = "retry"
 
 
@@ -49,6 +50,21 @@ class ResultStatus(str, Enum):
 class FlowStepResult:
     status: FlowStepStatus
     diagnostics: str = ""
+
+
+@dataclass
+class PendingRecommendationAction:
+    """A dispatched action whose result cannot yet be confirmed safely."""
+
+    instruction: str
+    turn_number: int
+    action_kind: ActionKind
+    source_entity_id: str | None
+    target_entity_id: str | None
+    postcondition: str
+    before_state: object
+    before_revision: int
+    phase: str = "await_action_confirmation"
 
 
 class RecommendationFlow:
@@ -69,8 +85,8 @@ class RecommendationFlow:
         self.controller = controller
         self.sleep = sleep
         self.clock = clock
-        # Kept for constructor compatibility; result verification no longer
-        # waits for a timeout window, it checks once and retries immediately.
+        # Kept for constructor compatibility; callers now wait in pending state
+        # instead of replaying an unconfirmed action.
         self.result_timeout = result_timeout
         self.stopped = stopped
         self.consumed = consumed or ConsumedActionStore()
@@ -102,6 +118,7 @@ class RecommendationFlow:
         self.waiting_panel_hash = None
         self.waiting_turn_number = None
         self.waiting_action_kind = None
+        self.pending_action = None
         # 最近一次已经打到日志里的 OCR 原文：同一段原文只留一次，
         # 重试几十次时不再刷屏（见 _log_ocr_raw）。
         self._last_logged_ocr_text = None
@@ -150,6 +167,8 @@ class RecommendationFlow:
 
     def run_player_turn_step(self):
         try:
+            if self.stopped():
+                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             state, revision = self.state_supplier()
             self.hand_animation_delay.observe(
                 getattr(state, "hand_entry_count", 0))
@@ -157,11 +176,16 @@ class RecommendationFlow:
             # 触发、日志晚几拍才写出来的抽牌。
             self._account_hand_entries(state)
             if not state.is_my_turn:
+                self._clear_pending()
                 return FlowStepResult(FlowStepStatus.OBSERVE, "opponent_turn")
             if (self.waiting_turn_number is not None
                     and self.waiting_turn_number
                     != state.game_num_turns_in_play):
                 self._clear_waiting()
+            if (self.pending_action is not None
+                    and self.pending_action.turn_number
+                    != state.game_num_turns_in_play):
+                self._clear_pending()
             observed = {}
             def frame_supplier():
                 observed["frame"] = self.capture.capture(ocr_panel_ok=True)
@@ -169,8 +193,6 @@ class RecommendationFlow:
             evidence = self.reader.read(
                 frame_supplier, self.capture.crop_recommendation)
             stable_frame = observed["frame"]
-            if self.waiting_instruction is not None:
-                self._clear_waiting()
             try:
                 proposed = self.parser.parse(
                     evidence, state.game_num_turns_in_play, revision)
@@ -179,6 +201,10 @@ class RecommendationFlow:
                 # 2026-10-24「目标是已方2号位」、2026-10-27「目标是已方1号位」
                 # 都是靠这段原文才定位到 OCR 把「己」认成「已」的。
                 self._log_ocr_raw(getattr(evidence, "normalized_text", ""))
+                if self.pending_action is not None:
+                    return FlowStepResult(
+                        FlowStepStatus.OBSERVE,
+                        "awaiting_action_confirmation")
                 raise
             # 先留痕再适配：适配抛错时也要能看到"盒子到底写了什么"。线上出现过
             # 连续 3090 次 choose_one_name_not_unique 却一条原文都没留下的情况，
@@ -194,8 +220,32 @@ class RecommendationFlow:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "stale_mulligan_recommendation")
+            pending = self.pending_action
+            if pending is not None:
+                if (pending.turn_number != proposed.turn_number
+                        or pending.instruction
+                        != proposed.normalized_instruction):
+                    self._clear_pending()
+                else:
+                    confirmed = (
+                        revision > pending.before_revision
+                        and self._postcondition(
+                            pending.postcondition,
+                            pending.before_state,
+                            state,
+                            pending.source_entity_id,
+                            pending.target_entity_id,
+                        )
+                    )
+                    diagnostic = (
+                        "waiting_recommendation_update"
+                        if confirmed else "awaiting_action_confirmation"
+                    )
+                    return FlowStepResult(FlowStepStatus.OBSERVE, diagnostic)
             adapted = self.adapter(proposed, state)
             fresh_state, fresh_revision = self._wait_for_hand_animation()
+            if self.stopped():
+                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             current_frame = self.capture.capture(ocr_panel_ok=True)
             current_evidence = self.reader.read_frame(
                 current_frame, self.capture.crop_recommendation)
@@ -212,8 +262,15 @@ class RecommendationFlow:
             adapted, key = validation.value
             print("[执行] 开始点击。")
             result = self.controller.execute(adapted.manual_action, fresh_state)
-            if not result.executed or result.recovery_needed:
+            if getattr(result, "cancelled", False):
+                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
+            if not result.executed and not result.recovery_needed:
                 return self._retry("execution_failed")
+            self.consumed.mark_consumed(key)
+            if not result.executed:
+                self._set_pending(proposed, adapted, fresh_state, fresh_revision)
+                return FlowStepResult(
+                    FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
             # 本回合已经动过手：之后再出现的手牌增加都是“操作触发的抽牌”，
             # 不能再当成回合开始那张免费的。
             self._acted_this_turn = True
@@ -241,6 +298,8 @@ class RecommendationFlow:
                     except Exception:
                         pass
                 self.sleep(self.post_action_delay)
+            if self.stopped():
+                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             # 动作执行后立刻查一次手牌有没有变多（这个操作触发了抽牌）：
             # 查到了就按张数追加延时；还没写进日志就留到下一步再查。
             # 关闭该功能（0）时不做这次额外读取，保持原有节奏。
@@ -250,29 +309,25 @@ class RecommendationFlow:
                 proposed, adapted, current_frame,
                 fresh_state, fresh_revision)
             if verified == ResultStatus.COMPLETED:
-                self.consumed.mark_consumed(key)
                 return FlowStepResult(FlowStepStatus.EXECUTED)
-            if verified == ResultStatus.WAITING_RECOMMENDATION:
-                # A discover click is not complete while Power.log still
-                # exposes a choice UI.  Keep it retryable until that UI
-                # closes; all other confirmed actions retain duplicate
-                # execution protection.
-                if proposed.action != ActionKind.CHOOSE_DISCOVER:
-                    self.consumed.mark_consumed(key)
-                self.waiting_instruction = proposed.normalized_instruction
-                self.waiting_panel_hash = current_frame.perceptual_hash
-                self.waiting_turn_number = proposed.turn_number
-                self.waiting_action_kind = proposed.action
+            if verified in (ResultStatus.WAITING_RECOMMENDATION,
+                            ResultStatus.UNCONFIRMED):
+                self._set_pending(proposed, adapted, fresh_state, fresh_revision)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
-                    "waiting_recommendation_update")
+                    "waiting_recommendation_update"
+                    if verified == ResultStatus.WAITING_RECOMMENDATION
+                    else "awaiting_action_confirmation")
             return self._retry("result_not_confirmed")
         except Exception as exc:
             return self._retry(f"{type(exc).__name__}:{exc}")
 
     def _wait_for_hand_animation(self):
         """等待手牌入场动画完成，再取最新状态做校验（上游性能调优逻辑）。"""
+        stopped = getattr(self, "stopped", lambda: False)
         while True:
+            if stopped():
+                return self.state_supplier()
             state, revision = self.state_supplier()
             self.hand_animation_delay.observe(
                 getattr(state, "hand_entry_count", 0))
@@ -280,6 +335,8 @@ class RecommendationFlow:
             if remaining <= 0:
                 return state, revision
             self.sleep(remaining)
+            if stopped():
+                return self.state_supplier()
 
     # -------------------------------------------------- 抽牌额外延时（回合内抽牌）
     @staticmethod
@@ -370,9 +427,8 @@ class RecommendationFlow:
 
         A changed recommendation text confirms completion. A discover
         action or a satisfied log postcondition waits for the next
-        recommendation. Anything else returns RETRY immediately so the
-        caller re-executes the same action with fresh evidence instead of
-        waiting for a result window.
+        recommendation. Anything else is UNCONFIRMED and must not be replayed
+        before new evidence authorizes another attempt.
         """
         before_instruction = proposed.normalized_instruction
         after_state, after_revision = self.state_supplier()
@@ -414,14 +470,28 @@ class RecommendationFlow:
             return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.USE_ABILITY:
             # 古神技能：结算一定有日志痕迹（伤害/召唤/加 Buff/扣蓝）。
-            # 日志一点没动 = 面板没弹或点空了，这时重试是安全的；日志动了就
-            # 当已发动、标记 consumed 等盒子更新 —— 绝不立刻重复点同一个随从
-            # （技能用过后它就是个普通随从了，再点它可能变成一次攻击）。
+            # 日志一点没动也只能进入待确认；日志动了就当已发动并等盒子更新。
+            # 两种情况下都不立即重复点同一个随从。
             return (ResultStatus.WAITING_RECOMMENDATION if log_changed
-                    else ResultStatus.RETRY)
+                    else ResultStatus.UNCONFIRMED)
         if log_changed:
             return ResultStatus.WAITING_RECOMMENDATION
-        return ResultStatus.RETRY
+        return ResultStatus.UNCONFIRMED
+
+    def _set_pending(self, proposed, adapted, before_state, before_revision):
+        self.pending_action = PendingRecommendationAction(
+            instruction=proposed.normalized_instruction,
+            turn_number=proposed.turn_number,
+            action_kind=proposed.action,
+            source_entity_id=adapted.source_entity_id,
+            target_entity_id=adapted.target_entity_id,
+            postcondition=adapted.postcondition,
+            before_state=before_state,
+            before_revision=before_revision,
+        )
+
+    def _clear_pending(self):
+        self.pending_action = None
 
     def _clear_waiting(self):
         self.waiting_instruction = None

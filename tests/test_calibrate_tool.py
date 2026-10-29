@@ -460,6 +460,20 @@ class SaveTests(unittest.TestCase):
                           return_value=missing):
             self.assertFalse(session.save())
 
+    def test_save_writes_click_points_in_their_named_sections(self):
+        session = make_session()
+        secondary = next(t for t in session.targets
+                         if t["key"] == "hero_power_secondary")
+        secondary["box"] = [1207, 702, 1263, 758]
+        with patch.object(calibrate_roi, "_user_config_path",
+                          return_value=self.path):
+            self.assertTrue(session.save())
+
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual([1235, 730],
+                         data["battle_click"]["hero_power_secondary"])
+        self.assertIn("mode_click", data)
+
 
 class RenderTests(unittest.TestCase):
     def test_render_draws_the_overlay_and_the_target_card(self):

@@ -318,8 +318,8 @@ class TimelineFlowTests(unittest.TestCase):
 
         second = flow.run_player_turn_step()
 
-        # 同一指令、同一 turn/rev：已被消费去重，RETRY 而非再次点击。
-        self.assertEqual(FlowStepStatus.RETRY, second.status)
+        # 同一指令、同一 turn/rev：进入待确认，不再次点击。
+        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
         self.assertEqual([TimelineAction("undo")], controller.actions)
 
     def test_keep_choice_also_waits_after_single_click(self):
@@ -343,7 +343,7 @@ class TimelineFlowTests(unittest.TestCase):
         self.assertEqual([TimelineAction("keep")], controller.actions)
 
         second = flow.run_player_turn_step()
-        self.assertEqual(FlowStepStatus.RETRY, second.status)
+        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
         self.assertEqual([TimelineAction("keep")], controller.actions)
 
     def test_pending_discover_line_with_undo_only_clicks_undo_once(self):
@@ -357,7 +357,7 @@ class TimelineFlowTests(unittest.TestCase):
         self.assertEqual([TimelineAction("undo")], controller.actions)
 
         second = flow.run_player_turn_step()
-        self.assertEqual(FlowStepStatus.RETRY, second.status)
+        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
         self.assertEqual([TimelineAction("undo")], controller.actions)
 
 

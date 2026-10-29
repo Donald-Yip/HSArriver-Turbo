@@ -145,5 +145,42 @@ class ModeClickOverrideTests(unittest.TestCase):
                          hs_click.mode_click_points())
 
 
+class BattleClickPointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = make_temp_dir()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.path = self.tmp / "ui_config.json"
+        self.original = config.CONFIG_PATH
+        config.CONFIG_PATH = self.path
+        self.addCleanup(lambda: setattr(config, "CONFIG_PATH", self.original))
+
+    def test_second_hero_power_default_is_the_measured_point(self):
+        points = config.default_battle_click_points()
+
+        self.assertEqual((1150, 850), points["hero_power_primary"])
+        self.assertEqual((1235, 730), points["hero_power_secondary"])
+        self.assertEqual(screen_regions.battle_click_points(), points)
+
+    def test_second_hero_power_override_wins_immediately(self):
+        self.path.write_text(json.dumps({
+            "battle_click": {"hero_power_secondary": [1200, 700]}
+        }, ensure_ascii=False), encoding="utf8")
+
+        points = config.load_battle_click_points()
+
+        self.assertEqual((1200.0, 700.0), points["hero_power_secondary"])
+        self.assertEqual((1150, 850), points["hero_power_primary"])
+
+    def test_click_module_reads_the_calibrated_second_point(self):
+        import click as hs_click
+
+        self.path.write_text(json.dumps({
+            "battle_click": {"hero_power_secondary": [1200, 700]}
+        }, ensure_ascii=False), encoding="utf8")
+
+        self.assertEqual((1200.0, 700.0),
+                         hs_click.hero_power_point("secondary"))
+
+
 if __name__ == "__main__":
     unittest.main()

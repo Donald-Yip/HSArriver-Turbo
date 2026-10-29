@@ -13,10 +13,10 @@ class ConsumedActionStore:
     def key_for(proposed, adapted) -> tuple[object, ...]:
         return (
             proposed.turn_number,
-            proposed.log_revision,
             proposed.normalized_instruction,
             adapted.source_entity_id,
             adapted.target_entity_id,
+            getattr(adapted, "postcondition", ""),
         )
 
     def contains(self, key: tuple[object, ...]) -> bool:

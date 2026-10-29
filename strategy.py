@@ -23,9 +23,11 @@ class StrategyState:
         self.my_graveyard = []
         self.my_hero = None
         self.my_hero_power = None
+        self.my_hero_powers = []
         self.my_weapon = None
         self.oppo_hero = None
         self.oppo_hero_power = None
+        self.oppo_hero_powers = []
         self.oppo_weapon = None
         self.oppo_hand_card_num = 0
         self.discover_choice_count = log_state.discover_choice_count
@@ -69,8 +71,10 @@ class StrategyState:
                         self.oppo_hero = converted
                 elif entity.cardtype == "HERO_POWER":
                     if mine:
+                        self.my_hero_powers.append(converted)
                         self.my_hero_power = converted
                     else:
+                        self.oppo_hero_powers.append(converted)
                         self.oppo_hero_power = converted
                 elif entity.cardtype == "WEAPON":
                     if mine:
