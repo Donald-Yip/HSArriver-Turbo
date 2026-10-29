@@ -260,6 +260,7 @@ class BattleStepWiringTests(unittest.TestCase):
         FSM_action._oppo_minion_ids = None
         FSM_action.recommendation_flow = None
         FSM_action.recommendation_config = SimpleNamespace(
+            turn_start_probe_interval_seconds=2.0,
             pre_action_delay_seconds=1.0, first_turn_per_card_delay_seconds=0.0)
         self.calls = []
 
@@ -279,6 +280,7 @@ class BattleStepWiringTests(unittest.TestCase):
             patch.object(self.fsm, "_report_automation_diagnostic"),
             patch.object(self.fsm, "_maybe_concede", return_value=False),
             patch.object(self.fsm, "_sleep_with_delay"),
+            patch.object(self.fsm, "end_turn_button_present", return_value=True),
             patch.object(self.fsm, "run_manual_battle_step", return_value=None),
         ):
             return self.fsm.run_automatic_battle_step()

@@ -700,6 +700,7 @@ _USER_BOX_KEYS = (
     # 换牌阶段专用：比回合推荐区域更大，能框住最多 4 条留牌建议。
     "mulligan_recommendation_roi",
     "mulligan_confirm_roi",
+    "turn_end_button_roi",
     "ai_win_rate_roi",
     "ai_win_rate_wide_roi",
     "post_game_start_roi",
@@ -827,6 +828,7 @@ _USER_DELAY_KEYS = (
     "mulligan_ready_delay_seconds",
     "mulligan_post_ocr_delay_seconds",
     "mulligan_retry_delay_seconds",
+    # 兼容旧配置/网页/CLI：字段仍可读写，但运行期已不再用固定延时。
     "first_turn_per_card_delay_seconds",
     "pre_action_delay_seconds",
     "post_action_delay_seconds",
@@ -919,6 +921,11 @@ class RecommendationConfig:
     # 可通过 ui_config.json 的 mulligan_confirm_roi 覆盖。
     mulligan_confirm_roi: tuple[int, int, int, int] = (860, 810, 1060, 890)
 
+    # 战斗界面右侧「结束回合」按钮。日志判到我方回合后，OCR 必须在这里读到
+    # 「结束回合」才开始读取推荐；读不到就每 turn_start_probe_interval_seconds
+    # 复查一次。可通过 ui_config.json 的 turn_end_button_roi 校准。
+    turn_end_button_roi: tuple[int, int, int, int] = (1380, 430, 1600, 570)
+
     # 盒子「AI胜率 X%」浮动条区域（开了自动投降时 OCR 读取）。
     # 主区域读不到时用 ai_win_rate_wide_roi（= 主区域外扩一圈）再读一次兜底。
     # 两者都可通过 ui_config.json 同名键覆盖（校准工具写入）。
@@ -959,22 +966,17 @@ class RecommendationConfig:
     # 可通过 ui_config.json 的 deck_grid_roi 覆盖（校准工具写入）。
     deck_grid_roi: tuple[int, int, int, int] = (366, 210, 1089, 858)
 
-    # ------------------------------------------------------------------ 第一回合额外延时
-    # 第一回合开始时会有一批"开局生效的全局卡"（如黑暗主教本尼迪塔斯 SW_448
-    # 触发 TriggerKeyword=START_OF_GAME_KEYWORD），它们要跑入场/效果动画，导致
-    # 第一回合实际比普通回合更久，盒子推荐也可能更新更晚。
-    # 这里在第一回合的 pre_action_delay 基础上追加延时：
-    #   * 每张生效卡额外延时：Power.log 里每检测到一张 cardId 非空且
-    #     TriggerKeyword=START_OF_GAME_KEYWORD 的开局触发卡，追加这么多秒。
-    # 用户当前设为 3.5s/张（SW_448 实测）。
-    first_turn_per_card_delay_seconds: float = 3.5
+    # 我方回合开始后，右侧「结束回合」按钮的 OCR 复查间隔。
+    turn_start_probe_interval_seconds: float = 2.0
+
+    # 旧版的固定回合开始延时已移除：现在以右侧「结束回合」按钮的 OCR
+    # 结果作为就绪信号。保留字段只为兼容已有构造调用，运行期不再读取。
+    first_turn_per_card_delay_seconds: float = 0.0
+    pre_action_delay_seconds: float = 0.0
 
     # ------------------------------------------------------------------ 出牌
-    # 每个新回合开始延时一次（给盒子更新推荐留时间），
-    # 同回合内多次出牌操作之间不重复延时。调大更稳但节奏更慢。
-    pre_action_delay_seconds: float = 7.0
     # 一次操作执行完成之后到下轮截图+OCR 的延时（0 = 立即开始）；
-    # 配合上面"回合只延时一次"使用。>0 会拉开操作间距，让盒子有时间更新。
+    # >0 会拉开操作间距，让盒子有时间更新。
     post_action_delay_seconds: float = 0.5
     # 抽牌额外延时（秒/张）：我方回合里抽到牌时，在「操作后延时」之外再等。
     #   * 每回合开始那一下的常规抽 1 张不算（那 1 张是免费的）；

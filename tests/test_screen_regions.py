@@ -34,7 +34,7 @@ class RegionRegistryTests(unittest.TestCase):
     def test_lists_every_screenshot_region(self):
         self.assertEqual(
             ["recommendation", "mulligan_recommendation", "mulligan_confirm",
-             "win_rate", "win_rate_wide",
+             "turn_end_button", "win_rate", "win_rate_wide",
              "post_game_start", "rank", "main_menu_battle", "deck_select_title",
              "deck_grid",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual",
@@ -112,7 +112,7 @@ class CalibrationTargetTests(unittest.TestCase):
         targets = screen_regions.calibration_targets(make_config())
 
         self.assertEqual(["recommendation", "mulligan_recommendation",
-                          "mulligan_confirm", "win_rate",
+                          "mulligan_confirm", "turn_end_button", "win_rate",
                           "post_game_start", "rank",
                           "main_menu_battle", "deck_select_title", "deck_grid",
                           "mode_menu_open", "mode_wild", "mode_standard",
@@ -120,7 +120,7 @@ class CalibrationTargetTests(unittest.TestCase):
                          [target["key"] for target in targets])
         self.assertEqual(
             ["recommendation_roi", "mulligan_recommendation_roi",
-             "mulligan_confirm_roi", "ai_win_rate_roi",
+             "mulligan_confirm_roi", "turn_end_button_roi", "ai_win_rate_roi",
              "post_game_start_roi", "post_game_rank_roi",
              "main_menu_battle_roi", "deck_select_title_roi", "deck_grid_roi",
              "mode_menu_open", "mode_wild", "mode_standard", "mode_casual",

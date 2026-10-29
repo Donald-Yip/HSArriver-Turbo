@@ -31,7 +31,7 @@ from src.ocr.paddle_adapter import PaddleOcrAdapter
 from src.ocr.stable_reader import OcrRejectedError, StableRecommendationReader
 from hslegend.adapters.legacy.recommendation_parser import RecommendationParser
 from src.recommendation_config import RecommendationConfig
-from hslegend.domain import ActionKind
+from hslegend.domain import ActionKind, normalize_card_name
 from src.safety.hearthstone_liveness import default_monitor
 from src.safety.recommendation_validator import RecommendationValidator
 from src.safety.restart_watchdog import default_watchdog
@@ -71,7 +71,9 @@ mulligan_reader = None
 recommendation_validator = None
 active_game_generation = -1
 mulligan_delay_generation = None
-player_turn_delay_key = None
+player_turn_ready_key = None
+_turn_ready_probe_key = None
+_turn_ready_next_probe_at = 0.0
 last_automation_diagnostic = None
 _snapshot_cache_key = None
 _snapshot_cache = None
@@ -507,7 +509,7 @@ def _human_like_opponent_minions(snapshot) -> int:
 def reset_game_session():
     """Clear every match-scoped automation state for a newly created game."""
     global active_game_generation, choose_hero_count
-    global mulligan_delay_generation, player_turn_delay_key
+    global mulligan_delay_generation, player_turn_ready_key
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _mulligan_ocr_detail_key
@@ -520,7 +522,7 @@ def reset_game_session():
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
     mulligan_delay_generation = None
-    player_turn_delay_key = None
+    player_turn_ready_key = None
     last_automation_diagnostic = None
     _snapshot_cache_key = None
     _snapshot_cache = None
@@ -546,7 +548,7 @@ def reset_game_session():
 
 def init():
     global log_state, log_iter, choose_hero_count, active_game_generation
-    global mulligan_delay_generation, player_turn_delay_key
+    global mulligan_delay_generation, player_turn_ready_key
     global last_automation_diagnostic
     global _snapshot_cache_key, _snapshot_cache, _mulligan_diagnostic_key
     global _mulligan_ocr_detail_key
@@ -565,7 +567,7 @@ def init():
     choose_hero_count = 0
     active_game_generation = -1
     mulligan_delay_generation = None
-    player_turn_delay_key = None
+    player_turn_ready_key = None
     last_automation_diagnostic = None
     _snapshot_cache_key = None
     _snapshot_cache = None
@@ -1299,6 +1301,14 @@ _CHOOSING_HERO_RANK_RETRY_WAIT = 0.6
 # 「开始」按钮的 OCR 关键词与最低置信度（繁体/英文一并兜住）。
 _POST_GAME_START_KEYWORDS = ("开始", "開始", "Play")
 _POST_GAME_MIN_CONFIDENCE = 0.5
+
+# ---------------------------------------------------------------- 回合就绪信号
+# 日志先报 TURN=我方，但对手结束回合动画还没播完时，右侧仍是「对手回合」。
+# 只把 OCR 读到的「结束回合」当作可操作信号；框与校准目标同源（测试校验）。
+_TURN_END_BUTTON_ROI = (1380, 430, 1600, 570)
+_TURN_END_OCR_SCALE = 2.0
+_TURN_END_MIN_CONFIDENCE = 0.5
+_TURN_END_KEYWORDS = ("结束回合", "結束回合", "endturn")
 # -------------------------------------------------------------- 控分（action=keep）
 # 读到"名次比目标更靠前"时：点开始匹配 → 等进入对局 → 立刻投降 → 回到选卡组界面，
 # 再由主循环重新读名次（每次 dispatch 只投降一局，主循环持续做存活检测）。
@@ -1778,6 +1788,11 @@ def _post_game_start_box() -> tuple:
     return _config_roi("post_game_start_roi", _POST_GAME_START_BUTTON_ROI)
 
 
+def _turn_end_button_box() -> tuple:
+    """战斗右侧「结束回合」按钮框：优先用户校准值。"""
+    return _config_roi("turn_end_button_roi", _TURN_END_BUTTON_ROI)
+
+
 def _post_game_rank_box() -> tuple:
     """段位数字的读取框：优先用用户校准的 post_game_rank_roi。
 
@@ -1838,6 +1853,47 @@ def click_post_game_point():
     按钮——检测到了才收尾，收尾里才点第三个点（「开始」按钮正中心）。
     """
     click.commit_error_report()
+
+
+def end_turn_button_present() -> bool:
+    """右侧是否明确显示「结束回合」；「对手回合」不算就绪。"""
+    lines = _ocr_lines(_turn_end_button_box(), _TURN_END_OCR_SCALE, "turn_end")
+    if lines is None:
+        return False
+    for line in lines:
+        text = normalize_card_name(getattr(line, "text", ""))
+        confidence = float(getattr(line, "confidence", 0.0) or 0.0)
+        if confidence >= _TURN_END_MIN_CONFIDENCE and any(
+                keyword in text for keyword in _TURN_END_KEYWORDS):
+            return True
+    return False
+
+
+def _player_turn_ready(snapshot) -> bool:
+    """日志已报我方回合后，以右侧按钮作为可安全操作信号。"""
+    global player_turn_ready_key, _turn_ready_probe_key
+    global _turn_ready_next_probe_at
+
+    turn = snapshot.game_num_turns_in_play
+    probe_key = (log_state.game_generation, turn)
+    if player_turn_ready_key == probe_key:
+        return True
+    now = time.monotonic()
+    if _turn_ready_probe_key != probe_key:
+        _turn_ready_probe_key = probe_key
+        _turn_ready_next_probe_at = now
+    if now < _turn_ready_next_probe_at:
+        return False
+    interval = float(recommendation_config.turn_start_probe_interval_seconds)
+    _turn_ready_next_probe_at = now + interval
+    if not end_turn_button_present():
+        _report_automation_diagnostic(
+            "waiting_turn_end_button",
+            f"[SYS] 尚未检测到「结束回合」，每 {interval:g}s 复查一次。")
+        return False
+    player_turn_ready_key = probe_key
+    manual_controller.output("[SYS] 已检测到「结束回合」，开始本轮推荐读取。")
+    return True
 
 
 def confirm_button_present() -> bool:
@@ -2336,7 +2392,8 @@ def _keep_score_once() -> bool:
 
 def run_automatic_battle_step():
     """Observe opponent turns; execute one newly validated player action."""
-    global player_turn_delay_key, last_automation_diagnostic, _ocr_fail_streak
+    global player_turn_ready_key, _turn_ready_probe_key, _turn_ready_next_probe_at
+    global last_automation_diagnostic, _ocr_fail_streak
     global _concede_triggered
 
     snapshot = refresh_snapshot()
@@ -2362,9 +2419,14 @@ def run_automatic_battle_step():
         # 这里本来就在空转等对手，不会拖慢自己的操作。
         _human_like_opponent_minions(snapshot)
         _report_automation_diagnostic("opponent_turn", "等待对手操作。")
-        # 对方回合清空延迟标记：每次切回我方回合必延时一次，
-        # 同回合内多次出牌不再重复延时（不依赖可能失真的回合号）。
-        player_turn_delay_key = None
+        # 回到我方回合后，必须重新等到右侧「结束回合」出现。
+        player_turn_ready_key = None
+        _turn_ready_probe_key = None
+        _turn_ready_next_probe_at = 0.0
+        return None
+    # 日志判到我方回合后，动画可能还没结束：右侧按钮仍是「对手回合」时
+    # 不读取推荐、不点牌；每 2 秒复查一次，出现「结束回合」才继续。
+    if not _player_turn_ready(snapshot):
         return None
     # 自动投降：只在我方回合检测（对手回合不计入“连续回合”），
     # 连续低于阈值达到设定回合数则主动认输。
@@ -2373,26 +2435,6 @@ def run_automatic_battle_step():
         # 认输后不立即返回结算，等上面 is_end 分支（日志 COMPLETE）再计数。
         return None
     _report_automation_diagnostic("my_turn", "轮到己方操作：开始读取推荐……")
-    turn = snapshot.game_num_turns_in_play
-    if player_turn_delay_key != turn:
-        # 每个新回合开始只延时一次（给盒子更新推荐留时间），
-        # 同回合内的多次出牌操作之间不重复延时。
-        player_turn_delay_key = turn
-        delay = recommendation_config.pre_action_delay_seconds
-        label = f"回合 {turn} 延时"
-        # 第一回合额外延时：开局生效的全局卡（如黑暗主教本尼迪塔斯）要跑
-        # 效果动画，盒子推荐更新更晚。这里在 pre_action 基础上按张数追加：
-        #   每张生效卡 × per_card_delay（无固定基础额外）。
-        if turn == 1:
-            card_count = getattr(snapshot, "start_of_game_card_count", 0) or 0
-            extra = (card_count
-                     * recommendation_config.first_turn_per_card_delay_seconds)
-            if extra > 0:
-                delay += extra
-                label = f"第一回合延时（{card_count} 张开局生效卡）"
-        _sleep_with_delay(delay, label)
-        manual_controller.output(
-            f"[SYS] 回合 {turn} 延时结束，开始本轮推荐读取。")
     if recommendation_flow is None:
         return run_manual_battle_step()
 

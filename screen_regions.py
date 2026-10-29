@@ -81,6 +81,10 @@ DECK_GRID_COLOR = "#8fd3e8"
 # 必须与 config.RecommendationConfig.mulligan_recommendation_roi 的默认值一致。
 MULLIGAN_RECOMMENDATION_REGION = (7, 200, 278, 970)
 MULLIGAN_RECOMMENDATION_COLOR = "#b6e05a"
+# 战斗界面右侧「结束回合」按钮。回合开始后只有它出现，才说明动画和结算都结束，
+# 可以开始读取推荐/出牌；「对手回合」同位置出现时不能误判。框可校准。
+TURN_END_BUTTON_REGION = (1380, 430, 1600, 570)
+TURN_END_BUTTON_COLOR = "#d8a24a"
 # 文字框可以很薄：校准窗口的缩放手柄默认不允许小于 MIN_SIZE(60)，这里放行到 20，
 # 否则 259×27 的「传统对战」框根本拖不出来（只能改配置文件）。
 TEXT_BOX_MIN_SIZE = 20
@@ -179,6 +183,12 @@ CALIBRATION_TARGETS = (
      "label": "换牌「确认」按钮", "short": "换牌确认", "color": "#5fa8e6",
      "default": (860, 810, 1060, 890),
      "hint": "框住换牌界面里的「确认」按钮"},
+    {"key": "turn_end_button", "config_key": "turn_end_button_roi",
+     "label": "战斗右侧「结束回合」按钮", "short": "结束回合",
+     "color": TURN_END_BUTTON_COLOR,
+     "default": TURN_END_BUTTON_REGION,
+     "hint": "框住我方回合右侧的「结束回合」按钮：日志判定轮到我方后，"
+             "OCR 只有读到这几个字才开始读取推荐"},
     {"key": "win_rate", "config_key": "ai_win_rate_roi",
      "label": "盒子「AI胜率」浮动条", "short": "AI胜率", "color": "#e2a84e",
      "default": AI_WIN_RATE_REGION,
@@ -394,6 +404,12 @@ def screenshot_regions(config=None) -> list[dict]:
          "box": by_key["mulligan_confirm"]["box"],
          "config_key": "mulligan_confirm_roi",
          "note": "换牌阶段用来确认按钮是否已经消失（还在=没提交成功，要重试）"},
+        {"key": "turn_end_button", "color": TURN_END_BUTTON_COLOR,
+         "label": "战斗右侧「结束回合」按钮（回合就绪信号）",
+         "box": by_key["turn_end_button"]["box"],
+         "config_key": "turn_end_button_roi",
+         "note": "日志进入我方回合后，OCR 读到「结束回合」才允许开始出牌；"
+                 "「对手回合」不算"},
         {"key": "win_rate", "color": "#e2a84e",
          "label": "盒子「AI胜率」浮动条",
          "box": win_rate,
