@@ -127,6 +127,7 @@ def cancellable_console_input(
 from hslegend.adapters.legacy.actions import (
     ActionExecutionResult,
     ActionCancelled,
+    AssembleChoiceAction,
     AttackAction,
     DiscoverChoiceAction,
     EndTurnAction,
@@ -408,6 +409,10 @@ class ClickExecutor:
         if slot == "primary":
             return self.click.use_skill_no_point()
         return self.click.use_skill_no_point(slot)
+
+    def choose_assemble_card(self, choice_index):
+        return self._safe_action(
+            lambda: self.click.choose_assemble_card(choice_index))
 
     def choose_discover_card(self, choice_index, choice_count, target=None,
                              my_count=0, oppo_count=0, choice_delay=None):
@@ -1057,6 +1062,16 @@ class ManualController:
                     **choice_args,
                 )
             return ActionExecutionResult(True, "已使用英雄技能。")
+
+        if isinstance(action, AssembleChoiceAction):
+            if not 0 <= action.choice_index < 4:
+                return self._reject("拼装选项位置已经失效，未执行操作。")
+            if (action.choice_entity_id is not None
+                    and not self._choice_entity_ok(action, state)):
+                return self._reject("拼装选项已经变化，未执行操作。")
+            self.executor.choose_assemble_card(action.choice_index)
+            return ActionExecutionResult(
+                True, f"已选择拼装选项：{action.choice_index + 1}号位")
 
         if isinstance(action, DiscoverChoiceAction):
             if action.timeline_card_id is not None:

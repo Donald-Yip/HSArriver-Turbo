@@ -71,6 +71,16 @@ class DiscoverChoiceAction:
 
 
 @dataclass(frozen=True)
+class AssembleChoiceAction:
+    """拼装面板：从左右两张牌的上下四个绿色选项中选一个。"""
+    choice_index: int
+    choice_entity_id: Optional[str] = None
+    choice_parent_entity_id: Optional[str] = None
+    choice_card_id: Optional[str] = None
+    turn_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class UseAbilityAction:
     """古神/泰坦随从发动技能：点随从 → 点「选择一个技能」面板里的技能牌 → 目标。
 
@@ -164,6 +174,7 @@ ManualAction = Union[
     TradeCardAction,
     HeroPowerAction,
     DiscoverChoiceAction,
+    AssembleChoiceAction,
     UseAbilityAction,
     SelectTargetAction,
     UseLocationAction,

@@ -16,7 +16,9 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 
 import battle_record
-from manual_controller import ActionExecutionResult, EndTurnAction
+from manual_controller import (
+    ActionExecutionResult, AssembleChoiceAction, EndTurnAction,
+)
 from src.flow.recommendation_flow import FlowStepStatus, RecommendationFlow
 from src.game_state.recommendation_adapter import AdaptedAction
 from src.parser.recommendation_parser import RecommendationParser
@@ -86,6 +88,12 @@ class ExplodingAdapter:
 class AcceptingAdapter:
     def __call__(self, proposed, state):
         return AdaptedAction(EndTurnAction(), None, None, "turn_changed")
+
+
+class AssemblyAdapter:
+    def __call__(self, _proposed, _state):
+        return AdaptedAction(
+            AssembleChoiceAction(1), None, None, "choice_resolved")
 
 
 class AcceptingValidator:
@@ -162,6 +170,21 @@ class RecommendationRetryTests(unittest.TestCase):
                             for result in results))
         self.assertTrue(all("boom: adapter rejected" in result.diagnostics
                             for result in results))
+
+    def test_missed_assembly_click_keeps_recommendation_retryable(self):
+        controller = RecordingController()
+        flow = build_flow(
+            ScriptedReader(["拼装\n左二\n中一"]),
+            adapter=AssemblyAdapter(),
+            controller=controller,
+        )
+
+        results = [run_step(flow)[0] for _ in range(3)]
+
+        self.assertTrue(all(result.status is FlowStepStatus.RETRY
+                            for result in results))
+        self.assertEqual(3, len(controller.executed))
+        self.assertIsNone(flow.pending_action)
 
     def test_unconfirmed_action_executes_once_then_waits_for_confirmation(self):
         controller = RecordingController()

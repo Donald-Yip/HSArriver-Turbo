@@ -4,7 +4,8 @@ from dataclasses import dataclass, replace
 import re
 
 from hslegend.adapters.legacy.actions import (
-    AttackAction, DiscoverChoiceAction, EndTurnAction, HeroPowerAction,
+    AssembleChoiceAction, AttackAction, DiscoverChoiceAction, EndTurnAction,
+    HeroPowerAction,
     LaunchStarshipAction, PlayCardAction, SelectTargetAction, Target,
     TimelineAction, TradeCardAction, UseAbilityAction, UseLocationAction,
 )
@@ -219,7 +220,7 @@ def adapt_action(proposed, state):
         index = proposed.source.index - 1
         entity_id = (getattr(state, "general_choice_entity_ids", {}) or {}).get(index)
         return AdaptedAction(
-            DiscoverChoiceAction(index, 4, choice_entity_id=entity_id),
+            AssembleChoiceAction(index, choice_entity_id=entity_id),
             None, None, "choice_resolved")
     if proposed.action == ActionKind.CHOOSE_DISCOVER:
         choice_count = getattr(state, "discover_choice_count", None)

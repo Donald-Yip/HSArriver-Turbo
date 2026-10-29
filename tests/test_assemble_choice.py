@@ -1,8 +1,12 @@
 from contextlib import nullcontext
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from manual_controller import ClickExecutor, ManualController
+import click as hearthstone_click
+from manual_controller import (
+    AssembleChoiceAction, ClickExecutor, ManualController,
+)
 from src.game_state.recommendation_adapter import adapt_action
 from src.parser.recommendation_parser import RecommendationParser
 from src.recommendation_models import ActionKind
@@ -67,15 +71,15 @@ class AssembleChoiceTests(unittest.TestCase):
         self.assertEqual("拼装\n左二\n中一", first)
         self.assertEqual(first, second)
 
-    def test_adapter_reuses_the_four_choice_action(self):
+    def test_adapter_uses_the_dedicated_assembly_gesture(self):
         adapted = adapt_action(parse("拼装\n右一\n中二"), state())
+        self.assertIsInstance(adapted.manual_action, AssembleChoiceAction)
         self.assertEqual(2, adapted.manual_action.choice_index)
-        self.assertEqual(4, adapted.manual_action.choice_count)
 
         class Clicks:
             def __init__(self): self.events = []
-            def choose_discover_card(self, index, count):
-                self.events.append((index, count))
+            def choose_assemble_card(self, index):
+                self.events.append(index)
 
         clicks = Clicks()
         controller = ManualController(
@@ -86,7 +90,20 @@ class AssembleChoiceTests(unittest.TestCase):
         )
         result = controller.execute(adapted.manual_action, state())
         self.assertTrue(result.executed, result.message)
-        self.assertEqual([(2, 4)], clicks.events)
+        self.assertEqual([2], clicks.events)
+
+    def test_assembly_gesture_clicks_the_four_green_box_centers(self):
+        expected = ((514, 481), (514, 595), (1329, 481), (1329, 595))
+        clicked = []
+        with (
+            patch.object(hearthstone_click, "rand_sleep"),
+            patch.object(hearthstone_click, "left_click",
+                         side_effect=lambda x, y: clicked.append((x, y))),
+        ):
+            for index in range(4):
+                hearthstone_click.choose_assemble_card(index)
+
+        self.assertEqual(list(expected), clicked)
 
     def test_invalid_assembly_phrases_fail_before_clicking(self):
         from src.parser.recommendation_parser import RecommendationParseError

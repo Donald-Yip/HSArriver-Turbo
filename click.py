@@ -468,6 +468,25 @@ def choose_skill_card(choice_index, choice_count):
     left_click(x, y)
 
 
+# 「选择一项替换 / 拼装」面板：左右两张牌各有上下两个绿色可选框，
+# 客户区 1920×1080 实测中心如下。顺序与盒子原有 1~4 号位一致：
+# 左上=1、左下=2、右上=3、右下=4。
+ASSEMBLE_CARD_POINTS = (
+    (514, 481),   # 左一
+    (514, 595),   # 左二
+    (1329, 481),  # 右一
+    (1329, 595),  # 右二
+)
+
+
+def choose_assemble_card(choice_index):
+    """点拼装面板四个绿色选项框之一（0 基）。"""
+    assert 0 <= choice_index < len(ASSEMBLE_CARD_POINTS)
+    rand_sleep(OPERATE_INTERVAL)
+    x, y = ASSEMBLE_CARD_POINTS[choice_index]
+    left_click(x, y)
+
+
 def choose_discover_card(choice_index, choice_count):
     """Click a centered 1920x1080 discover choice for its layout size."""
     assert choice_count in DISCOVER_CARD_X

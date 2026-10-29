@@ -266,8 +266,12 @@ class RecommendationFlow:
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             if not result.executed and not result.recovery_needed:
                 return self._retry("execution_failed")
-            self.consumed.mark_consumed(key)
+            defer_consumption = proposed.action == ActionKind.ASSEMBLE_CHOICE
+            if not defer_consumption:
+                self.consumed.mark_consumed(key)
             if not result.executed:
+                if defer_consumption:
+                    return self._retry("execution_failed")
                 self._set_pending(proposed, adapted, fresh_state, fresh_revision)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
@@ -309,9 +313,18 @@ class RecommendationFlow:
                 proposed, adapted, current_frame,
                 fresh_state, fresh_revision)
             if verified == ResultStatus.COMPLETED:
+                if defer_consumption:
+                    self.consumed.mark_consumed(key)
                 return FlowStepResult(FlowStepStatus.EXECUTED)
             if verified in (ResultStatus.WAITING_RECOMMENDATION,
                             ResultStatus.UNCONFIRMED):
+                if defer_consumption:
+                    if verified == ResultStatus.WAITING_RECOMMENDATION:
+                        self.consumed.mark_consumed(key)
+                        return FlowStepResult(
+                            FlowStepStatus.OBSERVE,
+                            "waiting_recommendation_update")
+                    return self._retry("result_not_confirmed")
                 self._set_pending(proposed, adapted, fresh_state, fresh_revision)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
@@ -462,6 +475,11 @@ class RecommendationFlow:
             # 完成；没变也不能立刻 RETRY 重击（会二次撤销/误操作）。返回
             # WAITING 让上层标记已消费并等待盒子更新推荐。
             return ResultStatus.WAITING_RECOMMENDATION
+        if proposed.action == ActionKind.ASSEMBLE_CHOICE:
+            # 拼装点击发出后若日志和面板都没变化，说明四选一没点中；下一轮
+            # 继续按同一条盒子推荐重试，不能进入“已发出、等待确认”静默状态。
+            return (ResultStatus.WAITING_RECOMMENDATION if log_changed
+                    else ResultStatus.RETRY)
         if proposed.action == ActionKind.CHOOSE_DISCOVER:
             return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.SELECT_TARGET:
