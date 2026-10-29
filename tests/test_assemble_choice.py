@@ -43,6 +43,30 @@ class AssembleChoiceTests(unittest.TestCase):
         self.assertEqual(2, parse("拼装出现左二中一").source.index)
         self.assertEqual(3, parse("拼装右一中二").source.index)
 
+    def test_live_panel_phrase_with_arabic_digits_is_detected(self):
+        self.assertEqual(2, parse("进行拼装【左2中1】").source.index)
+
+    def test_live_panel_numeric_aliases_map_to_existing_choices(self):
+        cases = {
+            "进行拼装【左2中1】": 2,
+            "进行拼装【左1中2】": 1,
+            "进行拼装【右2中1】": 4,
+            "进行拼装【右1中2】": 3,
+            "进行拼装【左２中１】": 2,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(expected, parse(text).source.index)
+
+    def test_live_panel_countdown_does_not_change_stability_semantics(self):
+        first = RecommendationParser.normalize_action_text(
+            "选择一项替换\n进行拼装【左2中1】\n土石幼龙\n00:35")
+        second = RecommendationParser.normalize_action_text(
+            "选择一项替换\n进行拼装【左2中1】\n土石幼龙\n00:34")
+
+        self.assertEqual("拼装\n左二\n中一", first)
+        self.assertEqual(first, second)
+
     def test_adapter_reuses_the_four_choice_action(self):
         adapted = adapt_action(parse("拼装\n右一\n中二"), state())
         self.assertEqual(2, adapted.manual_action.choice_index)

@@ -69,8 +69,9 @@ class RecommendationParser:
         compact = normalize_card_name(text)
         if "拼装" not in compact:
             return None
-        sides = re.findall(r"([左右])([一二])", compact)
-        middles = re.findall(r"中([一二])", compact)
+        canonical = compact.translate(str.maketrans({"1": "一", "2": "二"}))
+        sides = re.findall(r"([左右])([一二])", canonical)
+        middles = re.findall(r"中([一二])", canonical)
         if len(sides) != 1 or len(middles) != 1:
             return None
         side = "".join(sides[0])
