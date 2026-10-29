@@ -134,45 +134,51 @@ class FeedbackTests(unittest.TestCase):
     def test_context_is_carried_into_incident(self):
         ctx = {
             "turn": 4,
-            "phase": "对局",
+            "phase": "我方出牌",
             "instruction": "打出1号位随从",
             "raw": ["原文"],
         }
         with self._settings(retry_threshold=1):
             hit = feedback.note_event(retry_info(), ctx=ctx, now=1.0)
         self.assertEqual(4, hit["turn"])
-        self.assertEqual("对局", hit["phase"])
+        self.assertEqual("我方出牌", hit["phase"])
         self.assertEqual("打出1号位随从", hit["instruction"])
         # OCR 原文必须跟着事件走（错误.json 的 raw）——2026-10-27 的反馈包里
         # raw 是空的，只能靠截图反推盒子面板写了什么。
         self.assertEqual(["原文"], hit["raw"])
 
-    def test_error_outside_a_turn_is_recorded_but_not_captured(self):
-        for phase in ("对局结束", "未对局", "换牌", "匹配", ""):
+    def test_pregame_events_are_not_recorded_or_captured(self):
+        for phase in ("未对局", "换牌", "匹配", ""):
             with self.subTest(phase=phase):
                 self.calls.clear()
                 with self._settings():
                     hit = feedback.note_event(
                         error_info("boom"),
                         ctx={"turn": 2, "phase": phase}, now=1.0)
-                self.assertIsNotNone(hit)
-                self.assertEqual([], hit["screenshots"])
-                self.assertEqual(
-                    feedback.CAPTURE_SKIPPED_NOT_IN_TURN,
-                    hit["capture_skipped"])
+                self.assertIsNone(hit)
                 self.assertEqual([], self.calls)
+        self.assertEqual([], feedback.incidents())
 
-    def test_retry_outside_a_turn_never_captures(self):
-        with self._settings(retry_threshold=1):
+    def test_post_game_error_is_recorded_without_screenshot(self):
+        with self._settings():
             hit = feedback.note_event(
-                retry_info("recommendation_changed"),
-                ctx={"turn": 2, "phase": "换牌"}, now=1.0)
-
+                error_info("boom"),
+                ctx={"turn": 2, "phase": "对局结束"}, now=1.0)
         self.assertIsNotNone(hit)
         self.assertEqual([], hit["screenshots"])
         self.assertEqual(
             feedback.CAPTURE_SKIPPED_NOT_IN_TURN, hit["capture_skipped"])
         self.assertEqual([], self.calls)
+
+    def test_pregame_retry_is_not_recorded(self):
+        with self._settings(retry_threshold=1):
+            hit = feedback.note_event(
+                retry_info("recommendation_changed"),
+                ctx={"turn": 2, "phase": "换牌"}, now=1.0)
+
+        self.assertIsNone(hit)
+        self.assertEqual([], self.calls)
+        self.assertEqual([], feedback.incidents())
 
 
 class ReportTests(unittest.TestCase):
@@ -466,16 +472,18 @@ class ArchiveTests(unittest.TestCase):
         self.assertNotIn("未截到", body)
 
     def test_retry_archive_only_at_threshold(self):
+        ctx = {"turn": 2, "phase": "我方出牌"}
         with self._settings(retry_threshold=3):
-            feedback.note_event(retry_info(), now=1_766_000_000.0)
-            feedback.note_event(retry_info(), now=1_766_000_001.0)
+            feedback.note_event(retry_info(), ctx=ctx, now=1_766_000_000.0)
+            feedback.note_event(retry_info(), ctx=ctx, now=1_766_000_001.0)
             self.assertEqual([], self._folders())  # 未达阈值不建
-            feedback.note_event(retry_info(), now=1_766_000_002.0)
+            feedback.note_event(retry_info(), ctx=ctx, now=1_766_000_002.0)
         self.assertEqual(1, len(self._folders()))  # 达阈值建一份
 
     def test_export_includes_only_current_run(self):
+        ctx = {"turn": 2, "phase": "我方出牌"}
         with self._settings():
-            feedback.note_event(error_info("boom"), now=1_766_000_000.0)
+            feedback.note_event(error_info("boom"), ctx=ctx, now=1_766_000_000.0)
         # 另造一个“别的运行”的文件夹，导出时不该被打包。
         other = (
             self.tmp

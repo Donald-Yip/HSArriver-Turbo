@@ -39,6 +39,7 @@ class CardCapabilitySet(PrimitiveMixin):
     location: bool = False
     trade: bool = False
     timeline: bool = False
+    rewind: bool = False
 
 
 @dataclass(frozen=True, slots=True)

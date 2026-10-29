@@ -21,6 +21,7 @@ from hslegend.adapters.legacy.card_queries import (
     is_friendly_hand_target_card,
     is_hand_or_board_target_card,
     is_old_god_card,
+    is_rewind_card,
     is_starship_card,
     skill_index,
     skill_panel,
@@ -30,6 +31,9 @@ from hslegend.domain import ActionKind, card_names_match, normalize_card_name
 
 class RecommendationStateError(ValueError):
     pass
+
+
+REWIND_SETTLE_DELAY_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,15 @@ class AdaptedAction:
     postcondition: str
 
 
+def _entity_order_key(entry):
+    value = getattr(entry.entity, "entity_id", None)
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        numeric = -1
+    return numeric, str(value or "")
+
+
 def ordered_board(state, side):
     minions = state.my_minions if side == "friendly" else state.oppo_minions
     locations = (getattr(state, "my_locations", []) if side == "friendly"
@@ -55,12 +68,17 @@ def ordered_board(state, side):
                for i, entity in enumerate(minions)]
     entries.extend(BoardEntry("location", i, entity)
                    for i, entity in enumerate(locations))
-    positions = [getattr(entry.entity, "zone_pos", 0) for entry in entries]
-    if any(position <= 0 for position in positions):
-        raise RecommendationStateError("board_position_unknown")
-    if len(set(positions)) != len(positions):
-        raise RecommendationStateError("duplicate_board_position")
-    return tuple(sorted(entries, key=lambda entry: entry.entity.zone_pos))
+    by_position = {}
+    for entry in entries:
+        position = getattr(entry.entity, "zone_pos", 0)
+        if position <= 0:
+            raise RecommendationStateError("board_position_unknown")
+        previous = by_position.get(position)
+        # Rewind leaves the old timeline branch behind with the same zone_pos.
+        # The live entity is the later-created one; choose it deterministically.
+        if previous is None or _entity_order_key(entry) > _entity_order_key(previous):
+            by_position[position] = entry
+    return tuple(by_position[position] for position in sorted(by_position))
 
 
 def board_slot(state, side, one_based_index):
@@ -189,6 +207,20 @@ def adapt_action(proposed, state):
                              target_id, "location_changed")
     if proposed.action == ActionKind.SELECT_TARGET:
         return _adapt_select_target(proposed, state)
+    if proposed.action == ActionKind.ASSEMBLE_CHOICE:
+        if (proposed.source is None
+                or proposed.source.kind != "assemble_slot"
+                or proposed.source.owner != "friendly"
+                or proposed.source.index not in (1, 2, 3, 4)):
+            raise RecommendationStateError("assemble_slot_out_of_range")
+        observed = getattr(state, "discover_choice_count", None)
+        if observed not in (None, 4):
+            raise RecommendationStateError("assemble_choice_count_mismatch")
+        index = proposed.source.index - 1
+        entity_id = (getattr(state, "general_choice_entity_ids", {}) or {}).get(index)
+        return AdaptedAction(
+            DiscoverChoiceAction(index, 4, choice_entity_id=entity_id),
+            None, None, "choice_resolved")
     if proposed.action == ActionKind.CHOOSE_DISCOVER:
         choice_count = getattr(state, "discover_choice_count", None)
         if choice_count not in (1, 2, 3, 4):
@@ -775,7 +807,9 @@ def _adapt_play_card(proposed, state):
     manual = PlayCardAction(
         index, card.card_id, card.cardtype, gap_index=gap,
         target=manual_target,
-        hand_entity_id=getattr(card, "entity_id", None))
+        hand_entity_id=getattr(card, "entity_id", None),
+        settle_delay_seconds=(REWIND_SETTLE_DELAY_SECONDS
+                              if is_rewind_card(card.card_id) else 0.0))
     return AdaptedAction(
         manual, getattr(card, "entity_id", None), target_id,
                          "hand_card_left")

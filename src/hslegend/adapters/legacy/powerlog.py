@@ -330,7 +330,10 @@ class LegacyLogStateSnapshotMapper:
             )
         hero = heroes[0]
         hand = _sorted_zone(owned, "HAND", "hand")
-        board = _sorted_zone(owned, "PLAY", "board", exclude_hero=True, state=state)
+        board = _sorted_zone(
+            owned, "PLAY", "board", exclude_hero=True, state=state,
+            dedupe_positions=True,
+        )
         deck = _sorted_zone(owned, "DECK", "deck")
         secrets = _sorted_zone(owned, "SECRET", "secret")
         weapons = _sorted_zone(
@@ -341,7 +344,6 @@ class LegacyLogStateSnapshotMapper:
                 "invalid_weapon", f"expected at most one {side} weapon"
             )
         _reject_duplicate_positions(hand, "hand")
-        _reject_duplicate_positions(board, "board")
         _reject_duplicate_positions(secrets, "secret")
 
         hero_entity = state.entity_dict[str(hero.entity_id)]
@@ -574,6 +576,7 @@ def _sorted_zone(
     exclude_hero: bool = False,
     card_type: str | None = None,
     state: Any = None,
+    dedupe_positions: bool = False,
 ) -> tuple[EntityRef, ...]:
     values = []
     for zone, ref in owned:
@@ -586,6 +589,13 @@ def _sorted_zone(
             if entity is None or (_tag(entity, "CARDTYPE", "") or "").upper() != card_type:
                 continue
         values.append(ref)
+    if dedupe_positions:
+        by_position = {}
+        for ref in values:
+            previous = by_position.get(ref.zone_pos)
+            if previous is None or ref.entity_id > previous.entity_id:
+                by_position[ref.zone_pos] = ref
+        values = list(by_position.values())
     return tuple(sorted(values, key=lambda item: (item.zone_pos, item.entity_id)))
 
 

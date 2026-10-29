@@ -163,6 +163,11 @@ def classify(text: str, level: str = "INFO") -> dict:
     if m:
         return {"kind": "phase", "phase": m.group(1)}
 
+    # Self-check diagnostics are informational even when they use WARN/ERROR
+    # console levels to make their icon visible in the UI.
+    if "环境自检" in text:
+        return {"kind": "info", "text": _strip_tags(text)}
+
     if lvl == "ERROR" or "⚠️" in text or text.startswith("[ERROR") or "ERROR]" in text:
         return {"kind": "error", "text": _strip_tags(text)}
 

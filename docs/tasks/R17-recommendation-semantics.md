@@ -33,6 +33,8 @@ Move card semantics and recommendation adaptation into domain/application/adapte
 ## Allowed Files
 
 - `FSM_action.py`
+- `battle_record.py`
+- `feedback.py`
 - `README.md`
 - `config.py`
 - `calibrate_roi.py`
@@ -125,3 +127,16 @@ Dispatched recommendations now enter a pending confirmation state when the
 immediate result is not observable. The same recommendation is never replayed
 while pending. Ctrl+Q uses the shared shutdown event and is checked between
 coordinate clicks and cancellable delays.
+
+
+## Follow-up: Rewind, Assembly, And Feedback Noise
+
+- Environment self-check diagnostics classify as informational and never create
+  feedback incidents.
+- Feedback incidents are recorded only while in a player/opponent turn or on the
+  post-game screen; pre-game and mulligan events are ignored.
+- Cards with Rewind metadata wait three seconds after being played before the
+  next target or option is selected.
+- Duplicate board positions left by a rewind timeline keep the newer live entity.
+- Assembly hints `左二中一/左一中二/右二中一/右一中二` map to existing
+  four-choice positions `2/1/4/3`.

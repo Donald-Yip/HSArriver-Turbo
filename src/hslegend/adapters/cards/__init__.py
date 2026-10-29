@@ -198,6 +198,7 @@ def _capabilities(
         or "tradeable" in lowered
         or bool(re.search(r"\btrade\b", lowered)),
         timeline="TIMELINE" in mechanics or "timeline" in lowered,
+        rewind="REWIND" in mechanics or "<b>回溯</b>" in lowered,
     )
 
 
@@ -417,6 +418,10 @@ class JsonCardSemantics(JsonCardCatalog):
     def is_starship_card(self, card_id: str | None) -> bool:
         card = self.get_card(card_id or "")
         return bool(card and card.capabilities.starship)
+
+    def is_rewind_card(self, card_id: str | None) -> bool:
+        card = self.get_card(card_id or "")
+        return bool(card and card.capabilities.rewind)
 
     def is_choose_one_card(self, card_id: str | None) -> bool:
         card = self.get_card(card_id or "")

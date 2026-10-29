@@ -101,6 +101,10 @@ def is_starship_card(card_id):
     return _semantics().is_starship_card(card_id)
 
 
+def is_rewind_card(card_id):
+    return _semantics().is_rewind_card(card_id)
+
+
 @lru_cache(maxsize=1)
 def friendly_hand_target_card_ids():
     return frozenset(

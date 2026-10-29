@@ -220,19 +220,23 @@ class ClickExecutor:
         return screen_index
 
     def play_minion(self, hand_index, hand_count, gap_index, minion_count,
-                    oppo_minion_count, target, choose_one=None):
+                    oppo_minion_count, target, choose_one=None,
+                    settle_delay_seconds=0.0):
         return self._safe_action(lambda: self._play_minion(
             hand_index, hand_count, gap_index, minion_count,
-            oppo_minion_count, target, choose_one))
+            oppo_minion_count, target, choose_one, settle_delay_seconds))
 
     def _play_minion(self, hand_index, hand_count, gap_index, minion_count,
-                     oppo_minion_count, target, choose_one=None):
+                     oppo_minion_count, target, choose_one=None,
+                     settle_delay_seconds=0.0):
         # Keep the recommended placement even on a full board: the game
         # can resolve it as a Magnetic merge without adding a board slot.
         if choose_one is not None:
             self.click.cancel_click()
         self.click.choose_card(hand_index, hand_count)
         self.click.put_minion(gap_index, minion_count)
+        if settle_delay_seconds > 0:
+            self.sleep(settle_delay_seconds)
         self._select_choose_one(choose_one)
         # Let the board fan-out settle briefly before clicking the target.
         if target is not None:
@@ -262,18 +266,21 @@ class ClickExecutor:
         self.click.cancel_click()
 
     def play_spell(self, hand_index, hand_count, target, my_count,
-                   oppo_count, choose_one=None):
+                   oppo_count, choose_one=None, settle_delay_seconds=0.0):
         return self._safe_action(lambda: self._play_spell(
-            hand_index, hand_count, target, my_count, oppo_count, choose_one))
+            hand_index, hand_count, target, my_count, oppo_count, choose_one,
+            settle_delay_seconds))
 
     def _play_spell(self, hand_index, hand_count, target, my_count,
-                    oppo_count, choose_one=None):
+                    oppo_count, choose_one=None, settle_delay_seconds=0.0):
         if choose_one is not None:
             # Cancel a previous incomplete Choose One attempt before reopening
             # it. No cancel may occur between opening and choosing the option.
             self.click.cancel_click()
             self.click.choose_card(hand_index, hand_count)
             self.click.click_middle()
+            if settle_delay_seconds > 0:
+                self.sleep(settle_delay_seconds)
             self._select_choose_one(choose_one)
             if target is not None:
                 self.sleep(0.3)
@@ -287,8 +294,12 @@ class ClickExecutor:
                 self.click.click_middle()
             else:
                 self.click.choose_and_use_spell(hand_index, hand_count)
+            if settle_delay_seconds > 0:
+                self.sleep(settle_delay_seconds)
         else:
             self.click.choose_card(hand_index, hand_count)
+            if settle_delay_seconds > 0:
+                self.sleep(settle_delay_seconds)
             self._click_target(target, my_count, oppo_count)
         self.click.cancel_click()
 
@@ -815,9 +826,16 @@ class ManualController:
     @staticmethod
     def _board_slot_count(state, side: str) -> int:
         if side == "friendly":
-            return getattr(state, "my_board_slot_num", len(state.my_minions))
-        return getattr(
-            state, "oppo_board_slot_num", len(state.oppo_minions))
+            entities = (list(getattr(state, "my_minions", ()) or ())
+                        + list(getattr(state, "my_locations", ()) or ()))
+            fallback = getattr(state, "my_board_slot_num", len(entities))
+        else:
+            entities = (list(getattr(state, "oppo_minions", ()) or ())
+                        + list(getattr(state, "oppo_locations", ()) or ()))
+            fallback = getattr(state, "oppo_board_slot_num", len(entities))
+        positions = {getattr(entity, "zone_pos", 0) for entity in entities}
+        positions.discard(0)
+        return len(positions) if positions else int(fallback)
 
     @staticmethod
     def _target_for_click(target: Optional[Target], state) -> Optional[Target]:
@@ -967,6 +985,8 @@ class ManualController:
 
             choice_args = ({"choose_one": action.choose_one}
                            if action.choose_one is not None else {})
+            settle_args = ({"settle_delay_seconds": action.settle_delay_seconds}
+                           if getattr(action, "settle_delay_seconds", 0) else {})
             if action.cardtype == "MINION":
                 my_board_count = self._board_slot_count(state, "friendly")
                 oppo_board_count = self._board_slot_count(state, "enemy")
@@ -978,7 +998,7 @@ class ManualController:
                     action.gap_index, my_board_count,
                     oppo_board_count,
                     self._target_for_click(action.target, state),
-                    **choice_args,
+                    **choice_args, **settle_args,
                 )
             elif action.cardtype == "SPELL":
                 self.executor.play_spell(
@@ -986,7 +1006,7 @@ class ManualController:
                     self._target_for_click(action.target, state),
                     self._board_slot_count(state, "friendly"),
                     self._board_slot_count(state, "enemy"),
-                    **choice_args,
+                    **choice_args, **settle_args,
                 )
             elif action.cardtype == "WEAPON":
                 self.executor.play_weapon(action.hand_index,

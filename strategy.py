@@ -5,6 +5,12 @@ from print_info import debug_print
 from copy import deepcopy
 
 
+def _board_slot_count(entities):
+    positions = {getattr(entity, "zone_pos", 0) for entity in entities}
+    positions.discard(0)
+    return len(positions) if positions else len(entities)
+
+
 class StrategyState:
     def __init__(self, log_state):
         self.is_end = log_state.is_end
@@ -108,11 +114,11 @@ class StrategyState:
 
     @property
     def my_board_slot_num(self):
-        return len(self.my_minions) + len(self.my_locations)
+        return _board_slot_count(self.my_minions + self.my_locations)
 
     @property
     def oppo_board_slot_num(self):
-        return len(self.oppo_minions) + len(self.oppo_locations)
+        return _board_slot_count(self.oppo_minions + self.oppo_locations)
 
     @property
     def my_hand_card_num(self):

@@ -18,6 +18,7 @@ class ActionKind(str, Enum):
     USE_LOCATION = "use_location"
     LAUNCH_STARSHIP = "launch_starship"
     USE_ABILITY = "use_ability"
+    ASSEMBLE_CHOICE = "assemble_choice"
     CHOOSE_DISCOVER = "choose_discover"
     SELECT_TARGET = "select_target"
     END_TURN = "end_turn"

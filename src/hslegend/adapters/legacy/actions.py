@@ -26,6 +26,9 @@ class PlayCardAction:
     hand_entity_id: Optional[str] = None
     turn_number: Optional[int] = None
     choose_one: Optional["DiscoverChoiceAction"] = None
+    # Some mechanics (for example Rewind) keep animating/resolving after the
+    # card is committed. Wait before selecting a target or follow-up option.
+    settle_delay_seconds: float = 0.0
 
 
 @dataclass(frozen=True)

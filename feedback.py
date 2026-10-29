@@ -58,11 +58,10 @@ FEEDBACK_NAME_SUFFIX = "错误反馈"
 UNKNOWN_RECOMMENDATION = "未知推荐"
 # 包名里推荐摘要最长多少个字（太长会顶爆文件名）。
 MAX_RECO_NAME_LEN = 24
-# 只有真正在回合内才自动截图（阶段标签来自 web_ui 的阶段监测）：
-#   * 我方出牌 / 对手回合：对局进行中，截图有排查价值；
-#   * 大厅、匹配、换牌、结算：只记录错误文本，不截图。
-# 换牌阶段（"换牌"）按用户 2026-10-23 口径不算“回合内”。
+# 只有真正对局中或结算阶段才登记异常；对局前/换牌阶段只保留普通日志。
+# 截图进一步限制在对局进行中的阶段。
 CAPTURE_PHASES = ("我方出牌", "对手回合")
+RECORD_PHASES = (*CAPTURE_PHASES, "对局结束")
 CAPTURE_SKIPPED_NOT_IN_TURN = "not_in_turn"
 # 错误报告文件名（zip 内）。
 REPORT_TEXT_NAME = "错误报告.txt"
@@ -246,10 +245,14 @@ def note_event(
     settings = _settings()
     now = time.time() if now is None else float(now)
     ctx = ctx or {}
-    capture_allowed = _capture_allowed(ctx)
     kind = str(info.get("kind") or "")
     if kind not in ("retry", "error", "warn"):
         return None
+    phase = str(ctx.get("phase") or "").strip()
+    if phase not in RECORD_PHASES:
+        # Pre-game environment checks and mulligan noise are not incidents.
+        return None
+    capture_allowed = _capture_allowed(ctx)
 
     with _LOCK:
         if not settings.get("enabled", True):

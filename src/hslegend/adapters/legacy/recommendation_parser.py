@@ -4,11 +4,19 @@ import re
 import time
 import uuid
 
-from hslegend.domain import ActionKind, ProposedAction, SlotRef
+from hslegend.domain import ActionKind, ProposedAction, SlotRef, normalize_card_name
 
 
 class RecommendationParseError(ValueError):
     pass
+
+
+_ASSEMBLE_SLOT_ALIASES = {
+    ("左二", "中一"): 2,
+    ("左一", "中二"): 1,
+    ("右二", "中一"): 4,
+    ("右一", "中二"): 3,
+}
 
 
 class RecommendationParser:
@@ -56,9 +64,26 @@ class RecommendationParser:
     _reference_a_headers = {"打法参考A", "打法参考Ａ"}
     _reference_b_headers = {"打法参考B", "打法参考Ｂ"}
 
+    @staticmethod
+    def _assemble_parts(text):
+        compact = normalize_card_name(text)
+        if "拼装" not in compact:
+            return None
+        sides = re.findall(r"([左右])([一二])", compact)
+        middles = re.findall(r"中([一二])", compact)
+        if len(sides) != 1 or len(middles) != 1:
+            return None
+        side = "".join(sides[0])
+        middle = "中" + middles[0]
+        slot = _ASSEMBLE_SLOT_ALIASES.get((side, middle))
+        return (slot, side, middle) if slot is not None else None
+
     @classmethod
     def normalize_action_text(cls, text):
         parser = cls()
+        assembly = parser._assemble_parts(text)
+        if assembly is not None:
+            return "拼装\n{}\n{}".format(assembly[1], assembly[2])
         lines = parser._reference_a_lines(text or "")
         retained = []
         for index, line in enumerate(lines):
@@ -78,6 +103,14 @@ class RecommendationParser:
         return "\n".join(retained)
 
     def parse(self, ocr, turn_number, log_revision):
+        assembly_text = normalize_card_name(ocr.normalized_text)
+        if "拼装" in assembly_text:
+            assembly = self._assemble_parts(ocr.normalized_text)
+            if assembly is None:
+                raise RecommendationParseError("assemble_choice_unknown")
+            return self._build(
+                ocr, turn_number, log_revision, ActionKind.ASSEMBLE_CHOICE,
+                source=SlotRef("assemble_slot", "friendly", assembly[0]))
         action_text = self.normalize_action_text(ocr.normalized_text)
         lines = self._lines(action_text)
         if not lines:

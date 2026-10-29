@@ -66,6 +66,9 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual("error", br.classify("[ERROR] boom", "ERROR")["kind"])
         self.assertEqual("error", br.classify("⚠️ 炉石已退出", "WARN")["kind"])
         self.assertEqual("warn", br.classify("[WARN] 注意", "WARN")["kind"])
+        self.assertEqual(
+            "info",
+            br.classify("环境自检 ❌ 管理员权限：当前不是管理员", "WARN")["kind"])
 
     def test_plain_line_is_info(self):
         self.assertEqual("info", br.classify("随便一行")["kind"])
