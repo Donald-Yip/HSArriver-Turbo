@@ -15,6 +15,10 @@ from hslegend.application.consumed_actions import ConsumedActionStore
 # 「回合号还没记录过」的哨兵：不能用 None，因为有些状态里回合号就是 None。
 _UNSET_TURN = object()
 
+# 同一条推荐在一个回合里最多连续执行几次：风怒 2 击、超级风怒 4 击都够用，
+# 只防盒子面板卡死（一直给同一行）时无限重复点同一个动作。
+_MAX_IDENTICAL_REPEATS = 6
+
 
 
 def _accepts_action_kind(hook) -> bool:
@@ -142,6 +146,11 @@ class RecommendationFlow:
         self.waiting_turn_number = None
         self.waiting_action_kind = None
         self.pending_action = None
+        # 同一条推荐连续重做的计数（每回合重置）。盒子在「风怒第二击」「连续打
+        # 同一号位」时会给出完全相同的推荐行：确认上一步真的生效后必须再执行一次，
+        # 不能当成“已完成”干等面板更新（用户 2026-10-31 实测：风怒只打了一下）。
+        self._repeat_counts = {}
+        self._repeat_turn = _UNSET_TURN
         # 最近一次已经打到日志里的 OCR 原文：同一段原文只留一次，
         # 重试几十次时不再刷屏（见 _log_ocr_raw）。
         self._last_logged_ocr_text = None
@@ -292,11 +301,20 @@ class RecommendationFlow:
                             pending.target_entity_id,
                         )
                     )
-                    if confirmed:
+                    if confirmed and self._repeat_allowed(proposed, state):
+                        # 盒子又把同一条推荐给了一遍，而且上一步确实生效：
+                        # 这是「再做一次」（风怒第二击、连续打同一号位），不是
+                        # 「已完成」。解除消费标记后立刻再执行，不等盒子更新
+                        # 面板、也不等动作结果确认（用户 2026-10-31 要求）。
+                        self._note_repeat(proposed)
+                        self.consumed.discard(
+                            self._pending_consumed_key(pending))
+                        self._clear_pending()
+                    elif confirmed:
                         return FlowStepResult(
                             FlowStepStatus.OBSERVE,
                             "waiting_recommendation_update")
-                    if (self.pending_timeout > 0
+                    elif (self.pending_timeout > 0
                             and self.clock() >= pending.deadline
                             and pending.attempts < self.max_pending_retries):
                         # 点击没被客户端处理（动画期 InputManager 会直接丢弃）：
@@ -313,6 +331,14 @@ class RecommendationFlow:
                             FlowStepStatus.OBSERVE,
                             "awaiting_action_confirmation")
             adapted = self.adapter(proposed, state)
+            consumed_key = self.consumed.key_for(proposed, adapted)
+            if (self.consumed.contains(consumed_key)
+                    and proposed.action == ActionKind.ATTACK
+                    and self._repeat_allowed(proposed, state)):
+                # 没留下 pending（上一步被判定为完成）但盒子还在给同一击：
+                # 风怒第二击同样是合法动作，解除消费标记后照常执行。
+                self._note_repeat(proposed)
+                self.consumed.discard(consumed_key)
             fresh_state, fresh_revision = self._wait_for_hand_animation()
             if self.stopped():
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
@@ -895,6 +921,91 @@ class RecommendationFlow:
         if log_changed:
             return ResultStatus.WAITING_RECOMMENDATION
         return ResultStatus.UNCONFIRMED
+
+    @staticmethod
+    def _board_entry(state, source):
+        """按盒子号位（1 基，随从+地标按 zone_pos 排序）取己方场上的实体。"""
+        if getattr(source, "kind", None) != "board_slot":
+            return None
+        index = getattr(source, "index", 0) or 0
+        entries = (list(getattr(state, "my_minions", ()) or ())
+                   + list(getattr(state, "my_locations", ()) or ()))
+        entries.sort(key=lambda entry: getattr(entry, "zone_pos", 0) or 0)
+        if not 1 <= index <= len(entries):
+            return None
+        return entries[index - 1]
+
+    @classmethod
+    def _attack_source_available(cls, proposed, state) -> bool:
+        """同一条攻击推荐又出现时，日志里的攻击者还能不能再打一次。
+
+        风怒随从第一击后 EXHAUSTED 仍是 0（第二击才置 1，实测 2026-10-31
+        Power.log：影焰猎豹第一击只写 NUM_ATTACKS_THIS_TURN=1，第二击才写
+        EXHAUSTED=1），盒子在两次攻击之间给的是同一行推荐。
+        """
+        source = getattr(proposed, "source", None)
+        if getattr(source, "kind", None) == "hero":
+            hero = getattr(state, "my_hero", None)
+            return hero is not None and getattr(hero, "exhausted", 1) == 0
+        entry = cls._board_entry(state, source)
+        if entry is None:
+            return False
+        return (getattr(entry, "exhausted", 1) == 0
+                and not getattr(entry, "frozen", 0)
+                and not getattr(entry, "cant_attack", 0)
+                and not getattr(entry, "dormant", 0))
+
+    @classmethod
+    def _ability_source_available(cls, proposed, state) -> bool:
+        """古神本体（克苏恩，帝国之眼）每回合最多激活 2 次技能。
+
+        第一次技能后盒子会给同一行推荐，第二次点完就不能再点了。
+        """
+        entry = cls._board_entry(state, getattr(proposed, "source", None))
+        if entry is None:
+            return False
+        return getattr(entry, "ability_uses_turn", 0) < 2
+
+    @staticmethod
+    def _repeat_key(proposed) -> tuple:
+        source = getattr(proposed, "source", None)
+        target = getattr(proposed, "target", None)
+        return (
+            proposed.turn_number,
+            proposed.normalized_instruction,
+            getattr(source, "kind", None),
+            getattr(source, "index", None),
+            getattr(target, "kind", None),
+            getattr(target, "index", None),
+        )
+
+    def _repeat_allowed(self, proposed, state) -> bool:
+        """同一条推荐能不能马上再执行一次。
+
+        只在“上一步确实生效”（confirmed）时才会问这个问题：盒子把同一行推荐
+        又给一遍，说明它还要再做一次（风怒第二击、连续打同一号位、古神技能
+        两次），不是动作已完成。只放行“再做一次一定还是同一个动作”的类型：
+        攻击要求攻击者还能出手、古神技能要求本回合还有次数；面板/手势类动作
+        （结束回合、发现、拼装、选目标…）重复执行容易点空，交给原有的超时重试。
+        """
+        if self._repeat_turn != proposed.turn_number:
+            self._repeat_turn = proposed.turn_number
+            self._repeat_counts = {}
+        if proposed.action == ActionKind.ATTACK:
+            if not self._attack_source_available(proposed, state):
+                return False
+        elif proposed.action == ActionKind.USE_ABILITY:
+            if not self._ability_source_available(proposed, state):
+                return False
+        elif proposed.action not in (ActionKind.PLAY_CARD,
+                                     ActionKind.TRADE_CARD):
+            return False
+        return self._repeat_counts.get(
+            self._repeat_key(proposed), 0) < _MAX_IDENTICAL_REPEATS
+
+    def _note_repeat(self, proposed) -> None:
+        key = self._repeat_key(proposed)
+        self._repeat_counts[key] = self._repeat_counts.get(key, 0) + 1
 
     @staticmethod
     def _matches_pending(pending, proposed) -> bool:
