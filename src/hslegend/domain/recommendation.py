@@ -17,6 +17,9 @@ class ActionKind(str, Enum):
     ATTACK = "attack"
     USE_LOCATION = "use_location"
     LAUNCH_STARSHIP = "launch_starship"
+    # 站场随从（古神本体）的技能激活：本地卡组策略用它，执行层复用
+    # ``_adapt_use_ability`` 走「点本体 → 点技能面板 → 目标」的同一条手势。
+    USE_MINION_ABILITY = "use_minion_ability"
     USE_ABILITY = "use_ability"
     ASSEMBLE_CHOICE = "assemble_choice"
     CHOOSE_DISCOVER = "choose_discover"
@@ -53,6 +56,15 @@ class ProposedAction(PrimitiveMixin):
     choice_name: str | None = None
     source_name: str | None = None
     target_name: str | None = None
+    # 本地卡组策略搜索出来的动作才带这些字段；盒子 OCR 路径保持默认值，
+    # 因此既有序列化/金样不受影响。
+    #   cost            —— 动作消耗的法力（搜索剪枝/日志显示用）。
+    #   choice_card_id  —— 选择/技能子卡 id（技能面板按下标反查，不靠名字）。
+    #   entity_id / target_entity_id —— 本地动作的稳定实体身份（去重/失败拉黑用）。
+    cost: int = 0
+    choice_card_id: str | None = None
+    entity_id: str | None = None
+    target_entity_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.action, ActionKind):

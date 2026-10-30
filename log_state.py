@@ -65,6 +65,9 @@ class LogState:
         self.my_player_id = "0"
         self.oppo_player_id = "0"
         self.entity_dict = {}
+        # 本局实际发生过的己方随从死亡（PLAY -> GRAVEYARD）。与当前坟场分开，
+        # 这样复生后再次回场/坟场实体状态变化不会抹掉死亡历史。
+        self.my_dead_card_ids = set()
         self.current_update_id = 0
         self.revision = 0
         self.game_generation = 0
@@ -78,6 +81,9 @@ class LogState:
         self.general_choice_ready = False
         self.power_options = {}
         self.current_power_option_id = None
+        # entity_id(str) -> (回合号, 本回合技能激活次数)。古神本体（克苏恩，
+        # 帝国之眼）每回合最多激活 2 次技能，激活记录在 PLAY 块的 SubOption 里。
+        self.minion_ability_uses = {}
         # 手牌入口计数（上游逻辑：用于手牌动画延迟判断）。
         self.hand_entry_count = 0
         # 开局生效的全局卡数量（BLOCK_START TRIGGER + START_OF_GAME_KEYWORD
@@ -197,6 +203,13 @@ class LogState:
         self.general_choice_entity_ids = {}
         self.general_choice_ready = False
 
+    def ability_uses_this_turn(self, entity_id):
+        """这个实体本回合已经激活了几次技能（换回合自动归零）。"""
+        turn, count = self.minion_ability_uses.get(str(entity_id), (None, 0))
+        if turn is None or turn != self.game_num_turns_in_play:
+            return 0
+        return count
+
     def flush(self):
         revision = self.revision
         game_generation = self.game_generation + 1
@@ -268,6 +281,17 @@ class CardEntity(Entity):
                "name: " + self.name + "\n" + \
                super().__str__()
 
+    def creator_card_id(self, log_state) -> str:
+        """来源牌 card_id：LAST_AFFECTED_BY 指向的实体（缺失/解析不到返回空串）。
+
+        咒怨之墓 TLC_451 发现的临时牌在日志里没有 TEMPORARY tag，但会带
+        LAST_AFFECTED_BY = 咒怨之墓实体（2026-10-28 核对 012753 t006：
+        手牌 entity 7 的 LAST_AFFECTED_BY=13，entity 13 的 card_id 是 TLC_451）。
+        """
+        affected = str(self.query_tag("LAST_AFFECTED_BY") or "0")
+        creator = log_state.entity_dict.get(affected)
+        return str(getattr(creator, "card_id", "") or "")
+
     def generate_strategy_entity(self, log_state, entity_id=None):
         if self.cardtype == "MINION":
             return StrategyMinion(
@@ -286,6 +310,8 @@ class CardEntity(Entity):
                 stealth=int(self.query_tag("STEALTH")),
                 windfury=int(self.query_tag("WINDFURY")),
                 poisonous=int(self.query_tag("POISONOUS")),
+                # 吸血：doAction 用它模拟攻击/反击后的英雄回血（用户 2026-10-26）。
+                life_steal=int(self.query_tag("LIFESTEAL")),
                 freeze=int(self.query_tag("FREEZE")),
                 battlecry=int(self.query_tag("BATTLECRY")),
                 spell_power=int(self.query_tag("SPELLPOWER")),
@@ -298,10 +324,20 @@ class CardEntity(Entity):
                 dormant=int(self.query_tag("DORMANT")),
                 untouchable=int(self.query_tag("UNTOUCHABLE")),
                 immune=int(self.query_tag("IMMUNE")),
+                reborn=int(self.query_tag("REBORN")) > 0,
                 # -1代表标签缺失, 有两种情况会产生-1: 断线重连; 卡刚从手牌中被打出来
                 exhausted=int(self.query_tag("EXHAUSTED")),
                 cant_attack=int(self.query_tag("CANT_ATTACK")),
                 num_turns_in_play=int(self.query_tag("NUM_TURNS_IN_PLAY")),
+                temporary=int(self.query_tag("TEMPORARY")),
+                created_by=self.creator_card_id(log_state),
+                # 古神本体技能：USED_N=1 表示第 N 个技能（1 基标签）本局已用过；
+                # 这里换成 0 基下标，方便和技能面板从左到右的下标直接比较。
+                ability_used=tuple(
+                    index for index in range(4)
+                    if int(self.query_tag(
+                        f"ACTIVATABLE_MINION_ABILITY_USED_{index + 1}") or 0) > 0),
+                ability_uses_turn=log_state.ability_uses_this_turn(entity_id),
             )
         elif self.cardtype == "SPELL":
             return StrategySpell(
@@ -312,6 +348,8 @@ class CardEntity(Entity):
                 current_cost=int(self.query_tag("TAG_LAST_KNOWN_COST_IN_HAND")),
                 overload=int(self.query_tag("OVERLOAD")),
                 is_mine=log_state.is_my_entity(self),
+                temporary=int(self.query_tag("TEMPORARY")),
+                created_by=self.creator_card_id(log_state),
             )
         elif self.cardtype == "WEAPON":
             return StrategyWeapon(
@@ -401,6 +439,22 @@ def update_state(state, line_info_container):
         if card_id:
             state.start_of_game_card_count += 1
 
+    if line_info_container.line_type == LOG_LINE_BLOCK_START:
+        # 古神本体（克苏恩，帝国之眼）的技能选择记录在 PLAY 块的 SubOption 里：
+        # 打出本体时客户端自动弹面板（第 1 次），同一回合再点本体可再选一次
+        # （第 2 次）。按我方实体累加本回合激活次数，供搜索判断还能不能再用。
+        info = line_info_container.info_dict
+        if (info.get("block_type") == "PLAY"
+                and int(info.get("sub_option", -1)) >= 0
+                and info.get("entity_id")
+                and str(info.get("player")) == str(state.my_player_id)):
+            key = str(info["entity_id"])
+            turn = state.game_num_turns_in_play
+            prev_turn, prev_count = state.minion_ability_uses.get(
+                key, (turn, 0))
+            state.minion_ability_uses[key] = (
+                turn, (prev_count + 1) if prev_turn == turn else 1)
+
     if line_info_container.line_type == LOG_LINE_POWER_OPTIONS_START:
         state.power_options = {}
         state.current_power_option_id = None
@@ -425,7 +479,13 @@ def update_state(state, line_info_container):
     if line_info_container.line_type == LOG_LINE_GENERAL_CHOICE_ENTITY:
         if state.general_choice_id is not None:
             player = line_info_container.info_dict["player"]
-            if state.general_choice_player in (None, player):
+            if (state.my_player_id != "0"
+                    and player != state.my_player_id):
+                # 对手的选择菜单：直接丢掉。写进 general_choice_cards 会留下
+                # 一张“看起来像我方菜单”的选项表（对手的菜单不一定有
+                # SendChoices 行来触发 clear），搜索会把出牌全堵死。
+                state.clear_general_choice()
+            elif state.general_choice_player in (None, player):
                 state.general_choice_player = player
                 state.general_choice_indexes.add(
                     line_info_container.info_dict["index"])
@@ -541,6 +601,12 @@ def update_state(state, line_info_container):
         value = line_info_container.info_dict["value"]
 
         entity = state.entity_dict[entity_id]
+        if (tag == "ZONE" and value == "GRAVEYARD"
+                and entity.query_tag("ZONE") == "PLAY"
+                and state.is_my_entity(entity)):
+            card_id = getattr(entity, "card_id", None)
+            if card_id:
+                state.my_dead_card_ids.add(card_id)
         _record_friendly_hand_entry(state, entity, tag, value)
         entity.set_tag(tag, value)
 

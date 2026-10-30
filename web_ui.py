@@ -176,6 +176,14 @@ from config import (
     _USER_DELAY_KEYS,
     RecommendationConfig,
     feedback_settings,
+    joint_setting,
+    max_search_setting,
+    save_joint_setting,
+    save_max_search_setting,
+    save_strategy_setting,
+    strategy_label,
+    strategy_options,
+    strategy_setting,
 )
 
 # 环境自检（Python 3.12 / 依赖包 / 分辨率缩放）与原样截图区域框预览。
@@ -1895,6 +1903,82 @@ def api_save_delays(body):
                 "标 restart 的字段要重启脚本进程。"
             )
     return result
+
+
+# ------------------------------------------------------------------ 策略选择
+# 网页「基础配置 → 策略选择」：盒子AI（默认）/ ai/ 下自动发现的本地卡组。
+# 三项设置都写 ui_config.json（strategy / joint / max_search 键）。策略与联合模式
+# 在「开始对战」时被快照进推荐流程（每局重建），所以只对下一局生效；max_search
+# 每次搜索前重新读盘，落盘后下一次搜索就用新值。运行中的保护与其它卡片一致：
+# 默认禁止修改，CLI / agent 传 {"hot": true} 才放行。
+def api_save_strategy(body):
+    """保存策略选择（ui_config.json 的 strategy 键）。"""
+    body = body or {}
+    key = body.get("strategy")
+    if not isinstance(key, str) or not key:
+        return {"ok": False, "error": "请选择策略。"}
+    with CTRL.lock:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
+            return {
+                "ok": False,
+                "error": "自动化运行中，请先停止后再修改策略（改完下一局生效）。",
+            }
+        try:
+            saved = save_strategy_setting(key)
+        except KeyError:
+            return {"ok": False, "error": f"未知策略：{key}"}
+        label = strategy_label(saved)
+    _log("SYS", f"策略选择已保存：{label}（下一局生效）。")
+    return {
+        "ok": True,
+        "message": f"策略已保存：{label}（下一局生效）",
+        "strategy": {"key": saved, "label": label},
+    }
+
+
+def api_save_joint(body):
+    """保存联合模式开关（ui_config.json 的 joint 键，只有本地卡组时才生效）。"""
+    body = body or {}
+    with CTRL.lock:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
+            return {
+                "ok": False,
+                "error": "自动化运行中，请先停止后再修改联合模式（改完下一局生效）。",
+            }
+        enabled = save_joint_setting(body.get("joint", joint_setting()))
+    _log(
+        "SYS",
+        f"联合模式已{'开启' if enabled else '关闭'}"
+        "（本地卡组时读盒子首步比较，下一局起生效）。",
+    )
+    return {
+        "ok": True,
+        "message": f"联合模式已{'开启' if enabled else '关闭'}（下一局生效）",
+        "joint": enabled,
+    }
+
+
+def api_save_max_search(body):
+    """保存最大搜索深度（ui_config.json 的 max_search 键，1..100000）。"""
+    body = body or {}
+    with CTRL.lock:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
+            return {
+                "ok": False,
+                "error": "自动化运行中，请先停止后再修改最大搜索深度。",
+            }
+        try:
+            depth = save_max_search_setting(
+                body.get("max_search", max_search_setting())
+            )
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc) or "max_search 必须是整数。"}
+    _log("SYS", f"最大搜索深度已保存：{depth}（下一次搜索起生效）。")
+    return {
+        "ok": True,
+        "message": f"最大搜索深度已保存：{depth}",
+        "max_search": depth,
+    }
 
 
 def api_start(body: dict):
@@ -4093,6 +4177,9 @@ def status_snapshot():
         prepared = CTRL.prepared
     elapsed = int(time.time() - time_begin) if time_begin > 0 else 0
     win_rate = round(wins * 100.0 / games, 1) if games else 0.0
+    # 策略选择：网页「基础配置 → 策略选择」用这里回显（key 用于选中，label 用于提示）。
+    strategy_key = strategy_setting()
+    strategy_info = {"key": strategy_key, "label": strategy_label(strategy_key)}
     # 浮窗是否真的开着：网页用它同步「🪟 日志浮窗（开/关）」按钮文字，
     # 也能解释「为什么大按钮回到了开始运行」。
     try:
@@ -4133,6 +4220,11 @@ def status_snapshot():
         "watchdog": _watchdog_state(),
         "name_match": _name_match_state(),
         "delays": _current_delays(),
+        # 策略选择 / 联合模式 / 最大搜索深度（本地卡组策略，R18）。
+        "strategy": strategy_info,
+        "strategy_options": strategy_options(),
+        "joint": joint_setting(),
+        "max_search": max_search_setting(),
         "selfcheck": selfcheck_summary(),
         "config": {"name": cfg.get("name", ""), "log_root": cfg.get("log_root", "")},
         "last_error": err,
@@ -4305,6 +4397,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_watchdog(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
+            elif path == "/api/strategy":
+                self._json(api_save_strategy(body))
+            elif path == "/api/joint":
+                self._json(api_save_joint(body))
+            elif path == "/api/max_search":
+                self._json(api_save_max_search(body))
             elif path == "/api/selfcheck":
                 self._json(api_selfcheck(force=True))
             elif path == "/api/serve/stop":

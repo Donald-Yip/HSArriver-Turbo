@@ -287,6 +287,28 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <span class="field-hint" id="logHint"></span>
       </label>
       <div class="hint-line" id="nameMatch" style="margin-top:2px">账号校验：等待读到对局日志中的玩家名…</div>
+      <div class="input-row" style="margin-top:6px">
+        <label class="field">
+          <span class="field-label">🤖 策略选择（本局听谁的）</span>
+          <select id="inpStrategy"></select>
+          <span class="field-hint">盒子AI = 读炉石盒子推荐面板；本地卡组 = 用 ai/ 下该卡组的策略搜索整回合最优动作；改策略下一局生效。</span>
+        </label>
+        <label class="field" style="flex:none;min-width:180px">
+          <span class="field-label">最大搜索深度</span>
+          <input id="inpMaxSearch" type="number" min="1" max="100000" step="100">
+          <span class="field-hint">一次决策最多展开的场面数（1–100000，默认 1500）</span>
+        </label>
+      </div>
+      <div class="input-row">
+        <label class="field" style="flex:none;min-width:560px">
+          <span class="field-label">联合模式（本地卡组时读盒子首步比较，本地高 20% 才用本地）</span>
+          <input id="chkJoint" type="checkbox" style="width:auto;height:22px">
+        </label>
+      </div>
+      <div class="btn-row">
+        <button id="btnSaveStrategy" class="btn btn-ghost" type="button">💾 保存策略</button>
+      </div>
+      <div class="hint-line">🤖 盒子AI = 读盒子面板；本地卡组 = 用 ai/ 下策略搜索；改策略（含联合模式）下一局生效，最大搜索深度下一次搜索即生效。自动化运行中不可修改。</div>
       <div class="hint-line">💡 配置在输入框失焦时自动保存，无需再修改 constants.py；自动化运行期间不可修改。</div>
     </section>
 
@@ -641,6 +663,7 @@ var dirtyHumanLike = false;
 var dirtyLiveness = false;
 var dirtyWatchdog = false;
 var dirtyRankStop = false;
+var dirtyStrategy = false;
 
 var PHASE_INFO = {
   idle:     {label:"空闲",            cls:"idle"},
@@ -748,6 +771,33 @@ function render(s){
 
   if (!dirty.name) $("inpName").value = s.config.name || "";
   if (!dirty.log) $("inpLog").value = s.config.log_root || "";
+
+  /* 策略选择（盒子AI / 本地卡组）：选项由 status.strategy_options 提供；
+     选项集合变化（新增/删除卡组文件夹）时才重建下拉框，避免把用户正在选的值刷掉。 */
+  $("inpStrategy").disabled = busy;
+  $("chkJoint").disabled = busy;
+  $("inpMaxSearch").disabled = busy;
+  $("btnSaveStrategy").disabled = busy;
+  var strategyOpts = s.strategy_options || [];
+  if (strategyOpts.length){
+    var strategySig = strategyOpts.map(function(o){ return o.key + ":" + (o.label || ""); }).join("|");
+    var strategySel = $("inpStrategy");
+    if (strategySel.getAttribute("data-signature") !== strategySig){
+      strategySel.innerHTML = "";
+      strategyOpts.forEach(function(o){
+        var op = document.createElement("option");
+        op.value = o.key;
+        op.textContent = o.label || o.key;
+        strategySel.appendChild(op);
+      });
+      strategySel.setAttribute("data-signature", strategySig);
+    }
+  }
+  if (!dirtyStrategy){
+    if (s.strategy && s.strategy.key) $("inpStrategy").value = s.strategy.key;
+    if (typeof s.joint !== "undefined") $("chkJoint").checked = !!s.joint;
+    if (typeof s.max_search !== "undefined") $("inpMaxSearch").value = s.max_search;
+  }
   if (s.concede && !dirtyConcede){
     $("chkConcede").checked = !!s.concede.enabled;
     $("inpConcedeThreshold").value = s.concede.threshold;
@@ -1054,6 +1104,9 @@ function refreshClock(){
 /* ---------- 配置 ---------- */
 $("inpName").addEventListener("input", function(){ dirty.name = true; });
 $("inpLog").addEventListener("input", function(){ dirty.log = true; });
+$("inpStrategy").addEventListener("change", function(){ dirtyStrategy = true; });
+$("chkJoint").addEventListener("change", function(){ dirtyStrategy = true; });
+$("inpMaxSearch").addEventListener("input", function(){ dirtyStrategy = true; });
 $("chkConcede").addEventListener("change", function(){ dirtyConcede = true; });
 $("inpConcedeThreshold").addEventListener("input", function(){ dirtyConcede = true; });
 $("inpConcedeRounds").addEventListener("input", function(){ dirtyConcede = true; });
@@ -1091,6 +1144,25 @@ $("btnCheckLog").addEventListener("click", function(){
       hint.className = "field-hint " + (r.power_log_found || r.session ? "ok" : "bad");
       hint.textContent = r.message + (r.power_log ? "（" + r.power_log + "）" : "");
     });
+});
+
+/* ---------- 策略选择（盒子AI / 本地卡组 + 联合模式 + 最大搜索深度） ---------- */
+/* 三个字段各有一个接口、写的是同一个 ui_config.json：必须**串行**保存，
+   并发写会互相覆盖（读-改-写竞态）。 */
+$("btnSaveStrategy").addEventListener("click", function(){
+  post("/api/strategy", {strategy: $("inpStrategy").value}).then(function(r){
+    if (!r.ok) throw new Error(r.error || "保存策略失败");
+    return post("/api/joint", {joint: $("chkJoint").checked});
+  }).then(function(r){
+    if (!r.ok) throw new Error(r.error || "保存联合模式失败");
+    return post("/api/max_search", {max_search: $("inpMaxSearch").value});
+  }).then(function(r){
+    if (!r.ok) throw new Error(r.error || "保存最大搜索深度失败");
+    toast("策略配置已保存（改策略下一局生效）", "ok");
+    dirtyStrategy = false;
+  }).catch(function(e){
+    toast(e.message || "保存失败", "error");
+  });
 });
 
 /* ---------- 定时任务 ---------- */

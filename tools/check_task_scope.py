@@ -150,10 +150,15 @@ def validate_scope(
 
 
 def git_changed_files(root: Path, base_ref: str | None = None) -> list[str]:
+    # core.quotepath=false：仓库里有中文目录（ai/任务牧 等）。git 默认把非 ASCII
+    # 路径输出成 "ai/\344\273\273..." 的八进制转义，glob 匹配会全部落空；这里
+    # 显式关掉转义，CI 与本机行为一致（不改用户全局 git 配置）。
+    command = ["git", "-c", "core.quotepath=false", "diff",
+               "--name-only", "--diff-filter=ACMRTD"]
     if base_ref is not None:
-        command = ["git", "diff", "--name-only", "--diff-filter=ACMRTD", f"{base_ref}...HEAD"]
+        command.append(f"{base_ref}...HEAD")
     else:
-        command = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRTD"]
+        command.append("--cached")
     result = subprocess.run(command, cwd=root, text=True, capture_output=True, encoding="utf-8")
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()

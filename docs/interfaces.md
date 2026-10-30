@@ -59,6 +59,28 @@ rule-pack validation, recommendation parsing, recommendation adaptation, OCR
 evidence DTOs, and legacy click-action DTOs. Root modules under `src/game_state`
 and `src/parser` are compatibility facades only.
 
+### StrategyPlannerPort
+
+`StrategyPlannerPort` is the application-layer seam for the optional local
+deck-strategy engine (`ai/` + `search/`). The flow only sees the protocol; the
+anti-corruption implementation lives in
+`src/hslegend/adapters/legacy/strategy_planner.py` and is injected by
+`FSM_action.initialize_recommendation_automation`.
+
+- `plan(state, cost, stopped=None) -> (list[ProposedAction], score)`: best
+  whole-turn line for the current snapshot; `stopped` is checked between search
+  nodes and a wall-clock budget keeps one decision bounded.
+- `joint_plan(state, actions, score, box_action) -> dict | None`: joint mode
+  comparison (box first step completed by local search vs the local line). The
+  returned dict carries `chosen` (`local`/`box`), both scores, `fallback`,
+  `diff` and `outcome` for the per-game summary.
+- `describe(action) -> str` and `identity_key(state, action) -> tuple`: plan
+  overlay text and same-turn failure-suppression identity.
+
+`box_ai=False` in the flow selects this port instead of the OCR reader; the box
+path remains the default and is unchanged.
+
+
 ### ActionIntent / ActionPlan
 
 `ActionIntent` describes the semantic intent. It carries an optional zero-based `destination` placement index; the R10 parser only sets it for `放置于我方N号位` on a play-card instruction. `ActionPlan` is an ordered list of declarative `PlanStep` values with preconditions, postconditions, timeout, `wait_for_change`, and an optional `confirmation_required` plan flag. A non-waiting step is dispatched sequentially but does not poll for a log revision or evaluate postconditions. The final step must wait; plans with `confirmation_required=True` must also carry a non-empty final step or plan postcondition. Plans must not contain coordinates or executable callbacks.

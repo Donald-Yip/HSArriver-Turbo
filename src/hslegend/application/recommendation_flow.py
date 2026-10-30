@@ -1,8 +1,10 @@
 """Execute exactly one validated recommendation and verify its result."""
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 import inspect
+from pathlib import Path
 import time
 
 from hslegend.application.hand_animation import HandAnimationDelay
@@ -82,7 +84,11 @@ class RecommendationFlow:
                  draw_extra_delay_per_card=0.0,
                  unconfirmed_retry_delay=3.0,
                  pending_timeout=3.0,
-                 max_pending_retries=2):
+                 max_pending_retries=2,
+                 box_ai=True,
+                 planner=None,
+                 joint=False,
+                 strategy_name=""):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -139,6 +145,30 @@ class RecommendationFlow:
         # 最近一次已经打到日志里的 OCR 原文：同一段原文只留一次，
         # 重试几十次时不再刷屏（见 _log_ocr_raw）。
         self._last_logged_ocr_text = None
+        # ------------------------------------------------------------ 决策源
+        # box_ai=True：现有 OCR 路径；False：本地卡组策略（planner）。
+        # planner 缺失时强制回退盒子，避免“选了本地却没有搜索器”把流程带崩。
+        self.planner = planner
+        self.box_ai = bool(box_ai) or planner is None
+        if not box_ai and planner is None:
+            print("[SYS] 本地策略缺少搜索器，本局回退盒子AI。")
+        # 联合模式：本地卡组时读盒子首步，与本地整回合最优比较。
+        self.joint = bool(joint) and not self.box_ai and planner is not None
+        self.strategy_name = str(strategy_name or "")
+        # 浮窗「推荐打法」：最近一次本地搜索的最高分 + 最佳动作序列。
+        self.last_plan = None
+        # 本回合同一动作的失败计数/拉黑（本地路径，6 次后跳过该动作）。
+        self._failed_local_actions = {}
+        self._blocked_local_actions = set()
+        # 预备过的实体（本回合不能重复预备/交易）。
+        self._prepared_entity_ids = set()
+        # 本地待确认动作的重试计数（跨 pending 清空后仍保留，最多 max 次）。
+        self._local_retry_key = None
+        self._local_retry_count = 0
+        # 联合模式对局小结（每局一行写 ai.txt）。
+        self._joint_stats = {"diff": 0, "local": 0, "box": 0, "same": 0}
+        self._joint_seen = set()
+        self._box_note_warned = False
 
     def _note_readable_recommendation(self):
         """A readable recommendation starts a new raw-evidence episode."""
@@ -203,6 +233,9 @@ class RecommendationFlow:
                     and self.pending_action.turn_number
                     != state.game_num_turns_in_play):
                 self._clear_pending()
+            if not self.box_ai:
+                return self._run_local_step(
+                    state, revision, allowed_action_kinds)
             observed = {}
             def frame_supplier():
                 observed["frame"] = self.capture.capture(ocr_panel_ok=True)
@@ -395,6 +428,310 @@ class RecommendationFlow:
         except Exception as exc:
             return self._retry(f"{type(exc).__name__}:{exc}")
 
+    # ------------------------------------------------------------ 本地策略路径
+    def _run_local_step(self, state, revision, allowed_action_kinds):
+        """本地卡组策略：search 出整回合最优，执行首步；不读推荐面板。"""
+        # 1) 待确认动作：只读日志后置条件，不跑搜索（搜索很贵，不能每 0.3s 一次）。
+        pending = self.pending_action
+        if pending is not None:
+            confirmed = (
+                revision > pending.before_revision
+                and self._postcondition(
+                    pending.postcondition, pending.before_state, state,
+                    pending.source_entity_id, pending.target_entity_id)
+            )
+            if confirmed:
+                self._clear_pending()
+            elif (self.pending_timeout > 0
+                    and self.clock() >= pending.deadline
+                    and pending.attempts < self.max_pending_retries):
+                # 点击没被客户端处理：解除消费标记，下一步重新搜索并重击。
+                self._local_retry_key = (
+                    pending.turn_number, pending.instruction)
+                self._local_retry_count = pending.attempts + 1
+                self.consumed.discard(self._pending_consumed_key(pending))
+                self._announce(
+                    f"[SYS] 动作 {self.pending_timeout:.0f}s 未确认，"
+                    f"重新执行（第 {self._local_retry_count} 次）")
+                self._clear_pending()
+                return FlowStepResult(
+                    FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
+            else:
+                return FlowStepResult(
+                    FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
+        # 2) 搜索（把本回合的失败拉黑/预备实体/已动作信号带给搜索）。
+        try:
+            state.blocked_action_keys = set(self._blocked_local_actions)
+            state.prepared_entity_ids = set(self._prepared_entity_ids)
+            state.acted_this_turn = self._acted_this_turn
+        except Exception:
+            pass
+        box_note = None
+        if self.joint:
+            box_note = self._capture_box_recommendation(state, revision)
+        try:
+            actions, score = self.planner.plan(
+                state, getattr(state, "my_last_mana", 0),
+                stopped=self.stopped)
+        except Exception as exc:
+            self._announce(
+                f"[SYS] 本地策略搜索失败：{type(exc).__name__}: {exc}")
+            return self._retry("search_failed")
+        if not actions:
+            return self._retry("no_local_action")
+        self.last_plan = {
+            "turn": getattr(state, "game_num_turns_in_play", None),
+            "score": score,
+            "steps": [self.planner.describe(item) for item in actions],
+        }
+        chosen = actions[0]
+        if self.joint:
+            chosen = self._choose_joint_action(
+                state, actions, score, box_note)
+        print(f"[推荐] {chosen.normalized_instruction} 最佳评分 {score}")
+        if (allowed_action_kinds is not None
+                and chosen.action not in allowed_action_kinds):
+            return FlowStepResult(FlowStepStatus.OBSERVE, "turn_not_ready")
+        if chosen.action == ActionKind.MULLIGAN:
+            return FlowStepResult(
+                FlowStepStatus.OBSERVE, "stale_mulligan_recommendation")
+        next_attempts = 0
+        key = (chosen.turn_number, chosen.normalized_instruction)
+        if self._local_retry_key == key:
+            next_attempts = self._local_retry_count
+        else:
+            self._local_retry_key = None
+            self._local_retry_count = 0
+        fresh_state, fresh_revision = self._wait_for_hand_animation()
+        if self.stopped():
+            return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
+        if chosen.turn_number != fresh_state.game_num_turns_in_play:
+            return self._retry("turn_changed")
+        if revision != fresh_revision or chosen.log_revision != revision:
+            return self._retry("revision_changed")
+        if (not getattr(fresh_state, "is_my_turn", False)
+                and getattr(fresh_state, "discover_choice_count", None)
+                not in (1, 2, 3, 4)):
+            return FlowStepResult(FlowStepStatus.OBSERVE, "opponent_turn")
+        adapted = self.adapter(chosen, fresh_state)
+        key = self.consumed.key_for(chosen, adapted)
+        if self.consumed.contains(key):
+            return FlowStepResult(FlowStepStatus.OBSERVE, "already_consumed")
+        print("[执行] 开始点击。")
+        result = self.controller.execute(adapted.manual_action, fresh_state)
+        if getattr(result, "cancelled", False):
+            return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
+        if not result.executed and not result.recovery_needed:
+            self._record_local_failure(chosen, adapted)
+            return self._retry("execution_failed")
+        self.consumed.mark_consumed(key)
+        self._acted_this_turn = True
+        if (chosen.action == ActionKind.TRADE_CARD
+                and chosen.normalized_instruction.startswith("预备")
+                and adapted.source_entity_id is not None):
+            self._remember_prepared_card(chosen, adapted, fresh_state)
+        paused = False
+        if self.post_action_pause is not None:
+            try:
+                if self._pause_takes_action_kind:
+                    paused = bool(self.post_action_pause(chosen.action))
+                else:
+                    paused = bool(self.post_action_pause())
+            except Exception:
+                paused = False
+        if not paused and self.post_action_delay:
+            output = getattr(self.controller, "output", None)
+            if output is not None:
+                try:
+                    output(
+                        f"[SYS] 操作结束，延时 "
+                        f"{self.post_action_delay:.1f}s 后继续")
+                except Exception:
+                    pass
+            self.sleep(self.post_action_delay)
+        if self.stopped():
+            return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
+        if self.draw_extra_delay_per_card > 0:
+            self._account_hand_entries(self.state_supplier()[0])
+        verified = self._verify_result(
+            chosen, adapted, None, fresh_state, fresh_revision,
+            check_recommendation=False)
+        if verified == ResultStatus.COMPLETED:
+            return FlowStepResult(FlowStepStatus.EXECUTED)
+        if verified in (ResultStatus.WAITING_RECOMMENDATION,
+                        ResultStatus.UNCONFIRMED):
+            self._set_pending(chosen, adapted, fresh_state, fresh_revision,
+                              attempts=next_attempts)
+            return FlowStepResult(
+                FlowStepStatus.OBSERVE,
+                "waiting_recommendation_update"
+                if verified == ResultStatus.WAITING_RECOMMENDATION
+                else "awaiting_action_confirmation")
+        return self._retry("result_not_confirmed")
+
+    def _choose_joint_action(self, state, actions, score, box_note):
+        """联合模式：本地整回合 vs 盒子首步（补齐）；返回最终采用的动作。"""
+        plan = None
+        try:
+            plan = self.planner.joint_plan(state, actions, score, box_note)
+        except Exception as exc:
+            print(f"[联合] 方案比较失败，改用本地：{type(exc).__name__}: {exc}")
+        if plan is not None:
+            self._note_joint(state, plan)
+            if (getattr(state, "discover_choice_count", None) in (1, 2, 3, 4)
+                    and box_note is not None
+                    and box_note.action == ActionKind.CHOOSE_DISCOVER):
+                # 菜单里唯一合法输入是“点哪个选项”，本地整回合比较无意义。
+                print("[联合] 发现/选择菜单 → 采用 盒子选项")
+                return box_note
+            box = plan.get("box") or {}
+            if plan.get("chosen") == "box" and box_note is not None:
+                print(f"[联合] 本地 {(plan.get('local') or {}).get('score')} vs "
+                      f"盒子 {box.get('score')} → 采用 盒子")
+                return box_note
+            if box:
+                print(f"[联合] 本地 {(plan.get('local') or {}).get('score')} vs "
+                      f"盒子 {box.get('score')} → 采用 本地")
+        return actions[0]
+
+    def _capture_box_recommendation(self, state, revision):
+        """联合模式：顺手读一次盒子面板推荐（读不到不影响对局）。"""
+        try:
+            frame = self.capture.capture(ocr_panel_ok=True)
+            evidence = self.reader.read_frame(
+                frame, self.capture.crop_recommendation)
+            if not getattr(evidence, "normalized_text", ""):
+                return None
+            proposed = self.parser.parse(
+                evidence, state.game_num_turns_in_play, revision)
+            if proposed.action == ActionKind.MULLIGAN:
+                return None
+            return proposed
+        except Exception as exc:
+            if not self._box_note_warned:
+                self._box_note_warned = True
+                print(f"[联合] 盒子推荐读取失败（不影响对局）："
+                      f"{type(exc).__name__}: {exc}")
+            return None
+
+    def _note_joint(self, state, plan):
+        """记一个联合模式决策点（每局汇总，对局结束写 ai.txt）。"""
+        try:
+            key = (int(getattr(state, "game_num_turns_in_play", 0) or 0),
+                   int(getattr(state, "log_revision", 0) or 0))
+        except (TypeError, ValueError):
+            return
+        if key in self._joint_seen:
+            return
+        self._joint_seen.add(key)
+        plan = plan or {}
+        if plan.get("diff"):
+            self._joint_stats["diff"] += 1
+        outcome = plan.get("outcome") or "same"
+        if outcome not in self._joint_stats:
+            outcome = "same"
+        self._joint_stats[outcome] += 1
+
+    def _joint_battle_name(self):
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{stamp}_{self.strategy_name}" if self.strategy_name else stamp
+
+    def flush_joint_log(self):
+        """把本局联合模式小结追加到仓库根目录 ai.txt；没有数据返回 None。"""
+        counts = dict(self._joint_stats)
+        total = counts["local"] + counts["box"] + counts["same"]
+        if total <= 0:
+            return None
+        line = (f"{self._joint_battle_name()}"
+                f" | 打法差异 {counts['diff']} 次"
+                f" | 本地胜出 {counts['local']} 次"
+                f" | 盒子胜出 {counts['box']} 次"
+                f" | 差不多 {counts['same']} 次"
+                f" | 共 {total} 个决策点")
+        try:
+            path = Path(__file__).resolve().parents[3] / "ai.txt"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception as exc:
+            print(f"[联合] 写 ai.txt 失败（不影响对局）："
+                  f"{type(exc).__name__}: {exc}")
+            return None
+        self._joint_stats = {"diff": 0, "local": 0, "box": 0, "same": 0}
+        self._joint_seen.clear()
+        print(f"[联合] {line}")
+        return line
+
+    @staticmethod
+    def _slot_identity(slot):
+        if slot is None:
+            return ""
+        return f"{slot.kind}:{slot.owner or ''}:{slot.index or ''}"
+
+    def _action_identity(self, proposed, adapted):
+        """同一动作的去重键：动作类型 + 实体（或位置）+ 目标。"""
+        source_entity_id = (
+            (getattr(adapted, "source_entity_id", None)
+             if adapted is not None else None)
+            or getattr(proposed, "entity_id", None))
+        target_entity_id = (
+            (getattr(adapted, "target_entity_id", None)
+             if adapted is not None else None)
+            or getattr(proposed, "target_entity_id", None))
+        source_key = (str(source_entity_id) if source_entity_id
+                      else self._slot_identity(proposed.source))
+        target_key = (str(target_entity_id) if target_entity_id
+                      else self._slot_identity(proposed.target))
+        return (proposed.action.value, source_key, target_key,
+                getattr(proposed, "choice_card_id", None) or "")
+
+    def _record_local_failure(self, proposed, adapted):
+        """同一动作连续失败 6 次后本回合跳过（等动画播完再重试的兜底）。"""
+        identity = self._action_identity(proposed, adapted)
+        attempts = self._failed_local_actions.get(identity, 0) + 1
+        self._failed_local_actions[identity] = attempts
+        if attempts >= 6 and identity not in self._blocked_local_actions:
+            self._blocked_local_actions.add(identity)
+            print(f"[兜底] 相同动作连续失败 {attempts} 次，本回合跳过："
+                  f"{proposed.normalized_instruction}")
+        return attempts
+
+    def _remember_prepared_card(self, proposed, adapted, before_state):
+        """记住预备后的手牌实体（Power.log 可能换新 entity id）。"""
+        source_id = str(adapted.source_entity_id)
+        before_card = next(
+            (card for card in before_state.my_hand_cards
+             if str(getattr(card, "entity_id", "")) == source_id), None)
+        if before_card is None:
+            self._prepared_entity_ids.add(source_id)
+            return
+        try:
+            expected_cost = max(
+                0, int(before_card.current_cost)
+                - int(before_state.my_last_mana) - 1)
+        except (TypeError, ValueError, AttributeError):
+            expected_cost = None
+        after_state, _ = self.state_supplier()
+        after_cards = list(getattr(after_state, "my_hand_cards", ()) or ())
+        if any(str(getattr(card, "entity_id", "")) == source_id
+               for card in after_cards):
+            self._prepared_entity_ids.add(source_id)
+            return
+        old_ids = {str(getattr(card, "entity_id", ""))
+                   for card in before_state.my_hand_cards}
+        candidates = [
+            card for card in after_cards
+            if getattr(card, "card_id", None)
+            == getattr(before_card, "card_id", None)
+            and str(getattr(card, "entity_id", "")) not in old_ids
+            and (expected_cost is None
+                 or getattr(card, "current_cost", None) == expected_cost)
+        ]
+        if len(candidates) == 1:
+            self._prepared_entity_ids.add(
+                str(getattr(candidates[0], "entity_id", "")))
+        else:
+            self._prepared_entity_ids.add(source_id)
+
     def _wait_for_hand_animation(self):
         """等待手牌入场动画完成，再取最新状态做校验（上游性能调优逻辑）。"""
         stopped = getattr(self, "stopped", lambda: False)
@@ -495,13 +832,15 @@ class RecommendationFlow:
         })()
 
     def _verify_result(self, proposed, adapted, before_frame, before_state,
-                       before_revision):
+                       before_revision, check_recommendation=True):
         """Check the result once right after executing; no timeout waiting.
 
         A changed recommendation text confirms completion. A discover
         action or a satisfied log postcondition waits for the next
         recommendation. Anything else is UNCONFIRMED and must not be replayed
         before new evidence authorizes another attempt.
+
+        本地策略路径没有推荐面板可读，`check_recommendation=False` 只看日志。
         """
         before_instruction = proposed.normalized_instruction
         after_state, after_revision = self.state_supplier()
@@ -511,22 +850,23 @@ class RecommendationFlow:
                            adapted.source_entity_id,
                            adapted.target_entity_id))
         recommendation_changed = False
-        try:
-            after_frame = self.capture.capture(ocr_panel_ok=True)
-            if after_frame.exact_hash != before_frame.exact_hash:
-                supplied = False
-                def frame_supplier():
-                    nonlocal supplied
-                    if not supplied:
-                        supplied = True
-                        return after_frame
-                    return self.capture.capture(ocr_panel_ok=True)
-                after_evidence = self.reader.read(
-                    frame_supplier, self.capture.crop_recommendation)
-                recommendation_changed = (
-                    after_evidence.normalized_text != before_instruction)
-        except Exception:
-            recommendation_changed = False
+        if check_recommendation:
+            try:
+                after_frame = self.capture.capture(ocr_panel_ok=True)
+                if after_frame.exact_hash != before_frame.exact_hash:
+                    supplied = False
+                    def frame_supplier():
+                        nonlocal supplied
+                        if not supplied:
+                            supplied = True
+                            return after_frame
+                        return self.capture.capture(ocr_panel_ok=True)
+                    after_evidence = self.reader.read(
+                        frame_supplier, self.capture.crop_recommendation)
+                    recommendation_changed = (
+                        after_evidence.normalized_text != before_instruction)
+            except Exception:
+                recommendation_changed = False
         if recommendation_changed:
             return ResultStatus.COMPLETED
         if proposed.action in (ActionKind.TIMELINE_UNDO,
@@ -619,6 +959,16 @@ class RecommendationFlow:
             return source_entity_id not in {
                 getattr(card, "entity_id", None)
                 for card in after.my_hand_cards}
+        if kind == "tempt_mana_spent":
+            # 预备：卡牌拖进牌库后马上回到手牌（实体可能换新 id），判定依据是
+            # 剩余法力被消耗（预备消耗全部剩余法力）或手牌内容发生变化。
+            if after.my_last_mana != before.my_last_mana:
+                return True
+            before_ids = {getattr(card, "entity_id", None)
+                          for card in before.my_hand_cards}
+            after_ids = {getattr(card, "entity_id", None)
+                         for card in after.my_hand_cards}
+            return before_ids != after_ids
         if kind == "hero_power_changed":
             return (getattr(after.my_hero_power, "exhausted", 0)
                     != getattr(before.my_hero_power, "exhausted", 0)

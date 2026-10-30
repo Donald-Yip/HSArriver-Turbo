@@ -147,6 +147,9 @@ def adapt_action(proposed, state):
         return _adapt_attack(proposed, state)
     if proposed.action == ActionKind.USE_ABILITY:
         return _adapt_use_ability(proposed, state)
+    if proposed.action == ActionKind.USE_MINION_ABILITY:
+        # 本地卡组策略用独立枚举；执行手势与盒子「选择一个技能」完全相同。
+        return _adapt_use_ability(proposed, state)
     if proposed.action == ActionKind.LAUNCH_STARSHIP:
         return _adapt_starship(
             board_slot(state, "friendly", proposed.source.index))
@@ -824,8 +827,16 @@ def _adapt_trade_card(proposed, state):
     entity_id = getattr(card, "entity_id", None)
     manual = TradeCardAction(
         index, card.card_id, card.cardtype, hand_entity_id=entity_id)
-    return AdaptedAction(
-        manual, entity_id, None, "hand_card_left")
+    # 预备（卡面含「预备」）把卡牌拖进牌库后马上回到手牌，「手牌离开」永远
+    # 不成立——按旧判定会误报 result_not_confirmed 然后重试。预备会消耗全部
+    # 剩余法力，改用「法力/手牌变动」判定；交易仍走「手牌离开」。
+    is_tempt = (
+        str(getattr(proposed, "normalized_instruction", "") or "")
+        .startswith("预备")
+        or "预备" in card_text(card.card_id)
+    )
+    postcondition = "tempt_mana_spent" if is_tempt else "hand_card_left"
+    return AdaptedAction(manual, entity_id, None, postcondition)
 
 
 def _adapt_hero_power(proposed, state):
@@ -933,7 +944,18 @@ def _adapt_use_ability(proposed, state):
             print(f"[推荐] 古神技能面板还没适配这张卡（{card_id}），本次不点；"
                   f"需要在 rules/card_rules.json 里补一条 ability_panel。")
         raise RecommendationStateError("ability_card_unknown")
-    index = skill_index(card_id, getattr(proposed, "choice_name", None))
+    index = None
+    choice_card_id = getattr(proposed, "choice_card_id", None)
+    if choice_card_id:
+        # 本地卡组策略带的是技能子卡 id（BE_013t1..t4），按面板顺序反查下标，
+        # 不依赖「愤怒/领域/凝视」这类短名与卡名的模糊匹配。
+        index = next(
+            (slot for slot, (_name, child) in enumerate(panel)
+             if child == choice_card_id),
+            None,
+        )
+    if index is None:
+        index = skill_index(card_id, getattr(proposed, "choice_name", None))
     if index is None:
         raise RecommendationStateError("ability_option_unknown")
     requires_target = ability_requires_target(card_id, index)

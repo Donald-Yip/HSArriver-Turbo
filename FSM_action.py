@@ -12,8 +12,10 @@ import get_screen
 import surrender_rules
 from config import (
     DEFAULT_AUTO_CONCEDE, DEFAULT_AUTO_SURRENDER, SNAPSHOT_WRITE_INTERVAL,
-    human_like_settings, rank_stop_settings,
+    human_like_settings, joint_setting, rank_stop_settings,
+    strategy_label, strategy_setting, uses_box_ai,
 )
+from ai.deck_strategy import deck_strategy
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
 )
@@ -27,6 +29,7 @@ from hslegend.application.recommendation_flow import (
 )
 from hslegend.adapters.legacy.actions import ActionCancelled
 from hslegend.adapters.legacy.recommendation import RecommendationAdapter
+from hslegend.adapters.legacy.strategy_planner import LegacyStrategyPlanner
 from src.ocr.paddle_adapter import PaddleOcrAdapter
 from src.ocr.stable_reader import OcrRejectedError, StableRecommendationReader
 from hslegend.adapters.legacy.recommendation_parser import RecommendationParser
@@ -320,6 +323,40 @@ def _report_mulligan_ocr_failure(exc) -> None:
             pass
 
 
+def current_strategy_label():
+    """当前策略的中文名（盒子AI / 任务牧 / 动物园术 / ...），供网页与浮窗显示。
+
+    “本局听谁的”只有一个来源：网页「基础配置 → 策略选择」（config.strategy_setting）。
+    盒子AI 走 OCR 读推荐面板，本地卡组走 ai/ 下策略的 search；判据就是
+    config.uses_box_ai()，不额外维护 using_hsbox 之类的标志变量。
+    """
+    return strategy_label(strategy_setting())
+
+
+def _log_current_strategy():
+    """开局把「本局算法」打到日志，方便回看这一局到底听谁的。"""
+    try:
+        print(f"[SYS] 本局算法：{current_strategy_label()}")
+    except Exception:
+        pass
+
+
+def _local_mulligan_chooser(state):
+    """本地 AI 留牌：调用当前卡组策略的 choose()（返回要换掉的 0 基下标）。
+
+    与对战阶段（search.rankState）用的是同一个策略类。策略文件缺失/没实现
+    choose 时退化成“全部保留”，保证换牌阶段仍能提交，不会卡在换牌界面。
+    """
+    try:
+        strategy = deck_strategy()
+        if strategy is None:          # 选的是盒子AI：本地留牌这条路径不该走到
+            return ()
+        return tuple(strategy.choose(state) or ())
+    except Exception as exc:
+        print(f"[SYS] 本地留牌策略不可用，本局全部保留：{exc}")
+        return ()
+
+
 def initialize_recommendation_automation():
     """Rebuild per-game flows while reusing expensive OCR components.
 
@@ -393,10 +430,20 @@ def initialize_recommendation_automation():
         # 上游时序：OCR 前的每局等待由 ChoosingCardAction 的 ready 延时负责；
         # OCR 成功后立即点击，不再叠加缓冲（mulligan_post_ocr_delay=0）。
         first_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
-        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds)
+        retry_delay=recommendation_config.mulligan_post_ocr_delay_seconds,
+        # 本地卡组策略留牌（网页选任务牧/动物园术等时走 run_local）。
+        local_chooser=_local_mulligan_chooser)
     # 换牌故意**不接**「活人感」：换牌是开局固定流程，提交后马上进入对局，
     # 对着手牌区随机悬停既不像真人也没意义（用户实测反馈）。活人感只挂在下面
     # 对局内的 RecommendationFlow 上。
+    # 本局听谁的：盒子AI 读 OCR 推荐，本地卡组策略走 search 搜索。
+    # 流程每局重建一次，所以这里取一次当前「策略选择」即可（改策略下局生效）。
+    # 本地策略加载失败（文件写坏/目录被删）时回退盒子，避免“选了坏卡组 →
+    # 每回合搜索 0 分 → 一直结束回合”。
+    box_ai = uses_box_ai()
+    if not box_ai and deck_strategy() is None:
+        print(f"[SYS] 本地策略「{strategy_setting()}」加载失败，本局回退盒子AI。")
+        box_ai = True
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
         reader=recommendation_reader,
@@ -414,7 +461,12 @@ def initialize_recommendation_automation():
             recommendation_config.draw_extra_delay_per_card_seconds),
         post_action_pause=_human_like_post_action_pause,
         stopped=shutdown_event.is_set,
+        box_ai=box_ai,
+        planner=LegacyStrategyPlanner(),
+        joint=(joint_setting() and not box_ai),
+        strategy_name=strategy_setting(),
     )
+    _log_current_strategy()
 
 
 def _human_like_post_action_pause(action_kind=None) -> bool:
@@ -969,7 +1021,15 @@ def ChoosingCardAction():
                     "确认按钮未检测到（面板尚未就绪或已提交），等待重试……")
                 _sleep_with_delay(retry_delay, "换牌重试")
                 continue
-            result = auto_mulligan_flow.run()
+            # 换牌意见来源：盒子AI 读左侧面板；本地卡组用策略 choose()。
+            # 用流程对象上的 box_ai（初始化时已处理“本地策略加载失败回退盒子”）。
+            box_ai = getattr(recommendation_flow, "box_ai", None)
+            if box_ai is None:
+                box_ai = uses_box_ai()
+            if box_ai:
+                result = auto_mulligan_flow.run()
+            else:
+                result = auto_mulligan_flow.run_local()
             if result.status == MulliganStatus.CONFIRMED:
                 confirmed_waiting = True
                 verified = False
@@ -2490,8 +2550,16 @@ def run_automatic_battle_step():
         # waits for the visible end-turn button.
         if (recommendation_flow is not None
                 and _modal_choice_probe_due(snapshot)):
+            # 盒子AI：只有「古神技能」会盖住结束回合按钮，只放行 USE_ABILITY；
+            # 本地卡组：发现/选择菜单本身就是阻塞式的，放行 CHOOSE_DISCOVER，
+            # 否则菜单期间永远等不到结束回合按钮（脚本卡在菜单上）。
+            allowed = (
+                frozenset((ActionKind.USE_ABILITY,))
+                if getattr(recommendation_flow, "box_ai", True)
+                else frozenset((ActionKind.USE_ABILITY,
+                                ActionKind.CHOOSE_DISCOVER)))
             modal_result = recommendation_flow.run_player_turn_step(
-                allowed_action_kinds=frozenset((ActionKind.USE_ABILITY,)))
+                allowed_action_kinds=allowed)
             _handle_automation_flow_result(modal_result)
         return None
     # 自动投降：只在我方回合检测（对手回合不计入“连续回合”），
@@ -2535,6 +2603,13 @@ def Battling():
                 info_print("你赢得了这场对战")
             else:
                 info_print("你输了")
+            # 联合模式小结：每局结束追加一行到仓库根目录 ai.txt。
+            flush = getattr(recommendation_flow, "flush_joint_log", None)
+            if callable(flush):
+                try:
+                    flush()
+                except Exception:
+                    pass
             return next_state
         if next_state == FSM_ERROR:
             return next_state

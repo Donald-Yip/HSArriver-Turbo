@@ -15,7 +15,11 @@ tmp*/
 *.txt
 !requirements.txt
 !tests/fixtures/recommendations/manifest.json
+!tests/fixtures/strategy/*.json
 !rules/card_rules.json
+# ai/ 下是各卡组打法说明与「新建卡组」指南（属于文档，必须入库）
+!ai/*.txt
+!ai/**/*.txt
 
 dist/
 build/
@@ -44,6 +48,7 @@ log/hs_serve_elevated.cmd
 log/
 # 脚本自写日志与出错反馈包（对战日志 .txt/.jsonl、反馈_*.zip、截图）都是本机产物
 logs/
+error/
 out.jpg
 snapshot_live.jpg
 __pycache__/

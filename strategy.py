@@ -15,6 +15,9 @@ class StrategyState:
     def __init__(self, log_state):
         self.is_end = log_state.is_end
         self.is_my_turn = log_state.is_my_turn
+        # Power.log 的 STEP（MAIN_START / MAIN_ACTION ...）：本地策略用它判断
+        # 主阶段是否真的开始（对手回合收尾动画期间日志已判我方回合）。
+        self.game_step = getattr(log_state, "game_step", "") or ""
         self.game_num_turns_in_play = log_state.game_num_turns_in_play
         self.my_total_mana = int(log_state.my_entity.query_tag("RESOURCES"))
         self.my_used_mana = int(log_state.my_entity.query_tag("RESOURCES_USED"))

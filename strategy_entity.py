@@ -11,7 +11,7 @@ from json_op import query_json_dict
 
 class StrategyEntity(ABC):
     def __init__(self, entity_id, card_id, zone, zone_pos, current_cost, overload,
-                 is_mine):
+                 is_mine, temporary=0, created_by=""):
         self.entity_id = entity_id
         self.card_id = card_id
         self.zone = zone
@@ -19,6 +19,13 @@ class StrategyEntity(ABC):
         self.current_cost = current_cost
         self.overload = overload
         self.is_mine = is_mine
+        # 临时牌（如咒怨之墓从牌库发现并变成临时卡的牌）：回合结束时未打出
+        # 就会被丢弃。日志里对应 tag TEMPORARY（缺失为 0，负数按未设置处理）;
+        # 实测很多对局根本不下发这个 tag，此时用 created_by 认来源牌。
+        self.temporary = 1 if int(temporary or 0) > 0 else 0
+        # 来源牌 card_id（日志 LAST_AFFECTED_BY 解析）：咒怨之墓 TLC_451 发现的
+        # 牌带 LAST_AFFECTED_BY = 咒怨之墓实体，评分据此判断“刚发现的临时牌”。
+        self.created_by = str(created_by or "")
 
     @property
     def name(self):
@@ -41,11 +48,16 @@ class StrategyMinion(StrategyEntity):
         windfury=0, poisonous=0, life_steal=0, spell_power=0, freeze=0,
         battlecry=0, not_targeted_by_spell=0, not_targeted_by_power=0,
         charge=0, rush=0, attackable_by_rush=0, frozen=0, dormant=0,
-        untouchable=0, immune=0, cant_attack=0, exhausted=1,
-        num_turns_in_play=1,
+        untouchable=0, immune=0, reborn=0, cant_attack=0, exhausted=1,
+        num_turns_in_play=1, temporary=0, created_by="",
+        # 站场古神本体（如克苏恩，帝国之眼）的 4 个可激活技能：
+        # ability_used = 本局已经点亮的技能下标（0 基，与技能面板从左到右一致）；
+        # ability_uses_turn = 本回合已激活次数（每回合最多 2 次）。
+        ability_used=(), ability_uses_turn=0,
     ):
         super().__init__(
-            entity_id, card_id, zone, zone_pos, current_cost, overload, is_mine)
+            entity_id, card_id, zone, zone_pos, current_cost, overload, is_mine,
+            temporary=temporary, created_by=created_by)
         self.attack = attack
         self.max_health = max_health
         self.damage = damage
@@ -67,9 +79,12 @@ class StrategyMinion(StrategyEntity):
         self.dormant = dormant
         self.untouchable = untouchable
         self.immune = immune
+        self.reborn = bool(reborn)
         self.cant_attack = cant_attack
         self.exhausted = exhausted
         self.num_turns_in_play = num_turns_in_play
+        self.ability_used = tuple(int(index) for index in ability_used)
+        self.ability_uses_turn = int(ability_uses_turn or 0)
 
     @property
     def cardtype(self):
@@ -81,8 +96,11 @@ class StrategyMinion(StrategyEntity):
 
     @property
     def can_beat_face(self):
+        cannot_attack_hero_yet = (
+            self.rush and not self.charge and self.num_turns_in_play <= 1)
         return (self.attack > 0 and not self.dormant and not self.frozen
-                and not self.cant_attack and self.exhausted == 0)
+                and not self.cant_attack and self.exhausted == 0
+                and not cannot_attack_hero_yet)
 
     @property
     def can_attack_minion(self):
@@ -100,6 +118,7 @@ class StrategyMinion(StrategyEntity):
             (self.taunt, "嘲讽"), (self.divine_shield, "圣盾"),
             (self.stealth, "潜行"), (self.frozen, "冻结"),
             (self.dormant, "休眠"), (self.immune, "免疫"),
+            (self.reborn, "复生"),
         ):
             if enabled:
                 flags.append(label)

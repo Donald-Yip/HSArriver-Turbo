@@ -317,6 +317,143 @@ def watchdog_settings() -> dict:
     return cfg
 
 
+# ---------------------------------------------------------------- 策略选择
+# 网页「基础配置 → 策略选择」：这一局听谁的。
+#   hsbox  盒子AI —— OCR 读炉石盒子的推荐面板，照着面板打（内置项，不在 ai/ 里）
+#   其他   本地卡组 —— ai/ 下每个卡组文件夹自动成为一个选项，文件夹名即选项名。
+#         文件夹里的核心策略文件是“文件名不含下划线的 .py”，实现
+#         choose（留牌，可选）+ rankState（场面/动作评分，必需）。
+# 新增卡组 = 在 ai/ 下新建一个文件夹 + 核心 .py，不需要改任何代码；
+# 下拉框在下一次刷新（<=5 秒扫描缓存）后自动出现该项。
+# 排除：ai/outofdate、ai/__pycache__、以 “_”/“.” 开头的目录。
+STRATEGY_BOX = "hsbox"
+DEFAULT_STRATEGY = STRATEGY_BOX
+# 联合模式：本地卡组时读盒子首步，与本地整回合最优比较；本地高 20% 才用本地。
+DEFAULT_JOINT = False
+# 一次决策最多展开多少个搜索场面（search.MAX_SEARCH）。
+DEFAULT_MAX_SEARCH = 1500
+# 一次决策的墙钟预算（秒）：超时返回当前最优，避免把回合拖死。
+# 首次搜索要加载卡组策略/卡表（实测冷启动 ~2s），留 5s 兜底；热搜索 ~0.1s。
+DEFAULT_SEARCH_TIME_LIMIT = 5.0
+
+
+def strategy_choices() -> dict:
+    """网页下拉框的全部选项：{key: 显示名}。
+
+    内置「盒子AI」+ ai/ 下自动发现的卡组文件夹（文件夹名既是 key 也是显示名）。
+    懒导入 ai.deck_strategy：那边 import config，顶层导入会形成循环。
+    """
+    choices = {STRATEGY_BOX: "盒子AI"}
+    try:
+        from ai.deck_strategy import strategy_labels
+
+        choices.update(strategy_labels())
+    except Exception:
+        # ai/ 还没移植/加载失败时只保留盒子AI，自动化总能开工。
+        pass
+    return choices
+
+
+def strategy_setting() -> str:
+    """读取 ui_config.json 里的策略选择（每次调用都读文件，改完即时生效）。
+
+    缺省/写坏/写了不认识的名字（比如删掉了某个卡组文件夹）时回退到
+    DEFAULT_STRATEGY，保证自动化总能开工。
+    """
+    key = _load_ui_config().get("strategy")
+    if isinstance(key, dict):            # 兼容 {"key": "..."} 的写法
+        key = key.get("key")
+    return key if key in strategy_choices() else DEFAULT_STRATEGY
+
+
+def strategy_label(key: str = None) -> str:
+    """策略 key 的中文名（网页下拉框与浮窗「本局算法」都用它）。"""
+    if key is None:
+        key = strategy_setting()
+    return strategy_choices().get(key, str(key or ""))
+
+
+def uses_box_ai() -> bool:
+    """当前策略选择是不是“盒子AI”（False = 本地卡组策略）。
+
+    这是“本局听谁的”的唯一判据：推荐流程、换牌流程都直接问它，
+    不再额外维护 using_hsbox 之类的标志变量（那种标志容易出现
+    “网页改了策略、标志还是旧的”的不一致）。
+    """
+    return strategy_setting() == STRATEGY_BOX
+
+
+def strategy_options() -> list:
+    """网页下拉框的选项列表（盒子AI 在前，卡组按名称排序）。"""
+    return [{"key": key, "label": label}
+            for key, label in strategy_choices().items()]
+
+
+def save_strategy_setting(key: str) -> str:
+    """把策略选择写进 ui_config.json 的 strategy 键。
+
+    只改 strategy，其余配置（昵称、日志目录、延时、各 ROI 等）原样保留。
+    """
+    if key not in strategy_choices():
+        raise KeyError(f"未知策略：{key}")
+    data = _load_ui_config()
+    data["strategy"] = key
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return key
+
+
+def max_search_setting() -> int:
+    """读取 ui_config.json 的 max_search（一次决策最多展开的场面数）。"""
+    try:
+        value = int(_load_ui_config().get("max_search", DEFAULT_MAX_SEARCH))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_SEARCH
+    return min(100000, max(1, value))
+
+
+def save_max_search_setting(value) -> int:
+    """保存 max_search（1..100000，越界收敛）。"""
+    try:
+        depth = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("max_search 必须是整数")
+    depth = min(100000, max(1, depth))
+    data = _load_ui_config()
+    data["max_search"] = depth
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return depth
+
+
+def joint_setting() -> bool:
+    """联合模式开关（只有本地卡组时才生效）。"""
+    value = _load_ui_config().get("joint", DEFAULT_JOINT)
+    if isinstance(value, dict):
+        value = value.get("enabled", DEFAULT_JOINT)
+    return bool(value)
+
+
+def save_joint_setting(enabled) -> bool:
+    """保存联合模式开关。"""
+    value = bool(enabled)
+    data = _load_ui_config()
+    data["joint"] = value
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return value
+
+
+def search_time_limit_setting() -> float:
+    """一次决策的墙钟预算（秒，0 = 不限制）。"""
+    try:
+        value = float(_load_ui_config().get(
+            "search_time_limit", DEFAULT_SEARCH_TIME_LIMIT))
+    except (TypeError, ValueError):
+        return DEFAULT_SEARCH_TIME_LIMIT
+    return max(0.0, value)
+
+
 def human_like_settings() -> dict:
     """读取 ui_config.json 的 human_like 段（每次调用都读文件，改完即时生效）。
 

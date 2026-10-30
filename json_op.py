@@ -83,6 +83,16 @@ def query_json_dict(key):
     return f"Unknown:{key}"
 
 
+def query_json_item(key):
+    """返回 card_id 对应的完整卡牌数据 dict（未识别返回 None）。
+
+    卡组上下文/发现策略需要读 name 之外的字段（spellSchool / type /
+    text 关键字…），与 query_json_dict 共用同一份懒加载数据，不重复联网。
+    """
+    query_json_dict(key)          # 借同一次调用完成懒加载/未知卡重下载
+    return JSON_DICT.get(key)
+
+
 if __name__ == "__main__":
     JSON_DICT = read_json()
     with open("id-name.txt", "w", encoding="utf8") as f:

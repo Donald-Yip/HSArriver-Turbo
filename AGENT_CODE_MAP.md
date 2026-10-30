@@ -82,6 +82,13 @@ cards.json                10 MB card catalog. Use a catalog service; do not pars
 web/index.html            Existing Web console page.
 assets/                   Templates, images, and UI resources.
 constants/                Legacy constants.
+ai/                       Local deck-strategy engine (optional decision source):
+                          deck_strategy.py auto-discovers ai/<deck>/ folders;
+                          card_rules.py/sim_cards.py are shared simulation facts;
+                          任务牧/动物园术/强化学习动物园术 are deck strategies.
+search/                   Priority-queue turn search over AiState/AiAction:
+                          search.py (Search/aiSearch/doAction/rankState),
+                          ai_state.py, ai_action.py, serialize.py (joint mode).
 docs/                     Architecture, interfaces, tasks, CI, agent reports.
 tools/                    Architecture, scope, test, release, and diagnostics tools.
 tests/                    Legacy and layered test suites.
@@ -194,6 +201,9 @@ Important legacy boundary:
 - `input.py` maps declarative plan steps to legacy click operations.
 - `preflight.py` performs read-only readiness checks.
 - `lobby.py` layers authoritative Power.log state over UI recognition.
+- `strategy_planner.py` is the only bridge from the application layer to the
+  root `search/` + `ai/` local deck-strategy stack (implements
+  `StrategyPlannerPort`: plan / joint_plan / describe / identity_key).
 
 Do not add battlegrounds logic to the existing legacy `log_state.py` merely to
 avoid creating a new adapter. A new BGS feature belongs in a separate bounded
