@@ -203,6 +203,7 @@ class MulliganScopeTests(unittest.TestCase):
             mulligan_post_ocr_delay_seconds=0.0,
             result_timeout_seconds=1.0,
             post_action_delay_seconds=0.2,
+            unconfirmed_retry_delay_seconds=3.0,
             draw_extra_delay_per_card_seconds=0.0,
         )
         parser = SimpleNamespace(

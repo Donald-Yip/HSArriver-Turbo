@@ -75,7 +75,8 @@ class RecommendationFlow:
                  consumed=None, post_action_delay=0.0,
                  post_action_pause=None,
                  hand_animation_delay=None,
-                 draw_extra_delay_per_card=0.0):
+                 draw_extra_delay_per_card=0.0,
+                 unconfirmed_retry_delay=3.0):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -104,6 +105,8 @@ class RecommendationFlow:
         #   * 同一回合里再多抽的（比如开局一次抽 2 张）要算；
         #   * 回合内任何操作触发的抽牌，每张都算。
         self.draw_extra_delay_per_card = float(draw_extra_delay_per_card or 0.0)
+        self.unconfirmed_retry_delay = max(
+            0.0, float(unconfirmed_retry_delay or 0.0))
         self._seen_entry_count = None
         # 免费那张只让给“我方这个回合还没执行过动作时”出现的第一次手牌增加，
         # 这样 Power.log 晚几拍、出牌抽到的牌先被看到时，也不会被误当成免费那张。
@@ -165,7 +168,7 @@ class RecommendationFlow:
             if printed >= 12:
                 break
 
-    def run_player_turn_step(self):
+    def run_player_turn_step(self, allowed_action_kinds=None):
         try:
             if self.stopped():
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
@@ -220,6 +223,10 @@ class RecommendationFlow:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "stale_mulligan_recommendation")
+            if (allowed_action_kinds is not None
+                    and proposed.action not in allowed_action_kinds):
+                return FlowStepResult(
+                    FlowStepStatus.OBSERVE, "turn_not_ready")
             pending = self.pending_action
             if pending is not None:
                 if (pending.turn_number != proposed.turn_number
@@ -266,7 +273,9 @@ class RecommendationFlow:
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             if not result.executed and not result.recovery_needed:
                 return self._retry("execution_failed")
-            defer_consumption = proposed.action == ActionKind.ASSEMBLE_CHOICE
+            retryable_unconfirmed = proposed.action in (
+                ActionKind.ASSEMBLE_CHOICE, ActionKind.USE_ABILITY)
+            defer_consumption = retryable_unconfirmed
             if not defer_consumption:
                 self.consumed.mark_consumed(key)
             if not result.executed:
@@ -320,6 +329,25 @@ class RecommendationFlow:
                             ResultStatus.UNCONFIRMED):
                 if defer_consumption:
                     if verified == ResultStatus.WAITING_RECOMMENDATION:
+                        self.consumed.mark_consumed(key)
+                        return FlowStepResult(
+                            FlowStepStatus.OBSERVE,
+                            "waiting_recommendation_update")
+                    if self.unconfirmed_retry_delay:
+                        output = getattr(self.controller, "output", None)
+                        if output is not None:
+                            output(
+                                "[SYS] 动作暂未确认，"
+                                f"{self.unconfirmed_retry_delay:.1f}s 后重试")
+                        self.sleep(self.unconfirmed_retry_delay)
+                    if self.stopped():
+                        return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
+                    after_state, after_revision = self.state_supplier()
+                    if (after_revision > fresh_revision
+                            and self._postcondition(
+                                adapted.postcondition, fresh_state, after_state,
+                                adapted.source_entity_id,
+                                adapted.target_entity_id)):
                         self.consumed.mark_consumed(key)
                         return FlowStepResult(
                             FlowStepStatus.OBSERVE,
@@ -476,10 +504,10 @@ class RecommendationFlow:
             # WAITING 让上层标记已消费并等待盒子更新推荐。
             return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.ASSEMBLE_CHOICE:
-            # 拼装点击发出后若日志和面板都没变化，说明四选一没点中；下一轮
-            # 继续按同一条盒子推荐重试，不能进入“已发出、等待确认”静默状态。
+            # 拼装点击发出后若日志和面板都没变化，说明四选一没点中；
+            # 交给上层延时后重试。
             return (ResultStatus.WAITING_RECOMMENDATION if log_changed
-                    else ResultStatus.RETRY)
+                    else ResultStatus.UNCONFIRMED)
         if proposed.action == ActionKind.CHOOSE_DISCOVER:
             return ResultStatus.WAITING_RECOMMENDATION
         if proposed.action == ActionKind.SELECT_TARGET:
@@ -489,7 +517,7 @@ class RecommendationFlow:
         if proposed.action == ActionKind.USE_ABILITY:
             # 古神技能：结算一定有日志痕迹（伤害/召唤/加 Buff/扣蓝）。
             # 日志一点没动也只能进入待确认；日志动了就当已发动并等盒子更新。
-            # 两种情况下都不立即重复点同一个随从。
+            # 没看到日志就先延时重试；看到日志才算已发动。
             return (ResultStatus.WAITING_RECOMMENDATION if log_changed
                     else ResultStatus.UNCONFIRMED)
         if log_changed:

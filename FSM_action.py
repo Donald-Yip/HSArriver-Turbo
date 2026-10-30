@@ -74,6 +74,8 @@ mulligan_delay_generation = None
 player_turn_ready_key = None
 _turn_ready_probe_key = None
 _turn_ready_next_probe_at = 0.0
+_modal_choice_probe_key = None
+_modal_choice_next_probe_at = 0.0
 last_automation_diagnostic = None
 _snapshot_cache_key = None
 _snapshot_cache = None
@@ -405,6 +407,8 @@ def initialize_recommendation_automation():
         controller=manual_controller,
         result_timeout=recommendation_config.result_timeout_seconds,
         post_action_delay=recommendation_config.post_action_delay_seconds,
+        unconfirmed_retry_delay=(
+            recommendation_config.unconfirmed_retry_delay_seconds),
         # 抽牌额外延时（秒/张）：回合开始的常规抽 1 张不算，回合内抽到的每张都等。
         draw_extra_delay_per_card=(
             recommendation_config.draw_extra_delay_per_card_seconds),
@@ -1276,7 +1280,7 @@ _POST_GAME_START_BUTTON_ROI = (1325, 865, 1475, 935)
 _POST_GAME_START_FALLBACK_ROI = (1250, 845, 1550, 945)
 _POST_GAME_START_DEFAULT_POINT = (1400, 900)
 _POST_GAME_RANK_ROI = (1230, 180, 1385, 225)
-_MAX_RANK_NUMBER = 100000
+_MAX_RANK_NUMBER = 1_000_000
 # 小字号放大后再送 OCR（与 AI胜率浮动条同一套做法）。
 _POST_GAME_OCR_SCALE = 2.0
 # 收尾总轮数上限：每轮 = 点一下待命点 + 等 _POST_GAME_CLICK_WAIT 秒 +（可选）OCR。
@@ -1521,7 +1525,7 @@ def parse_rank_text(text: str) -> dict:
         return result
     normalized = str(text).translate(_FULLWIDTH_DIGITS)
     compact = re.sub(r"\s+", "", normalized)
-    match = re.search(r"\d{1,6}", compact)
+    match = re.search(r"\d{1,7}", compact)
     if match:
         value = int(match.group(0))
         if 1 <= value <= _MAX_RANK_NUMBER:
@@ -1538,7 +1542,7 @@ def is_pure_rank_text(text: str) -> bool:
     内容被 OCR 随口读出一个数字，不算「已上传说」。
     """
     compact = re.sub(r"\s+", "", str(text or "").translate(_FULLWIDTH_DIGITS))
-    return bool(re.fullmatch(r"#?\d{1,6}", compact))
+    return bool(re.fullmatch(r"#?\d{1,7}", compact))
 
 
 def read_rank_region(strict: bool = False, min_confidence: float = 0.0) -> dict:
@@ -2390,9 +2394,60 @@ def _keep_score_once() -> bool:
     return True
 
 
+def _modal_choice_probe_due(snapshot) -> bool:
+    """Return whether it is time to look for a forced ability choice."""
+    global _modal_choice_probe_key, _modal_choice_next_probe_at
+
+    probe_key = (log_state.game_generation,
+                 snapshot.game_num_turns_in_play)
+    now = time.monotonic()
+    if _modal_choice_probe_key != probe_key:
+        _modal_choice_probe_key = probe_key
+        _modal_choice_next_probe_at = now
+    if now < _modal_choice_next_probe_at:
+        return False
+    interval = float(recommendation_config.modal_choice_probe_interval_seconds)
+    _modal_choice_next_probe_at = now + interval
+    return True
+
+
+def _handle_automation_flow_result(result) -> None:
+    """Translate one recommendation-flow result into automation diagnostics."""
+    global last_automation_diagnostic, _ocr_fail_streak
+
+    if result.status == FlowStepStatus.RETRY:
+        _ocr_fail_streak += 1
+        if result.diagnostics == "discover_choice_still_open":
+            message = "发现选择仍在，准备重新点击。"
+        else:
+            message = (
+                "当前推荐暂不可执行，继续重试："
+                f"{result.diagnostics}")
+        _report_automation_diagnostic(
+            f"retry:{result.diagnostics}", message)
+    elif result.status == FlowStepStatus.OBSERVE:
+        observe_messages = {
+            "opponent_turn": "等待对手操作。",
+            "waiting_recommendation_update": "等待盒子更新推荐。",
+            "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
+            "turn_not_ready": "等待右侧「结束回合」出现后再执行推荐。",
+            "awaiting_action_confirmation": "等待动作结果确认。",
+            "stopped": "已收到停止指令。",
+        }
+        message = observe_messages.get(
+            result.diagnostics,
+            f"自动流程观察中：{result.diagnostics}")
+        _report_automation_diagnostic(
+            f"observe:{result.diagnostics}", message)
+    else:
+        _ocr_fail_streak = 0
+        last_automation_diagnostic = None
+
+
 def run_automatic_battle_step():
     """Observe opponent turns; execute one newly validated player action."""
     global player_turn_ready_key, _turn_ready_probe_key, _turn_ready_next_probe_at
+    global _modal_choice_probe_key, _modal_choice_next_probe_at
     global last_automation_diagnostic, _ocr_fail_streak
     global _concede_triggered
 
@@ -2423,10 +2478,21 @@ def run_automatic_battle_step():
         player_turn_ready_key = None
         _turn_ready_probe_key = None
         _turn_ready_next_probe_at = 0.0
+        _modal_choice_probe_key = None
+        _modal_choice_next_probe_at = 0.0
         return None
     # 日志判到我方回合后，动画可能还没结束：右侧按钮仍是「对手回合」时
     # 不读取推荐、不点牌；每 2 秒复查一次，出现「结束回合」才继续。
     if not _player_turn_ready(snapshot):
+        # Some start-of-turn triggers open a modal ability panel over the
+        # end-turn button (for example C'Thun's four choices). Only allow a
+        # USE_ABILITY recommendation through this bypass; ordinary play still
+        # waits for the visible end-turn button.
+        if (recommendation_flow is not None
+                and _modal_choice_probe_due(snapshot)):
+            modal_result = recommendation_flow.run_player_turn_step(
+                allowed_action_kinds=frozenset((ActionKind.USE_ABILITY,)))
+            _handle_automation_flow_result(modal_result)
         return None
     # 自动投降：只在我方回合检测（对手回合不计入“连续回合”），
     # 连续低于阈值达到设定回合数则主动认输。
@@ -2439,35 +2505,7 @@ def run_automatic_battle_step():
         return run_manual_battle_step()
 
     result = recommendation_flow.run_player_turn_step()
-    if result.status == FlowStepStatus.RETRY:
-        # 连续读取失败计数：存活检测告警里会带上它（issue 建议的“辅以 OCR
-        # 连续失败计数”，便于区分“炉石没了”与“盒子没面板”）。
-        _ocr_fail_streak += 1
-        if result.diagnostics == "discover_choice_still_open":
-            message = "发现选择仍在，准备重新点击。"
-        else:
-            message = (
-                "当前推荐暂不可执行，继续重试："
-                f"{result.diagnostics}")
-        _report_automation_diagnostic(
-            f"retry:{result.diagnostics}", message)
-    elif result.status == FlowStepStatus.OBSERVE:
-        observe_messages = {
-            "opponent_turn": "等待对手操作。",
-            "waiting_recommendation_update": "等待盒子更新推荐。",
-            "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
-            "awaiting_action_confirmation": "动作已发出，等待结果确认，不重复点击。",
-            "stopped": "已收到停止指令。",
-        }
-        message = observe_messages.get(
-            result.diagnostics,
-            f"自动流程观察中：{result.diagnostics}")
-        _report_automation_diagnostic(
-            f"observe:{result.diagnostics}", message)
-    else:
-        # 成功执行/观察都算“本条链路是通的”，清空连续失败计数。
-        _ocr_fail_streak = 0
-        last_automation_diagnostic = None
+    _handle_automation_flow_result(result)
     return None
 
 

@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 
 import FSM_action
 import screen_regions
+from hslegend.domain import ActionKind
 from src.flow.recommendation_flow import FlowStepStatus
 from src.recommendation_models import OcrLine
 
@@ -14,13 +15,16 @@ from src.recommendation_models import OcrLine
 class RecordingFlow:
     def __init__(self):
         self.calls = 0
-
-    def run_player_turn_step(self):
-        self.calls += 1
-        return SimpleNamespace(
+        self.allowed_actions = []
+        self.result = SimpleNamespace(
             status=FlowStepStatus.OBSERVE,
-            diagnostics="awaiting_action_confirmation",
+            diagnostics="turn_not_ready",
         )
+
+    def run_player_turn_step(self, allowed_action_kinds=None):
+        self.calls += 1
+        self.allowed_actions.append(allowed_action_kinds)
+        return self.result
 
 
 def active_snapshot(turn=5):
@@ -67,22 +71,29 @@ class TurnStartGateTests(unittest.TestCase):
             getattr(FSM_action, "player_turn_ready_key", None),
             getattr(FSM_action, "_turn_ready_probe_key", None),
             getattr(FSM_action, "_turn_ready_next_probe_at", 0.0),
+            getattr(FSM_action, "_modal_choice_probe_key", None),
+            getattr(FSM_action, "_modal_choice_next_probe_at", 0.0),
         )
         self.flow = RecordingFlow()
         FSM_action.recommendation_flow = self.flow
         FSM_action.recommendation_config = SimpleNamespace(
             turn_start_probe_interval_seconds=2.0,
+            modal_choice_probe_interval_seconds=3.0,
         )
         FSM_action.player_turn_ready_key = None
         FSM_action._turn_ready_probe_key = None
         FSM_action._turn_ready_next_probe_at = 0.0
+        FSM_action._modal_choice_probe_key = None
+        FSM_action._modal_choice_next_probe_at = 0.0
 
     def tearDown(self):
         (FSM_action.recommendation_flow,
          FSM_action.recommendation_config,
          FSM_action.player_turn_ready_key,
          FSM_action._turn_ready_probe_key,
-         FSM_action._turn_ready_next_probe_at) = self.saved
+         FSM_action._turn_ready_next_probe_at,
+         FSM_action._modal_choice_probe_key,
+         FSM_action._modal_choice_next_probe_at) = self.saved
 
     def _step(self, probe, now):
         with (
@@ -108,21 +119,39 @@ class TurnStartGateTests(unittest.TestCase):
         first, sleep = self._step(probe, clock[0])
         sleep.assert_not_called()
         self.assertIsNone(first)
-        self.assertEqual(0, self.flow.calls)
+        self.assertEqual(1, self.flow.calls)
+        self.assertEqual(
+            (frozenset((ActionKind.USE_ABILITY,)),),
+            tuple(self.flow.allowed_actions),
+        )
         self.assertEqual(1, probe.call_count)
 
         clock[0] = 1.0
         second, _ = self._step(probe, clock[0])
         self.assertIsNone(second)
-        self.assertEqual(0, self.flow.calls)
+        self.assertEqual(1, self.flow.calls)
         self.assertEqual(1, probe.call_count)
 
         clock[0] = 2.0
         probe.return_value = True
         third, _ = self._step(probe, clock[0])
         self.assertIsNone(third)
-        self.assertEqual(1, self.flow.calls)
+        self.assertEqual(2, self.flow.calls)
+        self.assertIsNone(self.flow.allowed_actions[-1])
         self.assertEqual(2, probe.call_count)
+
+    def test_forced_ability_is_allowed_while_end_turn_is_covered(self):
+        probe = Mock(return_value=False)
+        self.flow.result = SimpleNamespace(status=FlowStepStatus.EXECUTED)
+
+        result, _ = self._step(probe, 0.0)
+
+        self.assertIsNone(result)
+        self.assertEqual(1, self.flow.calls)
+        self.assertEqual(
+            frozenset((ActionKind.USE_ABILITY,)),
+            self.flow.allowed_actions[0],
+        )
 
 
 class CalibrationRegistrationTests(unittest.TestCase):

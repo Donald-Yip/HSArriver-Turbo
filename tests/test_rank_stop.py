@@ -48,7 +48,9 @@ class ParseRankTextTests(unittest.TestCase):
             ("", None, False),
             ("   ", None, False),
             (None, None, False),
-            ("999999", None, False),      # 超出 1..100000 不算数
+            ("120065", 120065, True),    # 高名次也是传说
+            ("999999", 999999, True),
+            ("1000001", None, False),     # 超过当前合法上限不算数
         )
         for text, number, legend in cases:
             with self.subTest(text=text):

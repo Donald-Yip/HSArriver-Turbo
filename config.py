@@ -164,7 +164,7 @@ DEFAULT_RANK_STOP = {
 }
 # 目标名次的取值范围（防配置写坏成 0 / 负数 / 天文数字）。
 RANK_STOP_MIN_NUMBER = 1
-RANK_STOP_MAX_NUMBER = 100000
+RANK_STOP_MAX_NUMBER = 1_000_000
 # action 的合法取值（stop = 到点即停；keep = 控分，太靠前就投降压低）。
 RANK_STOP_ACTIONS = ("stop", "keep")
 
@@ -968,6 +968,12 @@ class RecommendationConfig:
 
     # 我方回合开始后，右侧「结束回合」按钮的 OCR 复查间隔。
     turn_start_probe_interval_seconds: float = 2.0
+
+    # 结束回合被开局强制选择面板遮住时，检查模态技能推荐的间隔。
+    modal_choice_probe_interval_seconds: float = 3.0
+
+    # 技能/拼装点击后日志暂时没变化时，先等这么久再重试，避免快速重击。
+    unconfirmed_retry_delay_seconds: float = 3.0
 
     # 旧版的固定回合开始延时已移除：现在以右侧「结束回合」按钮的 OCR
     # 结果作为就绪信号。保留字段只为兼容已有构造调用，运行期不再读取。

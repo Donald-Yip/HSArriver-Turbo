@@ -17,8 +17,10 @@ from types import SimpleNamespace
 
 import battle_record
 from manual_controller import (
-    ActionExecutionResult, AssembleChoiceAction, EndTurnAction,
+    ActionExecutionResult, AssembleChoiceAction, EndTurnAction, Target,
+    UseAbilityAction,
 )
+from hslegend.domain import ActionKind
 from src.flow.recommendation_flow import FlowStepStatus, RecommendationFlow
 from src.game_state.recommendation_adapter import AdaptedAction
 from src.parser.recommendation_parser import RecommendationParser
@@ -96,6 +98,17 @@ class AssemblyAdapter:
             AssembleChoiceAction(1), None, None, "choice_resolved")
 
 
+class AbilityAdapter:
+    def __call__(self, _proposed, _state):
+        return AdaptedAction(
+            UseAbilityAction(
+                Target("friendly", "minion", 1, "301"),
+                "BE_013", 0, 4, choice_name="克苏恩的愤怒",
+            ),
+            "301", None, "ability_used",
+        )
+
+
 class AcceptingValidator:
     def validate(self, proposed, adapted, *args, **kwargs):
         return SimpleNamespace(accepted=True, value=(adapted, "k"))
@@ -121,7 +134,7 @@ def active_state(turn=5):
         my_locations=[], oppo_locations=[])
 
 
-def build_flow(reader, adapter=None, turn=5, controller=None):
+def build_flow(reader, adapter=None, turn=5, controller=None, sleep=None):
     return RecommendationFlow(
         capture=CyclingCapture(), reader=reader,
         parser=RecommendationParser(),
@@ -129,7 +142,7 @@ def build_flow(reader, adapter=None, turn=5, controller=None):
         adapter=adapter or ExplodingAdapter(),
         validator=AcceptingValidator(),
         controller=controller or RecordingController(),
-        sleep=lambda _s: None)
+        sleep=sleep or (lambda _s: None))
 
 
 def run_step(flow):
@@ -185,6 +198,41 @@ class RecommendationRetryTests(unittest.TestCase):
                             for result in results))
         self.assertEqual(3, len(controller.executed))
         self.assertIsNone(flow.pending_action)
+
+    def test_unconfirmed_ability_retries_after_a_long_delay(self):
+        controller = RecordingController()
+        sleeps = []
+        flow = build_flow(
+            ScriptedReader([
+                "操作2号位随从攻击\n选择卡牌\n克苏恩的愤怒"
+            ]),
+            adapter=AbilityAdapter(),
+            controller=controller,
+            sleep=sleeps.append,
+        )
+
+        results = [run_step(flow)[0] for _ in range(2)]
+
+        self.assertTrue(all(result.status is FlowStepStatus.RETRY
+                            for result in results))
+        self.assertEqual(2, len(controller.executed))
+        self.assertEqual([3.0, 3.0], sleeps)
+        self.assertIsNone(flow.pending_action)
+
+    def test_restricted_step_does_not_execute_other_recommendations(self):
+        controller = RecordingController()
+        flow = build_flow(
+            ScriptedReader(["结束回合"]),
+            adapter=AcceptingAdapter(),
+            controller=controller,
+        )
+
+        result = flow.run_player_turn_step(
+            allowed_action_kinds=frozenset((ActionKind.USE_ABILITY,)))
+
+        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
+        self.assertEqual("turn_not_ready", result.diagnostics)
+        self.assertEqual([], controller.executed)
 
     def test_unconfirmed_action_executes_once_then_waits_for_confirmation(self):
         controller = RecordingController()

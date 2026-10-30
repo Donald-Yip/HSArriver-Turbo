@@ -60,6 +60,7 @@ class FsmWiringTests(unittest.TestCase):
                 desktop_size=(1920, 1080), desktop_dpi=96,
                 mulligan_post_ocr_delay_seconds=1.0,
                 post_action_delay_seconds=0.5,
+                unconfirmed_retry_delay_seconds=3.0,
                 result_timeout_seconds=5.0,
                 draw_extra_delay_per_card_seconds=1.5)
 
@@ -73,6 +74,7 @@ class FsmWiringTests(unittest.TestCase):
 
             flow = FSM_action.recommendation_flow
             self.assertEqual(1.5, flow.draw_extra_delay_per_card)
+            self.assertEqual(3.0, flow.unconfirmed_retry_delay)
         finally:
             for name, value in originals.items():
                 setattr(FSM_action, name, value)
