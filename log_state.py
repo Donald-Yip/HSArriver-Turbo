@@ -21,6 +21,25 @@ def check_name():
 _UNKNOWN_PLAYER_MARKERS = ("UNKNOWN",)
 
 
+def _looks_like_player_name(entity_string):
+    """``TAG_CHANGE Entity=<非数字>`` 是不是玩家名。
+
+    正常对战里非数字的 Entity 只有玩家名（"xxx#1234"、"UNKNOWN HUMAN PLAYER"）；
+    酒馆战棋等模式会直接把随从/英雄名写进来（实测 "Entity=暗影之鱼人"、"调酒师鲍勃"），
+    它们没有实体 id：当成玩家处理会把 tag 写到玩家实体上，还会逐条 warn 刷屏
+    （2026-10-31 用户反馈：启动重放战棋日志时满屏 "Invalid entity_id: 0"）。
+    """
+    text = str(entity_string or "")
+    if not text:
+        return False
+    if MY_NAME and MY_NAME in text:
+        return True
+    if "#" in text:  # 战网昵称一律带 #数字
+        return True
+    upper = text.upper()
+    return "UNKNOWN" in upper and ("PLAYER" in upper or "OPPONENT" in upper)
+
+
 def player_name_check(state, my_name=None):
     """比对日志里的玩家名与配置的用户 ID，返回 None（暂无法判断）或判定结果。
 
@@ -91,6 +110,8 @@ class LogState:
         self.start_of_game_card_count = 0
         # 本局是否已警告过 my_player_id 交换（flush 每局重置，避免刷屏）。
         self._swap_warned = False
+        # 本局已告警过的未知实体 id：启动重放历史日志时不逐行刷 WARN。
+        self._invalid_entity_warned = set()
 
     def __str__(self):
         res = \
@@ -575,6 +596,10 @@ def update_state(state, line_info_container):
 
         # 情形二 "TAG_CHANGE Entity=Example#51234"
         elif not entity_string.isdigit():
+            if not _looks_like_player_name(entity_string):
+                # 战棋等模式的随从/英雄名（没有实体 id）：这一行无从落地，
+                # 直接跳过。不能当玩家处理，否则 tag 会写到玩家实体上。
+                return False
             # 关于为什么用 "in" 而非 "==", 因为我总是懒得输入后面的数字
             if MY_NAME in entity_string:
                 entity_id = state.my_entity_id
@@ -585,7 +610,9 @@ def update_state(state, line_info_container):
                 if entity_string != state.oppo_name:
                     state.oppo_name = entity_string
 
-            assert int(entity_id) <= 3
+            # 玩家实体 id 不一定 ≤3：酒馆战棋 8 个玩家，实体 id 会更大。原来这里
+            # 断言 `<= 3`，重放战棋日志会直接抛 AssertionError（实测 3768 次）。
+            # 映射不到（my_entity_id 还是 0）时交给下面的 entity_dict 检查兜住。
 
         # 情形三 "TAG_CHANGE Entity=[entityName=UNKNOWN ENTITY [cardType=INVALID] id=14 ...]"
         # 此时的EntityId已经被提取出来了
@@ -593,8 +620,12 @@ def update_state(state, line_info_container):
             entity_id = entity_string
 
         if entity_id not in state.entity_dict:
-            warn_print(f"Invalid entity_id: {entity_id}")
-            warn_print(f"Current line container: {line_info_container}")
+            # 同一个未知实体只告警一次（每局重置）：启动时会重放当前 Power.log，
+            # 历史对局里解析不出的实体不该逐行刷屏。
+            if entity_id not in state._invalid_entity_warned:
+                state._invalid_entity_warned.add(entity_id)
+                warn_print(f"Invalid entity_id: {entity_id}")
+                warn_print(f"Current line container: {line_info_container}")
             return False
 
         tag = line_info_container.info_dict["tag"]
