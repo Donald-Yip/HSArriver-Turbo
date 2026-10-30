@@ -2454,6 +2454,22 @@ def _keep_score_once() -> bool:
     return True
 
 
+def _choice_panel_open() -> bool:
+    """日志是否确认我方「进行选择」面板正开着（选项已出、还没结算）。
+
+    回合开始的触发效果会把选项面板盖在右侧「结束回合」按钮上：实测
+    「克苏恩仪式 / 克苏恩的子嗣」的四选一（4 个技能选项）、发现菜单、
+    拼装面板、回溯/维持都是这一类。面板开着时按钮根本读不到，只能先把
+    选项点掉，不能干等按钮 —— 否则整回合卡在「尚未检测到结束回合」。
+    """
+    try:
+        if log_state.discover_choice_count is not None:
+            return True
+        return bool(getattr(log_state, "general_choice_pending", False))
+    except Exception:
+        return False
+
+
 def _modal_choice_probe_due(snapshot) -> bool:
     """Return whether it is time to look for a forced ability choice."""
     global _modal_choice_probe_key, _modal_choice_next_probe_at
@@ -2471,7 +2487,7 @@ def _modal_choice_probe_due(snapshot) -> bool:
     return True
 
 
-def _handle_automation_flow_result(result) -> None:
+def _handle_automation_flow_result(result, choice_panel_open=False) -> None:
     """Translate one recommendation-flow result into automation diagnostics."""
     global last_automation_diagnostic, _ocr_fail_streak
 
@@ -2490,7 +2506,10 @@ def _handle_automation_flow_result(result) -> None:
             "opponent_turn": "等待对手操作。",
             "waiting_recommendation_update": "等待盒子更新推荐。",
             "stale_mulligan_recommendation": "等待盒子刷新对局推荐。",
-            "turn_not_ready": "等待右侧「结束回合」出现后再执行推荐。",
+            "turn_not_ready": (
+                "「进行选择」面板盖住了右侧按钮，等待可执行的选项推荐。"
+                if choice_panel_open
+                else "等待右侧「结束回合」出现后再执行推荐。"),
             "awaiting_action_confirmation": "等待动作结果确认。",
             "stopped": "已收到停止指令。",
         }
@@ -2544,23 +2563,27 @@ def run_automatic_battle_step():
     # 日志判到我方回合后，动画可能还没结束：右侧按钮仍是「对手回合」时
     # 不读取推荐、不点牌；每 2 秒复查一次，出现「结束回合」才继续。
     if not _player_turn_ready(snapshot):
-        # Some start-of-turn triggers open a modal ability panel over the
-        # end-turn button (for example C'Thun's four choices). Only allow a
-        # USE_ABILITY recommendation through this bypass; ordinary play still
-        # waits for the visible end-turn button.
+        # 回合开始的触发效果会把选项面板盖在「结束回合」按钮上（克苏恩仪式/
+        # 子嗣的四选一、发现菜单、拼装、回溯/维持）。按钮读不到时不能干等：
+        # 面板自己的点击动作必须放行，否则整回合卡在「尚未检测到结束回合」。
+        #   * 盒子AI：古神技能面板 → USE_ABILITY（原有行为）；
+        #     日志确认我方「进行选择」面板开着时，再放行选项点击 —— 盒子这时
+        #     写的正是「选择我方N号位卡牌」/「拼装 左一 中二」；
+        #   * 本地卡组策略：选择菜单本身就是阻塞式的，放行 CHOOSE_DISCOVER。
+        # 普通出牌/攻击/结束回合仍然必须等到按钮出现，避免动画期误点。
         if (recommendation_flow is not None
                 and _modal_choice_probe_due(snapshot)):
-            # 盒子AI：只有「古神技能」会盖住结束回合按钮，只放行 USE_ABILITY；
-            # 本地卡组：发现/选择菜单本身就是阻塞式的，放行 CHOOSE_DISCOVER，
-            # 否则菜单期间永远等不到结束回合按钮（脚本卡在菜单上）。
-            allowed = (
-                frozenset((ActionKind.USE_ABILITY,))
-                if getattr(recommendation_flow, "box_ai", True)
-                else frozenset((ActionKind.USE_ABILITY,
-                                ActionKind.CHOOSE_DISCOVER)))
+            choice_open = _choice_panel_open()
+            allowed = {ActionKind.USE_ABILITY}
+            if not getattr(recommendation_flow, "box_ai", True):
+                allowed.add(ActionKind.CHOOSE_DISCOVER)
+            elif choice_open:
+                allowed.update((ActionKind.CHOOSE_DISCOVER,
+                                ActionKind.ASSEMBLE_CHOICE))
             modal_result = recommendation_flow.run_player_turn_step(
-                allowed_action_kinds=allowed)
-            _handle_automation_flow_result(modal_result)
+                allowed_action_kinds=frozenset(allowed))
+            _handle_automation_flow_result(
+                modal_result, choice_panel_open=choice_open)
         return None
     # 自动投降：只在我方回合检测（对手回合不计入“连续回合”），
     # 连续低于阈值达到设定回合数则主动认输。

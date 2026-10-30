@@ -2,6 +2,7 @@
 """我方回合开始后，以右侧「结束回合」按钮作为可操作信号。"""
 
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -13,9 +14,10 @@ from src.recommendation_models import OcrLine
 
 
 class RecordingFlow:
-    def __init__(self):
+    def __init__(self, box_ai=True):
         self.calls = 0
         self.allowed_actions = []
+        self.box_ai = box_ai
         self.result = SimpleNamespace(
             status=FlowStepStatus.OBSERVE,
             diagnostics="turn_not_ready",
@@ -63,7 +65,11 @@ class EndTurnButtonProbeTests(unittest.TestCase):
             self.assertTrue(FSM_action.end_turn_button_present())
 
 
-class TurnStartGateTests(unittest.TestCase):
+class _TurnGateFixture(unittest.TestCase):
+    """共用夹具：我方回合、右侧「结束回合」按钮由用例决定读不读得到。"""
+
+    box_ai = True
+
     def setUp(self):
         self.saved = (
             FSM_action.recommendation_flow,
@@ -73,8 +79,10 @@ class TurnStartGateTests(unittest.TestCase):
             getattr(FSM_action, "_turn_ready_next_probe_at", 0.0),
             getattr(FSM_action, "_modal_choice_probe_key", None),
             getattr(FSM_action, "_modal_choice_next_probe_at", 0.0),
+            getattr(FSM_action, "last_automation_diagnostic", None),
         )
-        self.flow = RecordingFlow()
+        self.saved_choice = self._choice_fields()
+        self.flow = RecordingFlow(box_ai=self.box_ai)
         FSM_action.recommendation_flow = self.flow
         FSM_action.recommendation_config = SimpleNamespace(
             turn_start_probe_interval_seconds=2.0,
@@ -85,6 +93,8 @@ class TurnStartGateTests(unittest.TestCase):
         FSM_action._turn_ready_next_probe_at = 0.0
         FSM_action._modal_choice_probe_key = None
         FSM_action._modal_choice_next_probe_at = 0.0
+        FSM_action.last_automation_diagnostic = None
+        self._reset_choice_panel()
 
     def tearDown(self):
         (FSM_action.recommendation_flow,
@@ -93,25 +103,73 @@ class TurnStartGateTests(unittest.TestCase):
          FSM_action._turn_ready_probe_key,
          FSM_action._turn_ready_next_probe_at,
          FSM_action._modal_choice_probe_key,
-         FSM_action._modal_choice_next_probe_at) = self.saved
+         FSM_action._modal_choice_next_probe_at,
+         FSM_action.last_automation_diagnostic) = self.saved
+        self._restore_choice_fields(self.saved_choice)
 
-    def _step(self, probe, now):
+    @staticmethod
+    def _choice_fields():
+        log = FSM_action.log_state
+        return (log.my_player_id, log.general_choice_id,
+                log.general_choice_player, log.general_choice_indexes,
+                log.general_choice_cards, log.general_choice_entity_ids,
+                log.general_choice_ready)
+
+    @staticmethod
+    def _restore_choice_fields(saved):
+        (log_id, choice_id, choice_player, indexes, cards, entity_ids,
+         ready) = saved
+        log = FSM_action.log_state
+        log.my_player_id = log_id
+        log.general_choice_id = choice_id
+        log.general_choice_player = choice_player
+        log.general_choice_indexes = indexes
+        log.general_choice_cards = cards
+        log.general_choice_entity_ids = entity_ids
+        log.general_choice_ready = ready
+
+    def _reset_choice_panel(self):
+        log = FSM_action.log_state
+        log.my_player_id = "2"
+        log.general_choice_id = None
+        log.general_choice_player = None
+        log.general_choice_indexes = set()
+        log.general_choice_cards = {}
+        log.general_choice_entity_ids = {}
+        log.general_choice_ready = False
+
+    def _open_choice_panel(self, ready=True):
+        """日志确认我方「进行选择」面板开着（克苏恩仪式四选一，实测同款）。"""
+        log = FSM_action.log_state
+        log.general_choice_id = "4"
+        log.general_choice_player = log.my_player_id
+        log.general_choice_indexes = {0, 1, 2, 3}
+        log.general_choice_cards = {
+            0: "BE_013t1", 1: "BE_013t2", 2: "BE_013t3", 3: "BE_013t4"}
+        log.general_choice_entity_ids = {0: "95", 1: "96", 2: "97", 3: "98"}
+        log.general_choice_ready = ready
+
+    def _step(self, probe, now, report_diagnostics=False):
         with (
             patch.object(FSM_action, "refresh_snapshot",
                          return_value=active_snapshot()),
             patch.object(FSM_action, "_maybe_surrender_by_rules",
                          return_value=None),
             patch.object(FSM_action, "_maybe_concede", return_value=False),
-            patch.object(FSM_action, "_report_automation_diagnostic"),
-            patch.object(FSM_action.manual_controller, "output"),
+            (nullcontext() if report_diagnostics
+             else patch.object(FSM_action, "_report_automation_diagnostic")),
+            patch.object(FSM_action.manual_controller, "output") as output,
             patch.object(FSM_action, "_sleep_with_delay") as sleep,
             patch.object(FSM_action.time, "monotonic", return_value=now),
             patch.object(FSM_action, "end_turn_button_present", probe,
                          create=True),
         ):
             result = FSM_action.run_automatic_battle_step()
+        self.outputs = [call.args[0] for call in output.call_args_list]
         return result, sleep
 
+
+class TurnStartGateTests(_TurnGateFixture):
     def test_recommendation_is_blocked_until_end_turn_is_visible(self):
         probe = Mock(return_value=False)
         clock = [0.0]
@@ -150,6 +208,58 @@ class TurnStartGateTests(unittest.TestCase):
         self.assertEqual(1, self.flow.calls)
         self.assertEqual(
             frozenset((ActionKind.USE_ABILITY,)),
+            self.flow.allowed_actions[0],
+        )
+
+
+class ChoicePanelGateTests(_TurnGateFixture):
+    """「进行选择」面板盖住右侧按钮：不能干等，要放行选项点击。"""
+
+    def test_choice_panel_opens_the_gate_for_option_clicks(self):
+        self._open_choice_panel()
+
+        result, _ = self._step(Mock(return_value=False), 0.0)
+
+        self.assertIsNone(result)
+        self.assertEqual(1, self.flow.calls)
+        self.assertEqual(
+            frozenset((ActionKind.USE_ABILITY, ActionKind.CHOOSE_DISCOVER,
+                       ActionKind.ASSEMBLE_CHOICE)),
+            self.flow.allowed_actions[0],
+        )
+
+    def test_pending_choice_panel_opens_the_gate_too(self):
+        # 选项行先到、ChoiceCardMgr BEGIN 后到：这期间也要放行。
+        self._open_choice_panel(ready=False)
+
+        self._step(Mock(return_value=False), 0.0)
+
+        self.assertIn(ActionKind.CHOOSE_DISCOVER,
+                      self.flow.allowed_actions[0])
+
+    def test_choice_panel_diagnostic_mentions_the_covered_button(self):
+        self._open_choice_panel()
+
+        self._step(Mock(return_value=False), 0.0, report_diagnostics=True)
+
+        self.assertTrue(any("「进行选择」面板" in message
+                            for message in self.outputs))
+
+    def test_no_choice_panel_keeps_the_plain_gate(self):
+        self._step(Mock(return_value=False), 0.0)
+
+        self.assertEqual(frozenset((ActionKind.USE_ABILITY,)),
+                         self.flow.allowed_actions[0])
+
+
+class LocalFlowChoiceGateTests(_TurnGateFixture):
+    box_ai = False
+
+    def test_local_strategy_may_click_the_choice_menu(self):
+        self._step(Mock(return_value=False), 0.0)
+
+        self.assertEqual(
+            frozenset((ActionKind.USE_ABILITY, ActionKind.CHOOSE_DISCOVER)),
             self.flow.allowed_actions[0],
         )
 
