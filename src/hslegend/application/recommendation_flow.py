@@ -65,6 +65,10 @@ class PendingRecommendationAction:
     before_state: object
     before_revision: int
     phase: str = "await_action_confirmation"
+    # 已重试次数（同一个待确认动作）：到上限后只等盒子更新推荐，不再重击。
+    attempts: int = 0
+    # 到这个时刻（monotonic）仍未确认，就认为这次点击被客户端丢掉了。
+    deadline: float = 0.0
 
 
 class RecommendationFlow:
@@ -76,7 +80,9 @@ class RecommendationFlow:
                  post_action_pause=None,
                  hand_animation_delay=None,
                  draw_extra_delay_per_card=0.0,
-                 unconfirmed_retry_delay=3.0):
+                 unconfirmed_retry_delay=3.0,
+                 pending_timeout=3.0,
+                 max_pending_retries=2):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -107,6 +113,14 @@ class RecommendationFlow:
         self.draw_extra_delay_per_card = float(draw_extra_delay_per_card or 0.0)
         self.unconfirmed_retry_delay = max(
             0.0, float(unconfirmed_retry_delay or 0.0))
+        # 待确认动作的等待上限：点击发出后客户端可能还在播动画，InputManager
+        # 会把这一下直接丢掉（实测日志 "You clicked on something that is not
+        # being handled by InputManager"）。没有上限时 pending 会一直等下去，
+        # 同一段推荐每 0.3s 刷一遍，整回合卡死（用户 2026-10-30 实测）。
+        # 超过 pending_timeout 仍未确认就按「这一下没生效」重试，最多重试
+        # max_pending_retries 次；之后只等盒子更新推荐，不再重击。
+        self.pending_timeout = max(0.0, float(pending_timeout or 0.0))
+        self.max_pending_retries = max(0, int(max_pending_retries or 0))
         self._seen_entry_count = None
         # 免费那张只让给“我方这个回合还没执行过动作时”出现的第一次手牌增加，
         # 这样 Power.log 晚几拍、出牌抽到的牌先被看到时，也不会被误当成免费那张。
@@ -213,12 +227,15 @@ class RecommendationFlow:
             # 连续 3090 次 choose_one_name_not_unique 却一条原文都没留下的情况，
             # 就是因为这行原来打在适配之后。
             self._note_readable_recommendation()
-            print(f"[推荐] {proposed.normalized_instruction}")
-            raw_text = getattr(proposed, "raw_instruction", "") or ""
-            if raw_text and raw_text != proposed.normalized_instruction:
-                for line in raw_text.splitlines():
-                    if line.strip():
-                        print(f"[推荐] 原文：{line.strip()}")
+            pending = self.pending_action
+            same_pending = self._matches_pending(pending, proposed)
+            if not same_pending:
+                print(f"[推荐] {proposed.normalized_instruction}")
+                raw_text = getattr(proposed, "raw_instruction", "") or ""
+                if raw_text and raw_text != proposed.normalized_instruction:
+                    for line in raw_text.splitlines():
+                        if line.strip():
+                            print(f"[推荐] 原文：{line.strip()}")
             if proposed.action == ActionKind.MULLIGAN:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
@@ -227,11 +244,9 @@ class RecommendationFlow:
                     and proposed.action not in allowed_action_kinds):
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE, "turn_not_ready")
-            pending = self.pending_action
+            next_attempts = 0
             if pending is not None:
-                if (pending.turn_number != proposed.turn_number
-                        or pending.instruction
-                        != proposed.normalized_instruction):
+                if not same_pending:
                     self._clear_pending()
                 else:
                     confirmed = (
@@ -244,11 +259,26 @@ class RecommendationFlow:
                             pending.target_entity_id,
                         )
                     )
-                    diagnostic = (
-                        "waiting_recommendation_update"
-                        if confirmed else "awaiting_action_confirmation"
-                    )
-                    return FlowStepResult(FlowStepStatus.OBSERVE, diagnostic)
+                    if confirmed:
+                        return FlowStepResult(
+                            FlowStepStatus.OBSERVE,
+                            "waiting_recommendation_update")
+                    if (self.pending_timeout > 0
+                            and self.clock() >= pending.deadline
+                            and pending.attempts < self.max_pending_retries):
+                        # 点击没被客户端处理（动画期 InputManager 会直接丢弃）：
+                        # 解除消费标记后按同一条推荐重新执行一次。
+                        next_attempts = pending.attempts + 1
+                        self.consumed.discard(
+                            self._pending_consumed_key(pending))
+                        self._announce(
+                            f"[SYS] 动作 {self.pending_timeout:.0f}s 未确认，"
+                            f"重新执行（第 {next_attempts} 次）")
+                        self._clear_pending()
+                    else:
+                        return FlowStepResult(
+                            FlowStepStatus.OBSERVE,
+                            "awaiting_action_confirmation")
             adapted = self.adapter(proposed, state)
             fresh_state, fresh_revision = self._wait_for_hand_animation()
             if self.stopped():
@@ -281,7 +311,8 @@ class RecommendationFlow:
             if not result.executed:
                 if defer_consumption:
                     return self._retry("execution_failed")
-                self._set_pending(proposed, adapted, fresh_state, fresh_revision)
+                self._set_pending(proposed, adapted, fresh_state, fresh_revision,
+                                  attempts=next_attempts)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
             # 本回合已经动过手：之后再出现的手牌增加都是“操作触发的抽牌”，
@@ -353,7 +384,8 @@ class RecommendationFlow:
                             FlowStepStatus.OBSERVE,
                             "waiting_recommendation_update")
                     return self._retry("result_not_confirmed")
-                self._set_pending(proposed, adapted, fresh_state, fresh_revision)
+                self._set_pending(proposed, adapted, fresh_state, fresh_revision,
+                                  attempts=next_attempts)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE,
                     "waiting_recommendation_update"
@@ -524,7 +556,26 @@ class RecommendationFlow:
             return ResultStatus.WAITING_RECOMMENDATION
         return ResultStatus.UNCONFIRMED
 
-    def _set_pending(self, proposed, adapted, before_state, before_revision):
+    @staticmethod
+    def _matches_pending(pending, proposed) -> bool:
+        """当前读取到的推荐是不是待确认的那一条（同回合、同指令）。"""
+        return (pending is not None
+                and pending.turn_number == proposed.turn_number
+                and pending.instruction == proposed.normalized_instruction)
+
+    @staticmethod
+    def _pending_consumed_key(pending) -> tuple:
+        """与 ConsumedActionStore.key_for 同构，用来在重试前解除消费标记。"""
+        return (
+            pending.turn_number,
+            pending.instruction,
+            pending.source_entity_id,
+            pending.target_entity_id,
+            pending.postcondition,
+        )
+
+    def _set_pending(self, proposed, adapted, before_state, before_revision,
+                     attempts=0):
         self.pending_action = PendingRecommendationAction(
             instruction=proposed.normalized_instruction,
             turn_number=proposed.turn_number,
@@ -534,6 +585,8 @@ class RecommendationFlow:
             postcondition=adapted.postcondition,
             before_state=before_state,
             before_revision=before_revision,
+            attempts=attempts,
+            deadline=self.clock() + self.pending_timeout,
         )
 
     def _clear_pending(self):

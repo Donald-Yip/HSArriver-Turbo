@@ -2500,7 +2500,12 @@ def run_automatic_battle_step():
         _do_concede()
         # 认输后不立即返回结算，等上面 is_end 分支（日志 COMPLETE）再计数。
         return None
-    _report_automation_diagnostic("my_turn", "轮到己方操作：开始读取推荐……")
+    # 待确认动作等待期间不重复报「轮到己方操作」：否则会把上一轮的诊断码顶掉，
+    # 「等待动作结果确认」每 0.3s 重打一遍，浮窗被同四行刷屏（用户 2026-10-30
+    # 反馈）。待确认由 RecommendationFlow 自己按超时重试/等盒子更新。
+    if getattr(recommendation_flow, "pending_action", None) is None:
+        _report_automation_diagnostic(
+            "my_turn", "轮到己方操作：开始读取推荐……")
     if recommendation_flow is None:
         return run_manual_battle_step()
 

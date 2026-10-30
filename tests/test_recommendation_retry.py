@@ -114,6 +114,27 @@ class AcceptingValidator:
         return SimpleNamespace(accepted=True, value=(adapted, "k"))
 
 
+class ConsumedAwareValidator:
+    """与 RecommendationValidator 一样拒绝重复消费，供超时重试测试使用。"""
+
+    def validate(self, proposed, adapted, *args, **kwargs):
+        consumed = args[6]
+        key = (proposed.turn_number, proposed.normalized_instruction,
+               adapted.source_entity_id, adapted.target_entity_id,
+               adapted.postcondition)
+        if consumed.contains(key):
+            return SimpleNamespace(accepted=False, code="already_consumed")
+        return SimpleNamespace(accepted=True, value=(adapted, key))
+
+
+class FakeClock:
+    def __init__(self, now=100.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
 class RecordingController:
     def __init__(self):
         self.executed = []
@@ -134,15 +155,20 @@ def active_state(turn=5):
         my_locations=[], oppo_locations=[])
 
 
-def build_flow(reader, adapter=None, turn=5, controller=None, sleep=None):
+def build_flow(reader, adapter=None, turn=5, controller=None, sleep=None,
+               clock=None, validator=None):
+    kwargs = {}
+    if clock is not None:
+        kwargs["clock"] = clock
     return RecommendationFlow(
         capture=CyclingCapture(), reader=reader,
         parser=RecommendationParser(),
         state_supplier=lambda: (active_state(turn), 10),
         adapter=adapter or ExplodingAdapter(),
-        validator=AcceptingValidator(),
+        validator=validator or AcceptingValidator(),
         controller=controller or RecordingController(),
-        sleep=sleep or (lambda _s: None))
+        sleep=sleep or (lambda _s: None),
+        **kwargs)
 
 
 def run_step(flow):
@@ -249,6 +275,48 @@ class RecommendationRetryTests(unittest.TestCase):
                             for result in results))
         self.assertEqual("awaiting_action_confirmation",
                          results[-1].diagnostics)
+
+    def test_unconfirmed_action_retries_after_timeout_then_stops(self):
+        """点击被客户端丢掉（动画期 InputManager 不处理）时不能无限等。"""
+        clock = FakeClock()
+        controller = RecordingController()
+        flow = build_flow(
+            ScriptedReader(["结束回合"]),
+            adapter=AcceptingAdapter(),
+            controller=controller,
+            clock=clock,
+            validator=ConsumedAwareValidator(),
+        )
+
+        first = run_step(flow)[0]
+        self.assertEqual(FlowStepStatus.OBSERVE, first.status)
+        self.assertEqual(1, len(controller.executed))
+        self.assertEqual(0, flow.pending_action.attempts)
+
+        clock.now += 3.0
+        second = run_step(flow)[0]
+        self.assertEqual("awaiting_action_confirmation", second.diagnostics)
+        self.assertEqual(2, len(controller.executed))
+        self.assertEqual(1, flow.pending_action.attempts)
+
+        clock.now += 3.0
+        run_step(flow)
+        self.assertEqual(3, len(controller.executed))
+        self.assertEqual(2, flow.pending_action.attempts)
+
+        clock.now += 3.0
+        capped = run_step(flow)[0]
+        self.assertEqual("awaiting_action_confirmation", capped.diagnostics)
+        self.assertEqual(3, len(controller.executed))
+
+    def test_pending_wait_logs_recommendation_once(self):
+        flow = build_flow(ScriptedReader(["结束回合"]),
+                          adapter=AcceptingAdapter())
+
+        outputs = [run_step(flow)[1] for _ in range(6)]
+
+        self.assertEqual(1, sum(o.count("[推荐] 结束回合") for o in outputs))
+        self.assertEqual(1, sum(o.count("[执行] 开始点击。") for o in outputs))
 
     def test_changed_recommendation_clears_pending_without_replaying_old_action(self):
         reader = ScriptedReader(["结束回合"])

@@ -128,6 +128,27 @@ immediate result is not observable. The same recommendation is never replayed
 while pending. Ctrl+Q uses the shared shutdown event and is checked between
 coordinate clicks and cancellable delays.
 
+## Follow-up: Bounded Pending Confirmation
+
+Field evidence on 2026-10-30: an attack click sent while the client was still
+animating the previous attack was dropped by the client (`You clicked on
+something that is not being handled by InputManager`), so `Power.log` never
+showed the attack. The pending state then waited forever, re-reading the same
+recommendation and logging the same lines every 0.3s until the turn ended.
+
+Pending confirmation is now bounded: if the same recommendation is still on
+screen three seconds after the pending state starts and the action's
+postcondition is not observable, the consumption mark is discarded and the
+action is re-dispatched (at most two retries). This is safe because the click
+was demonstrably not processed; a click that did land leaves `Power.log` or
+panel evidence within that window. After the retry budget is spent the flow
+keeps waiting for the panel update without re-clicking.
+
+The repeated log lines are also deduplicated: the recommendation is printed
+once per pending episode, and `FSM_action` stops reporting `my_turn` while a
+pending action exists so `awaiting_action_confirmation` keeps its diagnostic
+dedupe.
+
 
 ## Follow-up: Rewind, Assembly, And Feedback Noise
 
