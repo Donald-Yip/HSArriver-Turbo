@@ -92,8 +92,11 @@ class AssembleChoiceTests(unittest.TestCase):
         self.assertTrue(result.executed, result.message)
         self.assertEqual([2], clicks.events)
 
-    def test_assembly_gesture_clicks_the_four_green_box_centers(self):
-        expected = ((514, 481), (514, 595), (1329, 481), (1329, 595))
+    def test_assembly_gesture_clicks_choice_then_yellow_confirm(self):
+        choices = ((514, 481), (514, 595), (1329, 481), (1329, 595))
+        expected = []
+        for point in choices:
+            expected.extend((point, (945, 787)))
         clicked = []
         with (
             patch.object(hearthstone_click, "rand_sleep"),
@@ -103,7 +106,7 @@ class AssembleChoiceTests(unittest.TestCase):
             for index in range(4):
                 hearthstone_click.choose_assemble_card(index)
 
-        self.assertEqual(list(expected), clicked)
+        self.assertEqual(expected, clicked)
 
     def test_invalid_assembly_phrases_fail_before_clicking(self):
         from src.parser.recommendation_parser import RecommendationParseError

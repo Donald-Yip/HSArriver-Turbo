@@ -477,14 +477,18 @@ ASSEMBLE_CARD_POINTS = (
     (1329, 481),  # 右一
     (1329, 595),  # 右二
 )
+# 选中绿色选项后，底部「拼装」会亮成黄色；必须再点它才会提交。
+ASSEMBLE_CONFIRM_POINT = (945, 787)
 
 
 def choose_assemble_card(choice_index):
-    """点拼装面板四个绿色选项框之一（0 基）。"""
+    """点拼装选项并确认：绿色选项 → 黄色「拼装」按钮。"""
     assert 0 <= choice_index < len(ASSEMBLE_CARD_POINTS)
     rand_sleep(OPERATE_INTERVAL)
     x, y = ASSEMBLE_CARD_POINTS[choice_index]
     left_click(x, y)
+    rand_sleep(OPERATE_INTERVAL)
+    left_click(*ASSEMBLE_CONFIRM_POINT)
 
 
 def choose_discover_card(choice_index, choice_count):
