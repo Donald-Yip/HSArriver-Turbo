@@ -96,7 +96,7 @@ class AssembleChoiceTests(unittest.TestCase):
         choices = ((514, 481), (514, 595), (1329, 481), (1329, 595))
         expected = []
         for point in choices:
-            expected.extend((point, (945, 787)))
+            expected.extend((point, (932, 800)))
         clicked = []
         with (
             patch.object(hearthstone_click, "rand_sleep"),

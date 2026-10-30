@@ -478,7 +478,7 @@ ASSEMBLE_CARD_POINTS = (
     (1329, 595),  # 右二
 )
 # 选中绿色选项后，底部「拼装」会亮成黄色；必须再点它才会提交。
-ASSEMBLE_CONFIRM_POINT = (945, 787)
+ASSEMBLE_CONFIRM_POINT = (932, 800)
 
 
 def choose_assemble_card(choice_index):
