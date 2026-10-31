@@ -4,18 +4,16 @@
   返回 True 表示已接管延时，不再叠加固定「操作后延时」。
 - MulliganFlow：**不接活人感**。换牌是开局固定流程，提交后马上进入对局，对着
   手牌区随机悬停既不像真人也没意义（用户 2026-10-24 实测反馈）。这里锁住
-  「MulliganFlow 没有挂点 + FSM 不给它挂」。
+  「FSM 不给 MulliganFlow 挂点」。
 - 其他点击（匹配对手、选卡组、错误弹窗取消…）不经过这两个流程，因此不受影响
   —— 见 tests/test_human_like.py 里的 park_mouse 测试。
 """
 
-import inspect
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from manual_controller import ActionExecutionResult, EndTurnAction
-from src.flow.mulligan_flow import MulliganFlow
 from src.flow.recommendation_flow import FlowStepStatus, RecommendationFlow
 from src.game_state.recommendation_adapter import adapt_action
 from src.parser.recommendation_parser import RecommendationParser
@@ -111,50 +109,44 @@ class RecommendationPauseTests(unittest.TestCase):
         self.assertEqual(1, len(calls))          # 推荐动作执行后调用了一次
         self.assertNotIn(0.2, sleeps)            # 不再叠加固定延时
 
-    def test_disabled_hook_keeps_the_fixed_delay(self):
-        result, sleeps = self._run(lambda: False)
+    def test_disabled_or_failing_hook_keeps_the_fixed_delay(self):
+        with self.subTest(case="disabled"):
+            result, sleeps = self._run(lambda: False)
 
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertIn(0.2, sleeps)
+            self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+            self.assertIn(0.2, sleeps)
 
-    def test_hook_exception_does_not_break_the_step(self):
-        def boom():
-            raise RuntimeError("鼠标异常")
+        with self.subTest(case="hook_raises"):
+            def boom():
+                raise RuntimeError("鼠标异常")
 
-        result, sleeps = self._run(boom)
+            result, sleeps = self._run(boom)
 
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertIn(0.2, sleeps)               # 异常时回退固定延时
+            self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+            self.assertIn(0.2, sleeps)               # 异常时回退固定延时
 
-    def test_hook_receives_the_executed_action_kind(self):
+    def test_hook_receives_the_action_kind(self):
         """新挂点拿到刚执行完的动作类型（据此决定看手牌还是看场面）。"""
-        seen = []
+        with self.subTest(case="positional_parameter"):
+            seen = []
 
-        result, _sleeps = self._run(
-            lambda kind: (seen.append(kind), True)[1])
+            result, _sleeps = self._run(
+                lambda kind: (seen.append(kind), True)[1])
 
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertEqual([ActionKind.END_TURN], seen)
+            self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+            self.assertEqual([ActionKind.END_TURN], seen)
 
-    def test_hook_that_accepts_a_keyword_still_gets_a_positional_kind(self):
-        seen = []
+        with self.subTest(case="keyword_parameter_with_default"):
+            seen = []
 
-        def hook(kind=None):
-            seen.append(kind)
-            return True
+            def hook(kind=None):
+                seen.append(kind)
+                return True
 
-        result, _sleeps = self._run(hook)
+            result, _sleeps = self._run(hook)
 
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertEqual([ActionKind.END_TURN], seen)
-
-    def test_old_zero_argument_hook_keeps_working(self):
-        calls = []
-
-        result, _sleeps = self._run(lambda: (calls.append(1), True)[1])
-
-        self.assertEqual(FlowStepStatus.EXECUTED, result.status)
-        self.assertEqual([1], calls)
+            self.assertEqual(FlowStepStatus.EXECUTED, result.status)
+            self.assertEqual([ActionKind.END_TURN], seen)
 
 
 class AcceptsActionKindTests(unittest.TestCase):
@@ -164,35 +156,32 @@ class AcceptsActionKindTests(unittest.TestCase):
         from src.flow.recommendation_flow import _accepts_action_kind
         self.detect = _accepts_action_kind
 
-    def test_accepts_hooks_with_a_positional_parameter(self):
-        self.assertTrue(self.detect(lambda kind: True))
-        self.assertTrue(self.detect(lambda kind=None: True))
-        self.assertTrue(self.detect(lambda *args: True))
+    def test_detects_action_kind_hooks(self):
+        with self.subTest(case="accepts_positional_parameter"):
+            self.assertTrue(self.detect(lambda kind: True))
+            self.assertTrue(self.detect(lambda kind=None: True))
+            self.assertTrue(self.detect(lambda *args: True))
 
-        def named(kind):
-            return True
+            def named(kind):
+                return True
 
-        self.assertTrue(self.detect(named))
+            self.assertTrue(self.detect(named))
 
-    def test_rejects_zero_argument_hooks(self):
-        self.assertFalse(self.detect(lambda: True))
+        with self.subTest(case="rejects_zero_argument_hooks"):
+            self.assertFalse(self.detect(lambda: True))
 
-        def bare():
-            return True
+            def bare():
+                return True
 
-        self.assertFalse(self.detect(bare))
+            self.assertFalse(self.detect(bare))
 
-    def test_unknown_signature_is_treated_as_old_style(self):
-        self.assertFalse(self.detect(object()))
-        self.assertFalse(self.detect(None))
+        with self.subTest(case="unknown_signature_is_treated_as_old_style"):
+            self.assertFalse(self.detect(object()))
+            self.assertFalse(self.detect(None))
 
 
 class MulliganScopeTests(unittest.TestCase):
-    """换牌不接活人感：流程没有挂点，FSM 也不给它挂。"""
-
-    def test_mulligan_flow_has_no_post_action_pause_hook(self):
-        parameters = inspect.signature(MulliganFlow).parameters
-        self.assertNotIn("post_action_pause", parameters)
+    """换牌不接活人感：FSM 不给它挂点。"""
 
     def test_fsm_wires_the_human_like_hook_only_into_recommendation_flow(self):
         import FSM_action

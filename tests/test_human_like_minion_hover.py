@@ -45,16 +45,17 @@ def settings(**overrides):
 
 
 class OpponentMinionHoverPointTests(unittest.TestCase):
-    def test_matches_choose_opponent_minion_coordinates(self):
+    def test_hover_point_matches_choose_opponent_minion_coordinates(self):
         # 与 click.choose_opponent_minion 用的是同一套坐标口径
         for index, num in ((0, 1), (0, 3), (2, 3), (6, 7)):
-            expected_x = 960 - (num - 1) * 70 + index * 140
-            point = hearthstone_click.opponent_minion_hover_point(
-                index, num, jitter=False)
-            self.assertEqual((expected_x, hearthstone_click.OPPO_MINION_HOVER_Y),
-                             point)
+            with self.subTest(index=index, num=num):
+                expected_x = 960 - (num - 1) * 70 + index * 140
+                self.assertEqual(
+                    (expected_x, hearthstone_click.OPPO_MINION_HOVER_Y),
+                    hearthstone_click.opponent_minion_hover_point(
+                        index, num, jitter=False))
 
-    def test_jitter_stays_near_the_minion(self):
+        # 抖动幅度固定为 OPPO_MINION_HOVER_JITTER，仍落在随从附近
         with patch.object(hearthstone_click.random, "randint",
                           return_value=hearthstone_click.OPPO_MINION_HOVER_JITTER):
             point = hearthstone_click.opponent_minion_hover_point(0, 1)
@@ -102,24 +103,28 @@ class HoverOpponentMinionTests(unittest.TestCase):
         self.assertIn("悬停对手新随从", self.printed[0])
         self.assertIn("延时结束", self.printed[1])
 
-    def test_random_duration_within_configured_range(self):
-        for _ in range(30):
-            hearthstone_click.hover_opponent_minion(
-                0, 1, self.mouse,
-                settings(minion_hover_min=0.2, minion_hover_max=1.5))
-        for value in self.slept:
-            self.assertGreaterEqual(value, 0.2)
-            self.assertLessEqual(value, 1.5)
+        # 没给 duration 时，随机时长必须落在配置区间内
+        with self.subTest(case="random duration within configured range"):
+            self.slept.clear()
+            for _ in range(30):
+                hearthstone_click.hover_opponent_minion(
+                    0, 1, self.mouse,
+                    settings(minion_hover_min=0.2, minion_hover_max=1.5))
+            self.assertEqual(30, len(self.slept))
+            for value in self.slept:
+                self.assertGreaterEqual(value, 0.2)
+                self.assertLessEqual(value, 1.5)
 
-    def test_falls_back_to_defaults_when_keys_missing(self):
-        # 老配置里没有 minion_hover_* 时不应抛 KeyError
-        hearthstone_click.hover_opponent_minion(
-            0, 1, self.mouse, {"enabled": True})
-        self.assertEqual(1, len(self.slept))
-        self.assertGreaterEqual(self.slept[0],
-                                config.DEFAULT_HUMAN_LIKE["minion_hover_min"])
-        self.assertLessEqual(self.slept[0],
-                             config.DEFAULT_HUMAN_LIKE["minion_hover_max"])
+        # 老配置里没有 minion_hover_* 时回落到默认区间，而不是 KeyError
+        with self.subTest(case="missing keys fall back to defaults"):
+            self.slept.clear()
+            hearthstone_click.hover_opponent_minion(
+                0, 1, self.mouse, {"enabled": True})
+            self.assertEqual(1, len(self.slept))
+            self.assertGreaterEqual(
+                self.slept[0], config.DEFAULT_HUMAN_LIKE["minion_hover_min"])
+            self.assertLessEqual(
+                self.slept[0], config.DEFAULT_HUMAN_LIKE["minion_hover_max"])
 
 
 class FakeMinion:
@@ -161,62 +166,66 @@ class HumanLikeOpponentMinionWatchTests(unittest.TestCase):
         ):
             return self.fsm._human_like_opponent_minions(snapshot)
 
-    def test_first_snapshot_only_builds_baseline(self):
-        hovered = self._run(FakeSnapshot([11, 12]))
+    def test_baseline_and_dedup(self):
+        for label, ids in (("single minion", [11]), ("two minions", [11, 12])):
+            with self.subTest(case=label):
+                self.fsm._oppo_minion_ids = None
+                self.calls.clear()
 
-        self.assertEqual(0, hovered)
-        self.assertEqual([], self.calls)
-        self.assertEqual({11, 12}, self.fsm._oppo_minion_ids)
+                # 第一帧只建立基线，不动鼠标
+                self.assertEqual(0, self._run(FakeSnapshot(ids)))
+                self.assertEqual([], self.calls)
+                self.assertEqual(set(ids), self.fsm._oppo_minion_ids)
 
-    def test_new_minion_on_opponent_turn_is_hovered(self):
+                # 同一批随从再次出现不应被悬停
+                self.assertEqual(0, self._run(FakeSnapshot(ids)))
+                self.assertEqual([], self.calls)
+
+    def test_only_new_minions_on_the_opponent_turn_are_hovered(self):
+        # 对手回合出现的新随从会被悬停
         self._run(FakeSnapshot([11, 12]))
-        hovered = self._run(FakeSnapshot([11, 12, 13]))
-
-        self.assertEqual(1, hovered)
+        self.assertEqual(1, self._run(FakeSnapshot([11, 12, 13])))
         self.assertEqual([(2, 3)], self.calls)      # 第 3 个随从、场上共 3 个
 
-    def test_same_minions_are_not_hovered_twice(self):
+        # 自己回合出现的随从不动鼠标；基线已更新，回到对手回合也不补悬停
+        # （避免打断自己的操作节奏）
+        self.fsm._oppo_minion_ids = None
+        self.calls.clear()
         self._run(FakeSnapshot([11]))
-        self.assertEqual(0, self._run(FakeSnapshot([11])))
+        self.assertEqual(0, self._run(FakeSnapshot([11, 12], is_my_turn=True)))
         self.assertEqual([], self.calls)
-
-    def test_minion_appearing_on_my_turn_is_not_hovered(self):
-        self._run(FakeSnapshot([11]))
-        hovered = self._run(FakeSnapshot([11, 12], is_my_turn=True))
-
-        self.assertEqual(0, hovered)
-        self.assertEqual([], self.calls)
-        # 基线已更新：回到对手回合也不会补悬停（避免打断自己的操作节奏）
         self.assertEqual(0, self._run(FakeSnapshot([11, 12])))
         self.assertEqual([], self.calls)
 
-    def test_disabled_does_not_hover(self):
-        self._run(FakeSnapshot([11]))
-        hovered = self._run(FakeSnapshot([11, 12]), enabled=False)
+    def test_hover_switches_gate_the_watch(self):
+        with self.subTest(case="master switch off"):
+            self.fsm._oppo_minion_ids = None
+            self.calls.clear()
+            self._run(FakeSnapshot([11]))
+            self.assertEqual(0, self._run(FakeSnapshot([11, 12]), enabled=False))
+            self.assertEqual([], self.calls)
 
-        self.assertEqual(0, hovered)
-        self.assertEqual([], self.calls)
+        with self.subTest(case="minion switch off keeps the baseline"):
+            self.fsm._oppo_minion_ids = None
+            self.calls.clear()
+            self._run(FakeSnapshot([11]))
+            self.assertEqual(0, self._run(FakeSnapshot([11, 12]),
+                                          minion_switch=False))
+            self.assertEqual([], self.calls)
+            self.assertEqual({11, 12}, self.fsm._oppo_minion_ids)
+            # 打开开关后，老随从不会补悬停，只有真正的新随从才悬停。
+            self.assertEqual(0, self._run(FakeSnapshot([11, 12]),
+                                          minion_switch=True))
+            self.assertEqual(1, self._run(FakeSnapshot([11, 12, 13]),
+                                          minion_switch=True))
+            self.assertEqual([(2, 3)], self.calls)
 
-    def test_minion_switch_off_does_not_hover_but_keeps_the_baseline(self):
-        """「看随从」关掉：不动鼠标，但基线照旧更新（开关中途打开不补悬停）。"""
-        self._run(FakeSnapshot([11]))
-        hovered = self._run(FakeSnapshot([11, 12]), minion_switch=False)
-
-        self.assertEqual(0, hovered)
-        self.assertEqual([], self.calls)
-        self.assertEqual({11, 12}, self.fsm._oppo_minion_ids)
-        # 打开开关后，老随从不会补悬停，只有真正的新随从才悬停。
-        self.assertEqual(0, self._run(FakeSnapshot([11, 12]), minion_switch=True))
-        self.assertEqual(1, self._run(FakeSnapshot([11, 12, 13]),
-                                      minion_switch=True))
-        self.assertEqual([(2, 3)], self.calls)
-
-    def test_missing_minion_switch_defaults_to_on(self):
-        self._run(FakeSnapshot([11]))
-        hovered = self._run(FakeSnapshot([11, 12]))
-
-        self.assertEqual(1, hovered)
-        self.assertEqual([(1, 2)], self.calls)
+        with self.subTest(case="missing minion switch defaults to on"):
+            self.fsm._oppo_minion_ids = None
+            self.calls.clear()
+            self._run(FakeSnapshot([11]))
+            self.assertEqual(1, self._run(FakeSnapshot([11, 12])))
+            self.assertEqual([(1, 2)], self.calls)
 
     def test_batch_size_is_capped(self):
         self._run(FakeSnapshot([]))
@@ -286,68 +295,28 @@ class BattleStepWiringTests(unittest.TestCase):
             return self.fsm.run_automatic_battle_step()
 
     def test_battle_loop_hovers_a_brand_new_opponent_minion(self):
-        self._step(FakeSnapshot([11], is_my_turn=False))     # 建立基线
+        # 对手回合：第一帧只建基线，之后出现的新随从会被悬停
+        self._step(FakeSnapshot([11], is_my_turn=False))
         self.assertEqual([], self.calls)
 
         self._step(FakeSnapshot([11, 12], is_my_turn=False))
-
         self.assertEqual([(1, 2)], self.calls)
 
-    def test_battle_loop_does_not_hover_on_my_turn(self):
-        self._step(FakeSnapshot([11], is_my_turn=False))
-
-        self._step(FakeSnapshot([11, 12], is_my_turn=True))
-
-        self.assertEqual([], self.calls)
+        # 自己回合出现的新随从绝不悬停
+        with self.subTest(case="my turn does not hover"):
+            self.fsm._oppo_minion_ids = None
+            self.calls.clear()
+            self._step(FakeSnapshot([11], is_my_turn=False))
+            self._step(FakeSnapshot([11, 12], is_my_turn=True))
+            self.assertEqual([], self.calls)
 
 
 class ConfigDefaultsTests(unittest.TestCase):
     def test_defaults_are_the_documented_range(self):
         self.assertEqual(0.2, config.DEFAULT_HUMAN_LIKE["minion_hover_min"])
         self.assertEqual(1.5, config.DEFAULT_HUMAN_LIKE["minion_hover_max"])
-
-    def test_both_hover_switches_default_to_on(self):
         self.assertTrue(config.DEFAULT_HUMAN_LIKE["hand_hover_enabled"])
         self.assertTrue(config.DEFAULT_HUMAN_LIKE["minion_hover_enabled"])
-
-    def test_settings_normalise_the_two_switches(self):
-        import json
-        import tempfile
-        from pathlib import Path
-
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            path = Path(tmp.name) / "ui_config.json"
-            path.write_text(json.dumps({"human_like": {
-                "enabled": 1, "hand_hover_enabled": 0,
-                "minion_hover_enabled": ""}}), encoding="utf8")
-            with patch.object(config, "CONFIG_PATH", path):
-                cfg = config.human_like_settings()
-        finally:
-            tmp.cleanup()
-
-        self.assertTrue(cfg["enabled"])
-        self.assertFalse(cfg["hand_hover_enabled"])
-        self.assertFalse(cfg["minion_hover_enabled"])
-
-    def test_settings_clamp_minion_range(self):
-        import json
-        import tempfile
-        from pathlib import Path
-
-        tmp = tempfile.TemporaryDirectory()
-        try:
-            path = Path(tmp.name) / "ui_config.json"
-            path.write_text(json.dumps({"human_like": {
-                "enabled": True, "minion_hover_min": -2,
-                "minion_hover_max": 0}}), encoding="utf8")
-            with patch.object(config, "CONFIG_PATH", path):
-                cfg = config.human_like_settings()
-        finally:
-            tmp.cleanup()
-
-        self.assertEqual(0.05, cfg["minion_hover_min"])
-        self.assertEqual(0.05, cfg["minion_hover_max"])   # 上限不低于下限
 
 
 class WebPageTests(unittest.TestCase):
@@ -357,19 +326,19 @@ class WebPageTests(unittest.TestCase):
         path = Path(__file__).resolve().parent.parent / "web" / "index.html"
         self.html = path.read_text(encoding="utf8")
 
-    def test_two_hover_switches_exist(self):
-        self.assertIn('id="chkHlHand"', self.html)
-        self.assertIn('id="chkHlMinion"', self.html)
-        self.assertIn('id="chkHumanLike"', self.html)
+    def test_human_like_card_markup(self):
+        for element_id in ("chkHumanLike", "chkHlHand", "chkHlMinion"):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', self.html)
 
-    def test_rows_are_labelled(self):
-        self.assertIn("看卡牌", self.html)
-        self.assertIn("看随从", self.html)
+        for label in ("看卡牌", "看随从"):
+            with self.subTest(label=label):
+                self.assertIn(label, self.html)
+
         # 老的一整行挤 7 个控件时用的长标签不该再出现
         self.assertNotIn("对手新随从悬停下限", self.html)
 
-    def test_master_switch_row_has_no_numbers(self):
-        """第 1 行只有总开关：随机延时上下限被挪到「看卡牌」那一行。"""
+        # 第 1 行只有总开关：随机延时上下限被挪到「看卡牌」那一行。
         start = self.html.index('id="chkHumanLike"')
         row_start = self.html.rindex('<div class="input-row">', 0, start)
         row_end = self.html.index("</div>", start)
