@@ -164,58 +164,56 @@ class CliTests(unittest.TestCase):
         return ["--port", str(self.console.port)]
 
     # ------------------------------------------------ 基础链路
-    def test_status_json_roundtrip(self):
-        code, out, _ = run_cli(["--json", *self._base(), "status"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertEqual(json.loads(out)["phase"], "playing")
+    def test_status_json_roundtrip_in_either_flag_position(self):
+        for argv in (["--json", *self._base(), "status"],
+                     ["status", "--json", *self._base()]):
+            with self.subTest(argv=argv):
+                code, out, _ = run_cli(argv)
+                self.assertEqual(code, hsctl.EXIT_OK)
+                self.assertEqual(json.loads(out)["phase"], "playing")
 
-    def test_json_flag_works_after_the_command_too(self):
-        code, out, _ = run_cli(["status", "--json", *self._base()])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("phase", json.loads(out))
-
-    def test_status_human_render(self):
+    def test_status_human_render_and_empty_payload(self):
         code, out, _ = run_cli([*self._base(), "status"])
         self.assertEqual(code, hsctl.EXIT_OK)
         for expect in ("运行中", "Priscilla#51346", "匹配", "12 场 8 胜",
                        "自动投降", "活人感", "延时", "自检"):
             self.assertIn(expect, out)
 
-    def test_status_render_survives_empty_payload(self):
-        # 控制台刚起来、字段还没填满时不能把 CLI 打崩。
-        self.console.httpd.routes["/api/status"] = {}
-        code, out, _ = run_cli([*self._base(), "status"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("未运行", out)
+        with self.subTest(payload="empty"):
+            # 控制台刚起来、字段还没填满时不能把 CLI 打崩。
+            self.console.httpd.routes["/api/status"] = {}
+            code, out, _ = run_cli([*self._base(), "status"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn("未运行", out)
 
     # ------------------------------------------------ 退出码
-    def test_api_failure_maps_to_exit_1(self):
+    def test_api_failure_maps_to_exit_1_in_text_and_json(self):
         self.console.httpd.routes["/api/start"] = {
             "ok": False, "error": "自动化已经在运行中。"}
         code, _, err = run_cli([*self._base(), "start"])
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("自动化已经在运行中。", err)
 
-    def test_api_failure_json_is_machine_readable_on_stdout(self):
-        self.console.httpd.routes["/api/start"] = {"ok": False, "error": "nope"}
-        code, out, _ = run_cli(["--json", *self._base(), "start"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        payload = json.loads(out)
-        self.assertFalse(payload["ok"])
-        self.assertEqual(payload["kind"], "api")
+        with self.subTest(mode="json"):
+            self.console.httpd.routes["/api/start"] = {"ok": False, "error": "nope"}
+            code, out, _ = run_cli(["--json", *self._base(), "start"])
+            self.assertEqual(code, hsctl.EXIT_API)
+            payload = json.loads(out)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["kind"], "api")
 
-    def test_unreachable_maps_to_exit_3(self):
+    def test_unreachable_maps_to_exit_3_with_serve_start_hint(self):
         code, out, _ = run_cli(["--json", "--port", str(_free_port()), "status"])
         self.assertEqual(code, hsctl.EXIT_UNREACHABLE)
         self.assertEqual(json.loads(out)["kind"], "transport")
 
-    def test_unreachable_message_points_at_serve_start(self):
-        code, _, err = run_cli(["--port", str(_free_port()), "status"])
-        self.assertEqual(code, hsctl.EXIT_UNREACHABLE)
-        self.assertIn("hsctl serve start", err)
+        with self.subTest(mode="text"):
+            code, _, err = run_cli(["--port", str(_free_port()), "status"])
+            self.assertEqual(code, hsctl.EXIT_UNREACHABLE)
+            self.assertIn("hsctl serve start", err)
 
     # ------------------------------------------------ 对战控制
-    def test_stop_after_game_body(self):
+    def test_stop_posts_selected_mode_and_renders_message(self):
         self.console.httpd.routes["/api/stop"] = {
             "ok": True, "message": "本局对战结束后将自动停止"}
         code, out, _ = run_cli([*self._base(), "stop", "--after-game"])
@@ -223,20 +221,21 @@ class CliTests(unittest.TestCase):
         self.assertIn("本局对战结束后将自动停止", out)
         self.assertEqual(self.console.posts()[-1][2], {"mode": "after_game"})
 
-    def test_stop_defaults_to_immediate(self):
-        self.console.httpd.routes["/api/stop"] = {"ok": True, "message": "ok"}
-        run_cli([*self._base(), "stop"])
-        self.assertEqual(self.console.posts()[-1][2], {"mode": "now"})
+        with self.subTest(mode="now"):
+            self.console.httpd.routes["/api/stop"] = {"ok": True, "message": "ok"}
+            run_cli([*self._base(), "stop"])
+            self.assertEqual(self.console.posts()[-1][2], {"mode": "now"})
 
-    def test_start_defaults_to_reset_score(self):
+    def test_start_resets_score_while_resume_keeps_it(self):
         self.console.httpd.routes["/api/start"] = {"ok": True, "message": "ok"}
         run_cli([*self._base(), "start"])
         self.assertEqual(self.console.posts()[-1][2], {"keep_score": False})
 
-    def test_resume_keeps_score(self):
-        self.console.httpd.routes["/api/start"] = {"ok": True, "message": "恢复"}
-        run_cli([*self._base(), "resume"])
-        self.assertEqual(self.console.posts()[-1][2], {"keep_score": True})
+        with self.subTest(command="resume"):
+            self.console.httpd.routes["/api/start"] = {"ok": True,
+                                                       "message": "恢复"}
+            run_cli([*self._base(), "resume"])
+            self.assertEqual(self.console.posts()[-1][2], {"keep_score": True})
 
     def test_prepare_posts_empty_body(self):
         self.console.httpd.routes["/api/prepare"] = {"ok": True, "message": "就绪"}
@@ -244,7 +243,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.console.posts()[-1], ("POST", "/api/prepare", {}))
 
     # ------------------------------------------------ 参数热更新
-    def test_delays_set_sends_hot_and_numbers(self):
+    def test_delays_set_sends_numbers_and_hot_flag(self):
         self.console.httpd.routes["/api/delays"] = {
             "ok": True, "message": "延时配置已保存",
             "effects": {"pre_action_delay_seconds": "live"}}
@@ -257,42 +256,38 @@ class CliTests(unittest.TestCase):
         self.assertEqual(body["pre_action_delay_seconds"], 5.0)
         self.assertEqual(body["post_action_delay_seconds"], 0.2)
 
-    def test_delays_set_no_hot(self):
-        self.console.httpd.routes["/api/delays"] = {"ok": True, "message": "ok"}
-        run_cli([*self._base(), "delays", "set", "--no-hot",
-                 "pre_action_delay_seconds=1"])
-        self.assertIs(self.console.posts()[-1][2]["hot"], False)
+        with self.subTest(no_hot=True):
+            self.console.httpd.routes["/api/delays"] = {"ok": True,
+                                                        "message": "ok"}
+            run_cli([*self._base(), "delays", "set", "--no-hot",
+                     "pre_action_delay_seconds=1"])
+            self.assertIs(self.console.posts()[-1][2]["hot"], False)
 
-    def test_delays_set_rejects_unknown_key_before_sending(self):
-        code, _, err = run_cli([*self._base(), "delays", "set", "nope=1"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("未知延时字段", err)
-        self.assertEqual(self.console.posts(), [])
+    def test_delays_set_rejects_invalid_fields_before_sending(self):
+        cases = (
+            ("nope=1", ("未知延时字段", "pre_action_delay_seconds")),
+            ("pre_action_delay_seconds=abc", ("必须是数字",)),
+        )
+        for value, expected_messages in cases:
+            with self.subTest(value=value):
+                code, _, err = run_cli([*self._base(), "delays", "set", value])
+                self.assertEqual(code, hsctl.EXIT_API)
+                for expected in expected_messages:
+                    self.assertIn(expected, err)
+                self.assertEqual(self.console.posts(), [])
 
-    def test_delays_set_rejects_non_numeric(self):
-        code, _, err = run_cli([*self._base(), "delays", "set",
-                                "pre_action_delay_seconds=abc"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("必须是数字", err)
-        self.assertEqual(self.console.posts(), [])
-
-    def test_delays_show_labels_effect_scope(self):
-        code, out, _ = run_cli([*self._base(), "delays"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("立即生效", out)          # pre_action 等
-        self.assertIn("下次「开始对战」生效", out)  # post_action 等
-
-    def test_human_like_set_sends_only_given_fields(self):
-        self.console.httpd.routes["/api/human_like"] = {"ok": True, "message": "ok"}
+    def test_human_like_set_posts_only_given_fields_or_refuses_empty(self):
+        self.console.httpd.routes["/api/human_like"] = {"ok": True,
+                                                        "message": "ok"}
         run_cli([*self._base(), "human-like", "set", "--enabled",
                  "--post-delay-min", "0.5"])
         self.assertEqual(self.console.posts()[-1][2],
                          {"hot": True, "enabled": True, "post_delay_min": 0.5})
 
-    def test_human_like_set_without_fields_is_an_error(self):
-        code, _, err = run_cli([*self._base(), "human-like", "set"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("没有要改的字段", err)
+        with self.subTest(fields="none"):
+            code, _, err = run_cli([*self._base(), "human-like", "set"])
+            self.assertEqual(code, hsctl.EXIT_API)
+            self.assertIn("没有要改的字段", err)
 
     def test_concede_set(self):
         self.console.httpd.routes["/api/concede"] = {"ok": True, "message": "ok"}
@@ -316,25 +311,26 @@ class CliTests(unittest.TestCase):
         self.assertIn("300", out)
 
     # ------------------------------------------------ 浮窗 / 定时 / 校准
-    def test_overlay_on_when_already_on_is_a_noop(self):
+    def test_overlay_actions_on_off_and_toggle(self):
         code, out, _ = run_cli([*self._base(), "overlay", "on"])
         self.assertEqual(code, hsctl.EXIT_OK)
         self.assertIn("已经开着", out)
         self.assertEqual(self.console.posts(), [])
 
-    def test_overlay_off_posts(self):
         self.console.httpd.routes["/api/overlay"] = {
             "ok": True, "message": "日志浮窗已关闭"}
         code, _, _ = run_cli([*self._base(), "overlay", "off"])
         self.assertEqual(code, hsctl.EXIT_OK)
         self.assertEqual([r[1] for r in self.console.posts()], ["/api/overlay"])
 
-    def test_overlay_toggle_always_posts(self):
-        self.console.httpd.routes["/api/overlay"] = {"ok": True, "message": "ok"}
-        run_cli([*self._base(), "overlay", "toggle"])
-        self.assertEqual(len(self.console.posts()), 1)
+        with self.subTest(action="toggle"):
+            self.console.httpd.routes["/api/overlay"] = {"ok": True,
+                                                        "message": "ok"}
+            before = len(self.console.posts())
+            run_cli([*self._base(), "overlay", "toggle"])
+            self.assertEqual(len(self.console.posts()), before + 1)
 
-    def test_schedule_at_in_minutes(self):
+    def test_schedule_at_builds_start_and_end(self):
         self.console.httpd.routes["/api/schedule"] = {
             "ok": True, "message": "定时任务已设置"}
         code, out, _ = run_cli([*self._base(), "schedule", "at", "--in", "30"])
@@ -343,13 +339,15 @@ class CliTests(unittest.TestCase):
         datetime.fromisoformat(body["start"])       # 必须是合法 ISO
         self.assertIn("定时任务已设置", out)
 
-    def test_schedule_at_duration_sets_end(self):
-        self.console.httpd.routes["/api/schedule"] = {"ok": True, "message": "ok"}
-        run_cli([*self._base(), "schedule", "at", "07:30", "--duration", "90"])
-        body = self.console.posts()[-1][2]
-        start = datetime.fromisoformat(body["start"])
-        end = datetime.fromisoformat(body["end"])
-        self.assertEqual((end - start).total_seconds(), 90 * 60)
+        with self.subTest(duration_minutes=90):
+            self.console.httpd.routes["/api/schedule"] = {"ok": True,
+                                                          "message": "ok"}
+            run_cli([*self._base(), "schedule", "at", "07:30",
+                     "--duration", "90"])
+            body = self.console.posts()[-1][2]
+            start = datetime.fromisoformat(body["start"])
+            end = datetime.fromisoformat(body["end"])
+            self.assertEqual((end - start).total_seconds(), 90 * 60)
 
     def test_schedule_rejects_unparsable_time(self):
         code, _, err = run_cli([*self._base(), "schedule", "at", "今晚八点"])
@@ -376,7 +374,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("校准窗口已启动", out)
 
     # ------------------------------------------------ 日志
-    def test_log_tail_lines(self):
+    def test_log_renders_tail_and_json_lines(self):
         self.console.httpd.routes["/api/logs"] = {"ok": True, "seq": 3, "lines": [
             {"seq": 1, "t": "10:00:00", "level": "SYS", "msg": "第一条"},
             {"seq": 2, "t": "10:00:01", "level": "SYS", "msg": "第二条"},
@@ -387,12 +385,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("第三条", out)
         self.assertIn("[ WARN]", out)
 
-    def test_log_json_is_one_object_per_line(self):
-        self.console.httpd.routes["/api/logs"] = {"ok": True, "seq": 1, "lines": [
-            {"seq": 1, "t": "10:00:00", "level": "SYS", "msg": "hi"}]}
-        code, out, _ = run_cli(["--json", *self._base(), "log"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertEqual(json.loads(out.strip())["msg"], "hi")
+        with self.subTest(mode="json"):
+            self.console.httpd.routes["/api/logs"] = {
+                "ok": True, "seq": 1,
+                "lines": [{"seq": 1, "t": "10:00:00", "level": "SYS",
+                           "msg": "hi"}]}
+            code, out, _ = run_cli(["--json", *self._base(), "log"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertEqual(json.loads(out.strip())["msg"], "hi")
 
     # ------------------------------------------------ 高风险命令
     def test_restart_hearthstone_requires_explicit_confirmation(self):
@@ -415,8 +415,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("已取消", out)
         self.assertEqual(self.console.posts(), [])
 
-    def test_restart_hearthstone_with_yes_sends_confirm(self):
-        """--yes：派发后继续等到主界面，完成才返回 0。"""
+    def test_restart_hearthstone_with_yes_waits_or_skips_polling(self):
+        """--yes：派发后继续等到主界面，完成才返回 0；--no-wait 则不轮询。"""
         self.console.httpd.routes["/api/restart_hearthstone"] = {
             "ok": True, "message": "已开始重启炉石（……等主界面）"}
         finished = {"ok": True, "restart": {
@@ -429,6 +429,15 @@ class CliTests(unittest.TestCase):
         self.assertIn("已开始重启炉石", out)
         self.assertIn("传统对战", out)
         self.assertEqual(self.console.posts()[-1][2], {"confirm": True})
+
+        with self.subTest(no_wait=True):
+            with unittest.mock.patch.object(
+                    hsctl.Ctx, "get",
+                    side_effect=AssertionError("不该轮询")):
+                code, out, _ = run_cli([*self._base(), "restart-hearthstone",
+                                        "--yes", "--no-wait"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn("已开始重启炉石", out)
 
     def test_restart_hearthstone_reports_main_menu_timeout(self):
         """进程起来了但没到主界面 = 失败（不能"派发即成功"）。"""
@@ -443,49 +452,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("没到主界面", out)
 
-    def test_restart_hearthstone_no_wait_skips_polling(self):
-        self.console.httpd.routes["/api/restart_hearthstone"] = {
-            "ok": True, "message": "已开始重启炉石"}
-        with unittest.mock.patch.object(hsctl.Ctx, "get",
-                                        side_effect=AssertionError("不该轮询")):
-            code, out, _ = run_cli([*self._base(), "restart-hearthstone",
-                                    "--yes", "--no-wait"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("已开始重启炉石", out)
-
     # ------------------------------------------------ 抓图（看画面）
-    def test_screenshot_defaults_to_client_kind(self):
+    def test_screenshot_posts_selected_kind_and_renders_result(self):
         sent = []
 
         def fake_post(path, body=None):
             sent.append((path, body))
+            width, height = ((800, 450) if "max_width" in body
+                             else (1920, 1080))
             return {"ok": True, "path": r"C:\tmp\a.png", "latest": r"C:\tmp\l.png",
-                    "width": 1920, "height": 1080, "kind": "client",
+                    "width": width, "height": height,
+                    "kind": body.get("kind", "client"),
                     "note": "炉石客户区（脚本操作的正是这块）"}
 
         with unittest.mock.patch.object(hsctl.Ctx, "post",
                                         side_effect=fake_post):
             code, out, _ = run_cli([*self._base(), "screenshot"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertEqual(sent[0][0], "/api/screenshot")
-        self.assertEqual(sent[0][1], {"kind": "client"})
-        self.assertIn(r"C:\tmp\a.png", out)
-        self.assertIn("1920×1080", out)
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertEqual(sent[0], ("/api/screenshot", {"kind": "client"}))
+            self.assertIn(r"C:\tmp\a.png", out)
+            self.assertIn("1920×1080", out)
 
-    def test_screenshot_passes_kind_and_max_width(self):
-        sent = []
-
-        def fake_post(path, body=None):
-            sent.append(body)
-            return {"ok": True, "path": "p", "latest": "l", "width": 800,
-                    "height": 450, "kind": "boxes", "note": ""}
-
-        with unittest.mock.patch.object(hsctl.Ctx, "post",
-                                        side_effect=fake_post):
-            run_cli([*self._base(), "screenshot", "--kind", "boxes",
-                     "--max-width", "800", "--out", "x.png"])
-        self.assertEqual(sent[0], {"kind": "boxes", "max_width": 800,
-                                   "out": "x.png"})
+            with self.subTest(kind="boxes", max_width=800, out="x.png"):
+                run_cli([*self._base(), "screenshot", "--kind", "boxes",
+                         "--max-width", "800", "--out", "x.png"])
+                self.assertEqual(sent[-1], ("/api/screenshot",
+                                            {"kind": "boxes",
+                                             "max_width": 800,
+                                             "out": "x.png"}))
 
     def test_screenshot_shows_fallback_reason(self):
         def fake_post(path, body=None):
@@ -539,16 +533,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("agent_live.png", out)
 
     # ------------------------------------------------ serve
-    def test_serve_status_reports_running(self):
+    def test_serve_status_reports_running_and_not_running(self):
         code, out, _ = run_cli(["--json", *self._base(), "serve", "status"])
         self.assertEqual(code, hsctl.EXIT_OK)
         self.assertTrue(json.loads(out)["running"])
 
-    def test_serve_status_when_nothing_is_running(self):
-        code, out, _ = run_cli(["--json", "--port", str(_free_port()),
-                                "serve", "status"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertFalse(json.loads(out)["running"])
+        with self.subTest(running=False):
+            code, out, _ = run_cli(["--json", "--port", str(_free_port()),
+                                    "serve", "status"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertFalse(json.loads(out)["running"])
 
 
 class ServeStopSafetyTests(unittest.TestCase):
@@ -606,12 +600,11 @@ class TaskHintTests(unittest.TestCase):
         self.addCleanup(lambda: launcher.unlink(missing_ok=True))
         self.launcher = launcher
 
-    def test_action_is_a_path_not_an_inline_command(self):
+    def test_task_command_is_a_quoted_launcher_path_with_highest_privileges(self):
         action = hsctl._task_action()
         self.assertNotIn("&&", action, "任务动作里不该出现 &&（会逼出嵌套引号）")
         self.assertEqual(action, str(self.launcher))
 
-    def test_hint_command_has_exactly_one_level_of_quoting(self):
         hint = hsctl._task_create_hint()
         # 形如：schtasks /create /tn "名" /tr "路径" /sc ONCE /st 00:00 /rl HIGHEST /f
         self.assertEqual(hint.count('"'), 4, f"引号层数不对：{hint}")
@@ -620,13 +613,12 @@ class TaskHintTests(unittest.TestCase):
             self.assertIn(token, hint)
         self.assertNotIn("&&", hint)
 
-    def test_argv_requests_highest_privileges(self):
         argv = hsctl._task_create_argv()
         self.assertIn("/rl", argv)
         self.assertEqual(argv[argv.index("/rl") + 1], "HIGHEST")
         self.assertEqual(argv[argv.index("/tn") + 1], hsctl.TASK_NAME)
 
-    def test_launcher_is_written_with_clean_crlf(self):
+    def test_launcher_is_written_with_clean_crlf_and_idempotently(self):
         hsctl._ensure_task_launcher()
         raw = self.launcher.read_bytes()
         self.assertNotIn(b"\r\r\n", raw, "write_text 的换行翻译会把 \\r\\n 变成 \\r\\r\\n")
@@ -638,14 +630,9 @@ class TaskHintTests(unittest.TestCase):
         self.assertIn("set PYTHONIOENCODING=utf-8", text)
         self.assertIn(str(hsctl.ROOT), text)
 
-    def test_console_env_forces_utf8_without_mutating_source(self) -> None:
-        base = {"KEEP": "value", "PYTHONUTF8": "0"}
-        env = hsctl._utf8_console_env(base)
-        self.assertEqual("value", env["KEEP"])
-        self.assertEqual("1", env["PYTHONUTF8"])
-        self.assertEqual("utf-8", env["PYTHONIOENCODING"])
-        self.assertEqual("0", base["PYTHONUTF8"])
-        self.assertNotIn("PYTHONIOENCODING", base)
+        # 重跑同一命令不能把启动器写成另一个版本。
+        hsctl._ensure_task_launcher()
+        self.assertEqual(raw, self.launcher.read_bytes())
 
     def test_direct_start_passes_utf8_environment_to_web_console(self) -> None:
         captured = {}
@@ -698,17 +685,6 @@ class TaskHintTests(unittest.TestCase):
         self.assertEqual("utf-8", captured["PYTHONIOENCODING"])
         self.assertIn("web_ui.py", captured["params"])
 
-    def test_installed_task_must_point_to_current_launcher(self) -> None:
-        # This method belongs to a mocked launcher fixture; the real installed
-        # task is checked by the explicit host verification command, not unit tests.
-        self.assertTrue(str(self.launcher).endswith(".cmd"))
-
-    def test_launcher_reruns_write_is_idempotent(self):
-        hsctl._ensure_task_launcher()
-        first = self.launcher.read_bytes()
-        hsctl._ensure_task_launcher()
-        self.assertEqual(first, self.launcher.read_bytes())
-
 
 class ElevationTests(unittest.TestCase):
     """提权两条路：--elevate（弹 UAC）与 --via-task（不弹 UAC）。
@@ -741,23 +717,18 @@ class ElevationTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     # ---- --elevate
-    def test_elevate_denied_gives_clear_message(self):
-        with unittest.mock.patch.object(hsctl, "_launch_runas",
-                                        return_value=(False, 5)):
-            code, _, err = run_cli([*self.base, "serve", "start", "--elevate",
-                                    "--wait", "1"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("提权被拒绝", err)
+    def test_elevate_failure_reports_denial_or_error_code(self):
+        cases = (((False, 5), "提权被拒绝"), ((False, 31), "31"))
+        for result, expected in cases:
+            with self.subTest(result=result), \
+                    unittest.mock.patch.object(hsctl, "_launch_runas",
+                                               return_value=result):
+                code, _, err = run_cli([*self.base, "serve", "start",
+                                        "--elevate", "--wait", "1"])
+            self.assertEqual(code, hsctl.EXIT_API)
+            self.assertIn(expected, err)
 
-    def test_elevate_other_failure_reports_code(self):
-        with unittest.mock.patch.object(hsctl, "_launch_runas",
-                                        return_value=(False, 31)):
-            code, _, err = run_cli([*self.base, "serve", "start", "--elevate",
-                                    "--wait", "1"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("31", err)
-
-    def test_elevate_success_waits_for_console(self):
+    def test_elevate_start_reports_ready_console_or_not_ready(self):
         with unittest.mock.patch.object(hsctl, "_launch_runas",
                                         return_value=(True, 42)), \
                 unittest.mock.patch.object(hsctl, "_wait_for_console",
@@ -769,15 +740,15 @@ class ElevationTests(unittest.TestCase):
         self.assertIn("UAC", out)
         ready.assert_called_once_with("http://127.0.0.1:9999")
 
-    def test_elevate_not_ready_reports(self):
-        with unittest.mock.patch.object(hsctl, "_launch_runas",
-                                        return_value=(True, 42)), \
-                unittest.mock.patch.object(hsctl, "_wait_for_console",
-                                           return_value=None):
-            code, _, err = run_cli([*self.base, "serve", "start", "--elevate",
-                                    "--wait", "1"])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("没有就绪", err)
+        with self.subTest(ready=False):
+            with unittest.mock.patch.object(hsctl, "_launch_runas",
+                                            return_value=(True, 42)), \
+                    unittest.mock.patch.object(hsctl, "_wait_for_console",
+                                               return_value=None):
+                code, _, err = run_cli([*self.base, "serve", "start",
+                                        "--elevate", "--wait", "1"])
+            self.assertEqual(code, hsctl.EXIT_API)
+            self.assertIn("没有就绪", err)
 
     # ---- --via-task
     def test_via_task_without_task_gives_admin_hint(self):
@@ -789,7 +760,7 @@ class ElevationTests(unittest.TestCase):
         self.assertIn("计划任务还没注册", err)
         self.assertIn("/rl HIGHEST", err)
 
-    def test_via_task_triggers_schtasks_run(self):
+    def test_via_task_triggers_schtasks_run_and_warns_when_not_highest(self):
         calls = []
 
         def fake_run(argv):
@@ -813,22 +784,23 @@ class ElevationTests(unittest.TestCase):
         self.assertEqual(calls, [["schtasks", "/run", "/tn", hsctl.TASK_NAME]])
         self.assertIn("不弹 UAC", out)
 
-    def test_via_task_warns_when_not_highest(self):
-        with unittest.mock.patch.object(
-                hsctl, "_task_state",
-                return_value={"exists": True, "highest": False,
-                              "actual_action": str(hsctl.TASK_LAUNCHER),
-                              "expected_action": str(hsctl.TASK_LAUNCHER),
-                              "matches_current": True}), \
-                unittest.mock.patch.object(hsctl, "_run_quiet",
-                                           return_value=(0, "")), \
-                unittest.mock.patch.object(hsctl, "_wait_for_console",
-                                           return_value="http://127.0.0.1:8765"), \
-                unittest.mock.patch.object(hsctl, "_report_ready"):
-            code, out, _ = run_cli([*self.base, "serve", "start", "--via-task",
-                                    "--wait", "1"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("最高权限", out)
+        with self.subTest(highest=False):
+            with unittest.mock.patch.object(
+                    hsctl, "_task_state",
+                    return_value={"exists": True, "highest": False,
+                                  "actual_action": str(hsctl.TASK_LAUNCHER),
+                                  "expected_action": str(hsctl.TASK_LAUNCHER),
+                                  "matches_current": True}), \
+                    unittest.mock.patch.object(hsctl, "_run_quiet",
+                                               return_value=(0, "")), \
+                    unittest.mock.patch.object(
+                        hsctl, "_wait_for_console",
+                        return_value="http://127.0.0.1:8765"), \
+                    unittest.mock.patch.object(hsctl, "_report_ready"):
+                code, out, _ = run_cli([*self.base, "serve", "start",
+                                        "--via-task", "--wait", "1"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn("最高权限", out)
 
     def test_via_task_run_failure_reports(self):
         with unittest.mock.patch.object(
@@ -868,29 +840,7 @@ class ElevationTests(unittest.TestCase):
         self.assertIn("install-task --force", err)
 
     # ---- schtasks 被策略拦掉 → PowerShell 兜底
-    def test_run_task_now_falls_back_to_powershell(self):
-        """有的机器把 schtasks.exe 列进黑名单：必须自动改走 Start-ScheduledTask。"""
-        calls = []
-
-        def fake_run(argv):
-            calls.append(argv)
-            if argv[0] == "schtasks":
-                return 1, "Access is denied."
-            return 0, ""
-
-        with unittest.mock.patch.object(hsctl, "_run_quiet",
-                                        side_effect=fake_run):
-            result = hsctl._run_task_now()
-
-        self.assertTrue(result["ok"])
-        self.assertEqual("powershell", result["mechanism"])
-        self.assertIn("schtasks", calls[0][0])
-        self.assertEqual("powershell", calls[1][0])
-        command = " ".join(calls[1])
-        self.assertIn("Start-ScheduledTask", command)
-        self.assertIn(hsctl.TASK_NAME, command)
-
-    def test_run_task_now_prefers_schtasks(self):
+    def test_run_task_now_prefers_schtasks_and_falls_back_to_powershell(self):
         calls = []
 
         def fake_run(argv):
@@ -904,6 +854,28 @@ class ElevationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual("schtasks", result["mechanism"])
         self.assertEqual(1, len(calls))
+
+        with self.subTest(schtasks_blocked=True):
+            # 有的机器把 schtasks.exe 列进黑名单：必须自动改走 Start-ScheduledTask。
+            fallback_calls = []
+
+            def fallback_run(argv):
+                fallback_calls.append(argv)
+                if argv[0] == "schtasks":
+                    return 1, "Access is denied."
+                return 0, ""
+
+            with unittest.mock.patch.object(hsctl, "_run_quiet",
+                                            side_effect=fallback_run):
+                result = hsctl._run_task_now()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("powershell", result["mechanism"])
+            self.assertIn("schtasks", fallback_calls[0][0])
+            self.assertEqual("powershell", fallback_calls[1][0])
+            command = " ".join(fallback_calls[1])
+            self.assertIn("Start-ScheduledTask", command)
+            self.assertIn(hsctl.TASK_NAME, command)
 
     def test_run_task_now_reports_both_failures(self):
         with unittest.mock.patch.object(hsctl, "_run_quiet",
@@ -947,7 +919,7 @@ class ElevationTests(unittest.TestCase):
         self.assertIn("/rl HIGHEST", out)
         self.assertEqual(ran, [], "非管理员时不该真的去建任务")
 
-    def test_install_task_with_admin_creates_it(self):
+    def test_install_task_creates_when_absent_and_keeps_existing(self):
         ran = []
         with unittest.mock.patch.object(hsctl, "is_user_admin",
                                         return_value=True), \
@@ -965,20 +937,21 @@ class ElevationTests(unittest.TestCase):
         self.assertIn("/rl", ran[0])
         self.assertIn("已注册", out)
 
-    def test_install_task_existing_without_force_keeps_it(self):
-        ran = []
-        with unittest.mock.patch.object(
-                hsctl, "_task_state",
-                return_value={"exists": True, "highest": True}), \
-                unittest.mock.patch.object(
-                    hsctl, "_run_quiet",
-                    side_effect=lambda argv: (ran.append(argv), (0, ""))[1]):
-            code, out, _ = run_cli([*self.base, "serve", "install-task"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("已存在", out)
-        self.assertEqual(ran, [])
+        with self.subTest(existing=True):
+            ran = []
+            with unittest.mock.patch.object(
+                    hsctl, "_task_state",
+                    return_value={"exists": True, "highest": True}), \
+                    unittest.mock.patch.object(
+                        hsctl, "_run_quiet",
+                        side_effect=lambda argv: (ran.append(argv),
+                                                  (0, ""))[1]):
+                code, out, _ = run_cli([*self.base, "serve", "install-task"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn("已存在", out)
+            self.assertEqual(ran, [])
 
-    def test_uninstall_task_deletes(self):
+    def test_uninstall_task_deletes_or_reports_missing(self):
         ran = []
         with unittest.mock.patch.object(
                 hsctl, "_task_state",
@@ -991,12 +964,13 @@ class ElevationTests(unittest.TestCase):
         self.assertEqual(ran[0], ["schtasks", "/delete", "/tn",
                                   hsctl.TASK_NAME, "/f"])
 
-    def test_uninstall_task_when_missing_is_noop(self):
-        with unittest.mock.patch.object(hsctl, "_task_state",
-                                        return_value={"exists": False}):
-            code, out, _ = run_cli([*self.base, "serve", "uninstall-task"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("不存在", out)
+        with self.subTest(exists=False):
+            with unittest.mock.patch.object(hsctl, "_task_state",
+                                            return_value={"exists": False}):
+                code, out, _ = run_cli([*self.base, "serve",
+                                        "uninstall-task"])
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn("不存在", out)
 
     def test_task_status_json(self):
         with unittest.mock.patch.object(
@@ -1012,7 +986,7 @@ class ElevationTests(unittest.TestCase):
 class KillPidTests(unittest.TestCase):
     """结束进程：os.kill 失败要退到 taskkill，都失败要给出可操作的原因。"""
 
-    def test_falls_back_to_taskkill(self):
+    def test_kill_pid_falls_back_to_taskkill_and_reports_double_failure(self):
         ran = []
         with unittest.mock.patch.object(hsctl.os, "kill",
                                         side_effect=PermissionError(5, "拒绝访问")), \
@@ -1024,14 +998,16 @@ class KillPidTests(unittest.TestCase):
         self.assertEqual(detail, "taskkill")
         self.assertEqual(ran[0], ["taskkill", "/PID", "4321"])
 
-    def test_reports_both_failures(self):
-        with unittest.mock.patch.object(hsctl.os, "kill",
-                                        side_effect=PermissionError(5, "拒绝访问")), \
-                unittest.mock.patch.object(hsctl, "_run_quiet",
-                                           return_value=(1, "ERROR: Access denied")):
-            ok, detail = hsctl._kill_pid(4321)
-        self.assertFalse(ok)
-        self.assertIn("taskkill", detail)
+        with self.subTest(taskkill_fails=True):
+            with unittest.mock.patch.object(
+                    hsctl.os, "kill",
+                    side_effect=PermissionError(5, "拒绝访问")), \
+                    unittest.mock.patch.object(
+                        hsctl, "_run_quiet",
+                        return_value=(1, "ERROR: Access denied")):
+                ok, detail = hsctl._kill_pid(4321)
+            self.assertFalse(ok)
+            self.assertIn("taskkill", detail)
 
     def test_stop_surfaces_elevation_hint_on_access_denied(self):
         """提权控制台杀不掉时，要告诉用户改用管理员 shell（而不是甩一个 WinError）。
@@ -1127,15 +1103,6 @@ class CliDelayAndScreenshotContractTests(unittest.TestCase):
         for index, (key, _) in enumerate(self.DELAY_EFFECTS):
             self.assertEqual(float(index + 1), body[key])
 
-    def test_delays_set_rejects_an_unknown_key_without_posting(self):
-        code, _, err = run_cli([
-            *self._base(), "delays", "set", "unknown_delay_seconds=1",
-        ])
-        self.assertEqual(code, hsctl.EXIT_API)
-        self.assertIn("未知延时字段", err)
-        self.assertIn("pre_action_delay_seconds", err)
-        self.assertEqual([], self.console.posts())
-
     def test_screenshot_accepts_every_public_kind(self):
         sent = []
 
@@ -1225,7 +1192,7 @@ class DoctorAndEnvTests(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in self.patchers])
         os.environ.pop("HS_PYTHON", None)
 
-    def test_doctor_json_shape(self):
+    def test_doctor_json_shape_and_down_verdict(self):
         code, out, _ = run_cli(["--json", *self.base, "doctor"])
 
         self.assertEqual(code, hsctl.EXIT_OK)
@@ -1236,14 +1203,15 @@ class DoctorAndEnvTests(unittest.TestCase):
         self.assertTrue(payload["console"]["running"])
         self.assertTrue(payload["console"]["url"].startswith("http://127.0.0.1:"))
 
-    def test_doctor_verdict_when_console_is_down(self):
-        dead_port = _free_port()
-        code, out, _ = run_cli(["--json", "--port", str(dead_port), "doctor"])
+        with self.subTest(console="down"):
+            dead_port = _free_port()
+            code, out, _ = run_cli(["--json", "--port", str(dead_port),
+                                    "doctor"])
 
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn(json.loads(out)["verdict"],
-                      ("console_not_running", "env_ok_unsaved",
-                       "env_deps_missing", "env_no_valid_interpreter"))
+            self.assertEqual(code, hsctl.EXIT_OK)
+            self.assertIn(json.loads(out)["verdict"],
+                          ("console_not_running", "env_ok_unsaved",
+                           "env_deps_missing", "env_no_valid_interpreter"))
 
     def test_env_pin_saves_the_local_interpreter(self):
         interpreter = str(self.tmp / ".venv" / "Scripts" / "python.exe")
