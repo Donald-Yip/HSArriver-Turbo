@@ -20,54 +20,50 @@ def _state(**names):
 
 
 class PlayerNameCheckTests(unittest.TestCase):
-    def test_match_with_full_name(self):
-        info = log_state.player_name_check(
-            _state(**{"1": "TestUser#12345", "2": "UNKNOWN HUMAN PLAYER"}),
-            my_name="TestUser#12345")
+    def test_matching_names_are_recognised(self):
+        cases = (
+            ("full name", {"1": "TestUser#12345",
+                           "2": "UNKNOWN HUMAN PLAYER"}, "TestUser#12345"),
+            ("case-insensitive bare name", {"1": "testuser#12345",
+                                            "2": "路人甲#1111"}, "TestUser"),
+        )
+        for label, names, my_name in cases:
+            with self.subTest(case=label):
+                info = log_state.player_name_check(
+                    _state(**names), my_name=my_name)
 
-        self.assertTrue(info["matched"])
-        self.assertEqual("TestUser#12345", info["config"])
-
-    def test_match_is_case_insensitive_and_allows_bare_name(self):
-        info = log_state.player_name_check(
-            _state(**{"1": "testuser#12345", "2": "路人甲#1111"}),
-            my_name="TestUser")
-
-        self.assertTrue(info["matched"])
+                self.assertTrue(info["matched"])
+                self.assertEqual(my_name, info["config"])
 
     def test_mismatch_when_account_changed(self):
-        info = log_state.player_name_check(
-            _state(**{"1": "NewAccount#2222", "2": "UNKNOWN HUMAN PLAYER"}),
-            my_name="TestUser#12345")
+        cases = (
+            ("changed account", {"1": "NewAccount#2222",
+                                 "2": "UNKNOWN HUMAN PLAYER"},
+             "TestUser#12345"),
+            ("both names unknown to config", {"1": "A#1", "2": "B#2"}, "C#3"),
+            ("empty config is not a match", {"1": "Someone#1",
+                                             "2": "Other#2"}, ""),
+        )
+        for label, names, my_name in cases:
+            with self.subTest(case=label):
+                info = log_state.player_name_check(
+                    _state(**names), my_name=my_name)
 
-        self.assertFalse(info["matched"])
-        self.assertIn("NewAccount#2222", info["players"].values())
+                self.assertFalse(info["matched"])
+                self.assertEqual(set(names.values()),
+                                 set(info["players"].values()))
 
-    def test_two_real_names_both_unknown_to_config_is_a_mismatch(self):
-        info = log_state.player_name_check(
-            _state(**{"1": "A#1", "2": "B#2"}), my_name="C#3")
-
-        self.assertFalse(info["matched"])
-
-    def test_only_one_player_seen_is_inconclusive(self):
-        """只读到一条玩家名时不做判断（日志成对给出，读到一半信息不足）。"""
-        self.assertIsNone(log_state.player_name_check(
-            _state(**{"1": "Someone#1"}), my_name="TestUser#12345"))
-
-    def test_only_unknown_placeholder_names_is_inconclusive(self):
-        self.assertIsNone(log_state.player_name_check(
-            _state(**{"1": "UNKNOWN HUMAN PLAYER", "2": "UNKNOWN HUMAN PLAYER"}),
-            my_name="TestUser#12345"))
-
-    def test_empty_config_is_not_treated_as_a_match(self):
-        info = log_state.player_name_check(
-            _state(**{"1": "Someone#1", "2": "Other#2"}), my_name="")
-
-        self.assertFalse(info["matched"])
-
-    def test_no_player_names_yet(self):
-        self.assertIsNone(log_state.player_name_check(
-            _state(), my_name="TestUser#12345"))
+    def test_inconclusive_input_stays_unknown(self):
+        cases = (
+            ("only one player", {"1": "Someone#1"}),
+            ("only placeholders", {"1": "UNKNOWN HUMAN PLAYER",
+                                   "2": "UNKNOWN HUMAN PLAYER"}),
+            ("nothing read yet", {}),
+        )
+        for label, names in cases:
+            with self.subTest(case=label):
+                self.assertIsNone(log_state.player_name_check(
+                    _state(**names), my_name="TestUser#12345"))
 
 
 class FsmWarningTests(unittest.TestCase):
@@ -103,10 +99,12 @@ class FsmWarningTests(unittest.TestCase):
         self.assertIn("NewAccount#2222", self.warnings[0])
         self.assertIn("#编号", self.warnings[0])
 
-        # 同一局不再重复刷屏，但界面查询仍能拿到结果
+        # 同一局不再重复刷屏，但界面查询仍能拿到结果。
         self._run("TestUser#12345")
         self.assertEqual(1, len(self.warnings))
-        self.assertFalse(FSM_action.player_name_state()["matched"])
+        state = FSM_action.player_name_state()
+        self.assertFalse(state["matched"])
+        self.assertEqual("TestUser#12345", state["config"])
 
     def test_match_does_not_warn(self):
         info = self._run("NewAccount#2222")
@@ -114,16 +112,8 @@ class FsmWarningTests(unittest.TestCase):
         self.assertTrue(info["matched"])
         self.assertEqual([], self.warnings)
 
-    def test_state_is_exposed_for_the_ui(self):
-        self._run("TestUser#12345")
-
-        state = FSM_action.player_name_state()
-        self.assertFalse(state["matched"])
-        self.assertEqual("TestUser#12345", state["config"])
-
     def test_unknown_state_when_nothing_read_yet(self):
-        state = FSM_action.player_name_state()
-        self.assertIsNone(state["matched"])
+        self.assertIsNone(FSM_action.player_name_state()["matched"])
 
 
 class OverlayAccountRowTests(unittest.TestCase):

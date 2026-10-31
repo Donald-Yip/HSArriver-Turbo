@@ -102,11 +102,7 @@ class ZooTurn4GoldenTests(unittest.TestCase):
     def setUpClass(cls):
         cls.strategy = ai.deck_strategy.deck_strategy("动物园术")
 
-    def test_strategy_is_available(self):
-        self.assertIsNotNone(self.strategy)
-        self.assertTrue(callable(self.strategy.rankState))
-
-    def test_golden_turn4_plays_twilight_time_warper(self):
+    def test_golden_turn4_is_deterministic_and_does_not_mutate_state(self):
         _, state = load_fixture(ZOO_FIXTURE)
         before = state_snapshot(state)
 
@@ -124,21 +120,13 @@ class ZooTurn4GoldenTests(unittest.TestCase):
         # 搜索必须在模拟副本上推演，真实战局一点都不能被改（否则执行层会错位）。
         self.assertEqual(before, state_snapshot(state))
 
-    def test_same_fixture_search_is_deterministic(self):
-        _, state = load_fixture(ZOO_FIXTURE)
-        first_actions, first_score = search_with(self.strategy, state)
-
         _, replay_state = load_fixture(ZOO_FIXTURE)
         replay_actions, replay_score = search_with(self.strategy, replay_state)
 
-        self.assertTrue(first_actions)
-        self.assertTrue(replay_actions)
-
-        def signature(action):
-            return (action.action, action.source, action.target)
-
-        self.assertEqual(signature(first_actions[0]), signature(replay_actions[0]))
-        self.assertAlmostEqual(first_score, replay_score, places=6)
+        self.assertEqual((first.action, first.source, first.target),
+                         (replay_actions[0].action, replay_actions[0].source,
+                          replay_actions[0].target))
+        self.assertAlmostEqual(score, replay_score, places=6)
 
 
 class EmptyStateStrategyTests(unittest.TestCase):
@@ -170,15 +158,13 @@ class EmptyStateStrategyTests(unittest.TestCase):
                 self.assertEqual([], state.my_minions)
                 self.assertEqual([], state.oppo_minions)
 
-    def test_candidate_actions_include_end_turn_on_empty_state(self):
+        # 基础候选动作也必须包含结束回合（空状态的搜索兜底依赖它）。
         strategy = ai.deck_strategy.deck_strategy("动物园术")
-        state = state_from_dict(empty_state_dict())
-
         with search.search.use_strategy(strategy):
-            candidates = search.search.candidate_actions(state)
+            candidates = search.search.candidate_actions(
+                state_from_dict(empty_state_dict()))
 
         self.assertIsInstance(candidates, list)
-        self.assertTrue(candidates)
         self.assertTrue(any(action.action is ActionKind.END_TURN
                             for action in candidates))
 

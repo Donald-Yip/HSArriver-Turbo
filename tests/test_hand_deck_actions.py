@@ -23,19 +23,16 @@ class HandDeckActionParserTests(unittest.TestCase):
         except RecommendationParseError as exc:
             self.fail(f"{instruction!r} should be accepted: {exc}")
 
-    def test_forge_card_uses_existing_trade_action_for_requested_slot(self):
-        proposed = self._parse("锻造3号位卡牌")
+    def test_forge_and_prepare_both_map_to_trade_card(self):
+        for instruction, slot in (("锻造3号位卡牌", 3),
+                                  ("预备2号位卡牌", 2)):
+            with self.subTest(instruction=instruction):
+                proposed = self._parse(instruction)
 
-        self.assertEqual(ActionKind.TRADE_CARD, proposed.action)
-        self.assertEqual(SlotRef("hand_slot", "friendly", 3), proposed.source)
-        self.assertEqual("锻造3号位卡牌", proposed.normalized_instruction)
-
-    def test_prepare_card_uses_existing_trade_action_for_requested_slot(self):
-        proposed = self._parse("预备2号位卡牌")
-
-        self.assertEqual(ActionKind.TRADE_CARD, proposed.action)
-        self.assertEqual(SlotRef("hand_slot", "friendly", 2), proposed.source)
-        self.assertEqual("预备2号位卡牌", proposed.normalized_instruction)
+                self.assertEqual(ActionKind.TRADE_CARD, proposed.action)
+                self.assertEqual(SlotRef("hand_slot", "friendly", slot),
+                                 proposed.source)
+                self.assertEqual(instruction, proposed.normalized_instruction)
 
 
 if __name__ == "__main__":

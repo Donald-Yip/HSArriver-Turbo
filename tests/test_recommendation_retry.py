@@ -179,71 +179,59 @@ def run_step(flow):
 
 
 class RecommendationRetryTests(unittest.TestCase):
-    def test_same_parse_failure_retries_past_old_limit(self):
-        flow = build_flow(ScriptedReader([PANEL_TEXT]))
-
-        results = [run_step(flow)[0] for _ in range(15)]
-
-        self.assertTrue(all(result.status is FlowStepStatus.RETRY
-                            for result in results))
-        self.assertNotIn(
-            FlowStepStatus.OBSERVE,
-            [result.status for result in results],
+    def test_failures_keep_retrying_without_a_circuit_breaker(self):
+        cases = (
+            ("same parse failure", ScriptedReader([PANEL_TEXT]), None, None),
+            ("flickering parse failures", ScriptedReader([PARSE_FAIL_TEXT]),
+             None, (PARSE_FAIL_TEXT, PARSE_FAIL_TEXT_JITTER)),
+            ("same adapter failure", ScriptedReader(["结束回合"]),
+             ExplodingAdapter(), None),
         )
+        for label, reader, adapter, texts in cases:
+            with self.subTest(case=label):
+                results, outputs = [], []
+                flow = build_flow(reader, adapter=adapter)
+                for index in range(15):
+                    if texts:
+                        reader.texts = [texts[index % len(texts)]]
+                    result, output = run_step(flow)
+                    results.append(result)
+                    outputs.append(output)
 
-    def test_flickering_parse_failures_keep_retrying(self):
-        reader = ScriptedReader([PARSE_FAIL_TEXT])
-        flow = build_flow(reader)
+                self.assertTrue(all(result.status is FlowStepStatus.RETRY
+                                    for result in results))
+                self.assertNotIn(FlowStepStatus.OBSERVE,
+                                 [result.status for result in results])
+                self.assertFalse(any("同一条推荐连续失败" in output
+                                     or "recommendation_stuck" in output
+                                     for output in outputs))
+                if adapter is not None:
+                    self.assertTrue(all("boom: adapter rejected" in
+                                        result.diagnostics
+                                        for result in results))
 
-        for text in (PARSE_FAIL_TEXT, PARSE_FAIL_TEXT_JITTER,
-                     PARSE_FAIL_TEXT, PARSE_FAIL_TEXT_JITTER) * 4:
-            reader.texts = [text]
-            self.assertEqual(FlowStepStatus.RETRY, run_step(flow)[0].status)
-
-    def test_same_adapter_failure_keeps_retrying(self):
-        flow = build_flow(ScriptedReader(["结束回合"]))
-
-        results = [run_step(flow)[0] for _ in range(15)]
-
-        self.assertTrue(all(result.status is FlowStepStatus.RETRY
-                            for result in results))
-        self.assertTrue(all("boom: adapter rejected" in result.diagnostics
-                            for result in results))
-
-    def test_missed_assembly_click_keeps_recommendation_retryable(self):
-        controller = RecordingController()
-        flow = build_flow(
-            ScriptedReader(["拼装\n左二\n中一"]),
-            adapter=AssemblyAdapter(),
-            controller=controller,
+    def test_unconfirmed_choice_actions_retry(self):
+        cases = (
+            ("assembly click", "拼装\n左二\n中一", AssemblyAdapter(), 3,
+             [3.0, 3.0, 3.0]),
+            ("ability click", "操作2号位随从攻击\n选择卡牌\n克苏恩的愤怒",
+             AbilityAdapter(), 2, [3.0, 3.0]),
         )
+        for label, text, adapter, executions, expected_sleeps in cases:
+            with self.subTest(case=label):
+                controller = RecordingController()
+                sleeps = []
+                flow = build_flow(
+                    ScriptedReader([text]), adapter=adapter,
+                    controller=controller, sleep=sleeps.append)
 
-        results = [run_step(flow)[0] for _ in range(3)]
+                results = [run_step(flow)[0] for _ in range(executions)]
 
-        self.assertTrue(all(result.status is FlowStepStatus.RETRY
-                            for result in results))
-        self.assertEqual(3, len(controller.executed))
-        self.assertIsNone(flow.pending_action)
-
-    def test_unconfirmed_ability_retries_after_a_long_delay(self):
-        controller = RecordingController()
-        sleeps = []
-        flow = build_flow(
-            ScriptedReader([
-                "操作2号位随从攻击\n选择卡牌\n克苏恩的愤怒"
-            ]),
-            adapter=AbilityAdapter(),
-            controller=controller,
-            sleep=sleeps.append,
-        )
-
-        results = [run_step(flow)[0] for _ in range(2)]
-
-        self.assertTrue(all(result.status is FlowStepStatus.RETRY
-                            for result in results))
-        self.assertEqual(2, len(controller.executed))
-        self.assertEqual([3.0, 3.0], sleeps)
-        self.assertIsNone(flow.pending_action)
+                self.assertTrue(all(result.status is FlowStepStatus.RETRY
+                                    for result in results))
+                self.assertEqual(executions, len(controller.executed))
+                self.assertEqual(expected_sleeps, sleeps)
+                self.assertIsNone(flow.pending_action)
 
     def test_restricted_step_does_not_execute_other_recommendations(self):
         controller = RecordingController()
@@ -260,23 +248,7 @@ class RecommendationRetryTests(unittest.TestCase):
         self.assertEqual("turn_not_ready", result.diagnostics)
         self.assertEqual([], controller.executed)
 
-    def test_unconfirmed_action_executes_once_then_waits_for_confirmation(self):
-        controller = RecordingController()
-        flow = build_flow(
-            ScriptedReader(["结束回合"]),
-            adapter=AcceptingAdapter(),
-            controller=controller,
-        )
-
-        results = [run_step(flow)[0] for _ in range(12)]
-
-        self.assertEqual(1, len(controller.executed))
-        self.assertTrue(all(result.status is FlowStepStatus.OBSERVE
-                            for result in results))
-        self.assertEqual("awaiting_action_confirmation",
-                         results[-1].diagnostics)
-
-    def test_unconfirmed_action_retries_after_timeout_then_stops(self):
+    def test_unconfirmed_action_executes_then_times_out_and_retries(self):
         """点击被客户端丢掉（动画期 InputManager 不处理）时不能无限等。"""
         clock = FakeClock()
         controller = RecordingController()
@@ -292,6 +264,14 @@ class RecommendationRetryTests(unittest.TestCase):
         self.assertEqual(FlowStepStatus.OBSERVE, first.status)
         self.assertEqual(1, len(controller.executed))
         self.assertEqual(0, flow.pending_action.attempts)
+
+        # 等待确认期间不重复执行。
+        for _ in range(5):
+            waiting = run_step(flow)[0]
+            self.assertEqual(FlowStepStatus.OBSERVE, waiting.status)
+            self.assertEqual("awaiting_action_confirmation",
+                             waiting.diagnostics)
+        self.assertEqual(1, len(controller.executed))
 
         clock.now += 3.0
         second = run_step(flow)[0]
@@ -316,7 +296,9 @@ class RecommendationRetryTests(unittest.TestCase):
         outputs = [run_step(flow)[1] for _ in range(6)]
 
         self.assertEqual(1, sum(o.count("[推荐] 结束回合") for o in outputs))
-        self.assertEqual(1, sum(o.count("[执行] 开始点击。") for o in outputs))
+        # R18J：执行行改成“执行了什么”，描述为空时回退推荐原文。
+        self.assertEqual(1, sum(o.count("[执行] 结束回合") for o in outputs))
+        self.assertFalse(any("开始点击" in output for output in outputs))
 
     def test_changed_recommendation_clears_pending_without_replaying_old_action(self):
         reader = ScriptedReader(["结束回合"])
@@ -372,16 +354,6 @@ class RecommendationRetryTests(unittest.TestCase):
         reader.texts = [PARSE_FAIL_TEXT]
         later = run_step(flow)[1]
         self.assertIn("[推荐] 原文：目标是已方随从", later)
-
-    def test_repeated_failures_never_emit_stuck_warning(self):
-        flow = build_flow(ScriptedReader([PANEL_TEXT]))
-
-        outputs = [run_step(flow)[1] for _ in range(20)]
-
-        self.assertFalse(any("同一条推荐连续失败" in output
-                             for output in outputs))
-        self.assertFalse(any("recommendation_stuck" in output
-                             for output in outputs))
 
 
 if __name__ == "__main__":

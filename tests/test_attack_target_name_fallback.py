@@ -11,15 +11,16 @@ should bind it only when it uniquely matches an enemy entity.
 """
 
 import unittest
-from contextlib import nullcontext
 from types import SimpleNamespace
 
-from manual_controller import AttackAction, ClickExecutor, ManualController
+from manual_controller import AttackAction
 from src.game_state.recommendation_adapter import (
     RecommendationStateError,
     adapt_action,
 )
 from src.parser.recommendation_parser import RecommendationParser
+
+ATTACK_PANEL = "打法参考A\n操作5号位随从攻击\n团队领袖\n萨格拉斯"
 
 
 def parse(text):
@@ -52,51 +53,46 @@ def state(*, hero_name="萨格拉斯", minions=()):
 
 
 class AttackTargetNameFallbackTests(unittest.TestCase):
-    def test_parser_keeps_trailing_target_name_when_target_line_is_missing(self):
-        proposed = parse(
-            "打法参考A\n操作5号位随从攻击\n团队领袖\n萨格拉斯")
+    def test_trailing_target_name_binds_only_a_unique_enemy(self):
+        proposed = parse(ATTACK_PANEL)
         self.assertEqual("萨格拉斯", proposed.target_name)
         self.assertIsNone(proposed.target)
 
-    def test_adapter_binds_a_unique_enemy_hero_name(self):
-        adapted = adapt_action(parse(
-            "打法参考A\n操作5号位随从攻击\n团队领袖\n萨格拉斯"), state())
-        self.assertIsInstance(adapted.manual_action, AttackAction)
-        self.assertEqual(("enemy", "hero"),
-                         (adapted.manual_action.target.side,
-                          adapted.manual_action.target.kind))
-        self.assertEqual("enemy-hero", adapted.target_entity_id)
-
-    def test_adapter_binds_a_unique_enemy_minion_name(self):
-        enemy = SimpleNamespace(
+        enemy_minion = SimpleNamespace(
             entity_id="enemy-minion", zone_pos=2, card_id="ENEMY",
             cardtype="MINION", name="萨格拉斯", damage=0, health=5,
         )
-        adapted = adapt_action(parse(
-            "打法参考A\n操作5号位随从攻击\n团队领袖\n萨格拉斯"),
-            state(hero_name="另一个英雄", minions=[enemy]))
-        self.assertEqual(("enemy", "minion"),
-                         (adapted.manual_action.target.side,
-                          adapted.manual_action.target.kind))
-        self.assertEqual("enemy-minion", adapted.target_entity_id)
+        cases = (
+            ("hero", state(), "enemy", "hero", "enemy-hero"),
+            ("minion", state(hero_name="另一个英雄",
+                             minions=[enemy_minion]),
+             "enemy", "minion", "enemy-minion"),
+        )
+        for label, current, side, kind, entity_id in cases:
+            with self.subTest(target=label):
+                adapted = adapt_action(proposed, current)
 
-    def test_duplicate_names_are_not_guessed(self):
-        enemy = SimpleNamespace(
+                self.assertIsInstance(adapted.manual_action, AttackAction)
+                self.assertEqual((side, kind),
+                                 (adapted.manual_action.target.side,
+                                  adapted.manual_action.target.kind))
+                self.assertEqual(entity_id, adapted.target_entity_id)
+
+    def test_ambiguous_or_missing_target_is_rejected(self):
+        duplicate = state(minions=[SimpleNamespace(
             entity_id="enemy-minion", zone_pos=1, card_id="ENEMY",
             cardtype="MINION", name="萨格拉斯", damage=0, health=5,
+        )])
+        cases = (
+            ("duplicate", parse(ATTACK_PANEL), duplicate,
+             "attack_target_ambiguous"),
+            ("missing", parse("打法参考A\n操作5号位随从攻击\n团队领袖"),
+             state(), "attack_target_required"),
         )
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "attack_target_ambiguous"):
-            adapt_action(parse(
-                "打法参考A\n操作5号位随从攻击\n团队领袖\n萨格拉斯"),
-                state(minions=[enemy]))
-
-    def test_missing_target_name_still_requires_a_target(self):
-        proposed = parse(
-            "打法参考A\n操作5号位随从攻击\n团队领袖")
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "attack_target_required"):
-            adapt_action(proposed, state())
+        for label, proposed, current, error in cases:
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(RecommendationStateError, error):
+                    adapt_action(proposed, current)
 
 
 if __name__ == "__main__":

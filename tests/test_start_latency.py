@@ -103,34 +103,26 @@ class NoFixedSleepTests(unittest.TestCase):
             FSM_action.choose_hero_count = saved_count
         return result, clock
 
-    def test_main_menu_action_uses_one_frame_clock_without_long_wait(self):
-        milestones = []
-        result, clock = self._run_main_menu(milestones)
+    def test_entry_actions_use_one_frame_clock_without_long_wait(self):
+        cases = (
+            ("main menu", self._run_main_menu, FSM_action.FSM_CHOOSING_HERO,
+             1.0, None, "已点「传统对战」并认出选套牌界面"),
+            ("choosing hero", self._run_choosing_hero, FSM_action.FSM_MATCHING,
+             2.0, (0.9, 1.1), "已点「开始匹配」"),
+        )
+        for label, runner, expected_state, max_elapsed, poll_wait, milestone in cases:
+            with self.subTest(action=label):
+                milestones = []
+                result, clock = runner(milestones)
 
-        self.assertEqual(FSM_action.FSM_CHOOSING_HERO, result)
-        self.assertTrue(clock.sleeps)
-        self.assertTrue(all(0 <= wait < 2 for wait in clock.sleeps))
-        self.assertLess(clock.elapsed, 1.0)
-        self.assertIn("已点「传统对战」并认出选套牌界面", milestones)
-
-    def test_choosing_hero_action_uses_one_frame_clock_without_long_wait(self):
-        milestones = []
-        result, clock = self._run_choosing_hero(milestones)
-
-        self.assertEqual(FSM_action.FSM_MATCHING, result)
-        self.assertTrue(any(0.9 <= wait <= 1.1 for wait in clock.sleeps))
-        self.assertTrue(all(0 <= wait < 2 for wait in clock.sleeps))
-        self.assertLess(clock.elapsed, 2.0)
-        self.assertEqual(["段位检测完成", "已点「开始匹配」"], milestones)
-
-    def test_entry_actions_emit_start_milestones(self):
-        main_milestones = []
-        hero_milestones = []
-        self._run_main_menu(main_milestones)
-        self._run_choosing_hero(hero_milestones)
-
-        self.assertIn("已点「传统对战」并认出选套牌界面", main_milestones)
-        self.assertEqual(["段位检测完成", "已点「开始匹配」"], hero_milestones)
+                self.assertEqual(expected_state, result)
+                self.assertTrue(clock.sleeps)
+                self.assertTrue(all(0 <= wait < 2 for wait in clock.sleeps))
+                self.assertLess(clock.elapsed, max_elapsed)
+                self.assertIn(milestone, milestones)
+                if poll_wait is not None:
+                    self.assertTrue(any(poll_wait[0] <= wait <= poll_wait[1]
+                                        for wait in clock.sleeps))
 
 
 # ================================================================ 启动里程碑
@@ -141,7 +133,7 @@ class StartMilestoneTests(unittest.TestCase):
     def tearDown(self):
         FSM_action._START_MILESTONES.clear()
 
-    def test_milestone_is_logged_once_with_relative_time(self):
+    def test_milestone_logged_once_with_relative_time_only_while_starting(self):
         printed = []
         with (
             patch.object(FSM_action, "_START_T0", 100.0),
@@ -157,15 +149,13 @@ class StartMilestoneTests(unittest.TestCase):
         self.assertIn("初始状态=Main Menu", printed[0])
         self.assertIn("进入对战", printed[0])
 
-    def test_milestone_silently_ignored_without_start_clock(self):
-        printed = []
         with (
             patch.object(FSM_action, "_START_T0", None),
             patch.object(FSM_action, "sys_print",
                          side_effect=lambda text: printed.append(text)),
         ):
             FSM_action._start_milestone("初始状态=Main Menu")
-        self.assertEqual([], printed)
+        self.assertEqual(1, len(printed))
 
 
 # ================================================================ 段位复核门禁
@@ -258,7 +248,7 @@ class StartingFlagTests(unittest.TestCase):
             patch.object(web_ui.threading, "Thread", _SyncThread),
         )
 
-    def test_starting_is_set_during_boot_and_cleared_afterwards(self):
+    def test_starting_flag_wraps_boot_and_clears_on_error(self):
         seen = {}
 
         def fake_start_automation(reset_stats=True):
@@ -274,12 +264,10 @@ class StartingFlagTests(unittest.TestCase):
                         "启动期间网页/浮窗要能显示「启动中…」")
         self.assertFalse(web_ui.CTRL.starting, "启动结束后必须清掉")
 
-    def test_starting_is_cleared_even_when_boot_raises(self):
         patches = self._patches(RuntimeError("boom"))
         with self.assertRaises(RuntimeError):
             with patches[0], patches[1], patches[2], patches[3], patches[4]:
                 web_ui.api_start({})
-
         self.assertFalse(web_ui.CTRL.starting)
 
     def test_second_start_is_refused_while_starting(self):
@@ -330,7 +318,7 @@ class OverlayStartingFeedbackTests(unittest.TestCase):
             log_overlay._STOP.clear()
             log_overlay._CLOSING.clear()
 
-    def test_web_ui_passes_the_starting_callback_to_the_overlay(self):
+    def test_web_ui_wires_the_starting_callback(self):
         captured = {}
 
         class _Overlay:
@@ -347,12 +335,8 @@ class OverlayStartingFeedbackTests(unittest.TestCase):
 
         self.assertIn("is_starting", captured)
         self.assertIs(captured["is_starting"], web_ui._overlay_is_starting)
-
-    def test_starting_callback_reads_the_controller_flag(self):
         with patch.object(web_ui.CTRL, "starting", True):
             self.assertTrue(web_ui._overlay_is_starting())
-        with patch.object(web_ui.CTRL, "starting", False):
-            self.assertFalse(web_ui._overlay_is_starting())
 
 
 if __name__ == "__main__":

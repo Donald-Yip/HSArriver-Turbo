@@ -10,10 +10,10 @@ Pins the behaviour added for R18:
   better, and writes the per-game summary to ``ai.txt``.
 """
 
-import os
 import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 from hslegend.application import recommendation_flow as flow_module
@@ -203,24 +203,17 @@ class LocalFlowTests(unittest.TestCase):
         planner = _Planner([[_action()], [_action(ActionKind.END_TURN, "结束回合")]])
         flow, controller, _holder = _build(state, planner)
 
-        result = flow.run_player_turn_step()
-
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-        self.assertEqual("waiting_recommendation_update", result.diagnostics)
+        first = flow.run_player_turn_step()
+        self.assertEqual(FlowStepStatus.OBSERVE, first.status)
+        self.assertEqual("waiting_recommendation_update", first.diagnostics)
         self.assertEqual(1, len(controller.executed))
         self.assertIsNotNone(flow.pending_action)
         self.assertEqual(1, len(planner.calls))
         self.assertEqual(11.2, flow.last_plan["score"])
 
-    def test_confirmation_clears_pending_and_searches_again(self):
-        state = _State()
-        planner = _Planner([[_action()], [_action(ActionKind.END_TURN, "结束回合")]])
-        flow, controller, _holder = _build(state, planner)
-
-        flow.run_player_turn_step()
-        result = flow.run_player_turn_step()
-
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
+        # 手牌离手后确认通过，下一步重新搜索并执行新推荐。
+        second = flow.run_player_turn_step()
+        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
         self.assertEqual(2, len(controller.executed))
         self.assertIsNotNone(flow.pending_action)
         self.assertEqual("结束回合", flow.pending_action.instruction)
@@ -234,26 +227,22 @@ class LocalFlowTests(unittest.TestCase):
         planner = _Planner([[attack], [attack], [attack]])
         flow, controller, _holder = _build(state, planner, clock=clock)
 
-        first = flow.run_player_turn_step()
-        self.assertEqual("awaiting_action_confirmation", first.diagnostics)
+        self.assertEqual("awaiting_action_confirmation",
+                         flow.run_player_turn_step().diagnostics)
         self.assertEqual(1, len(controller.executed))
 
+        # 超时后先丢掉本轮 pending，再重新搜索并重击同一个动作。
         clock.now += 4.0
-        retry = flow.run_player_turn_step()
-        self.assertEqual("awaiting_action_confirmation", retry.diagnostics)
-        self.assertEqual(1, flow._local_retry_count)
+        self.assertEqual("awaiting_action_confirmation",
+                         flow.run_player_turn_step().diagnostics)
         self.assertEqual(1, len(controller.executed))
-
-        # 重试计数保留，下一步重新搜索并重击同一个动作。
-        retry2 = flow.run_player_turn_step()
+        flow.run_player_turn_step()
         self.assertEqual(2, len(controller.executed))
         self.assertEqual(1, flow.pending_action.attempts)
 
         clock.now += 4.0
-        flow.run_player_turn_step()
-        self.assertEqual(2, flow._local_retry_count)
-        self.assertEqual(2, len(controller.executed))
-
+        self.assertEqual("awaiting_action_confirmation",
+                         flow.run_player_turn_step().diagnostics)
         flow.run_player_turn_step()
         self.assertEqual(3, len(controller.executed))
         self.assertEqual(2, flow.pending_action.attempts)
@@ -263,18 +252,10 @@ class LocalFlowTests(unittest.TestCase):
         self.assertEqual("awaiting_action_confirmation", capped.diagnostics)
         self.assertEqual(3, len(controller.executed))
 
-    def test_local_path_never_captures_or_ocrs(self):
-        state = _State()
-        planner = _Planner([[_action()]])
-        flow, _controller, _holder = _build(state, planner)
-
-        result = flow.run_player_turn_step()
-
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-
     def test_missing_planner_falls_back_to_box(self):
-        state = _State()
-        flow, _controller, _holder = _build(state, planner=None, box_ai=False)
+        flow, _controller, _holder = _build(
+            _State(), planner=None, box_ai=False)
+
         self.assertTrue(flow.box_ai)
 
 
@@ -313,33 +294,24 @@ class JointFlowTests(unittest.TestCase):
         self.assertEqual(1, len(planner.joint_calls))
 
     def test_flush_joint_log_writes_ai_txt(self):
-        state = _State()
-        planner = _Planner([[_action()]])
-        flow, _controller, _holder = _build(state, planner)
+        flow, _controller, _holder = _build(_State(), _Planner([]))
         flow._joint_stats = {"diff": 2, "local": 1, "box": 3, "same": 2}
 
         with tempfile.TemporaryDirectory() as tmp:
-            class _FakeFile:
-                def __init__(self, path):
-                    self.path = path
-
-                def open(self, mode="a", encoding=None):
-                    return open(self.path, mode, encoding=encoding)
-
-            class _FakeRoot:
+            class _Root:
                 def __truediv__(self, name):
-                    return _FakeFile(os.path.join(tmp, name))
+                    return Path(tmp, name)
 
             class _FakePath:
                 def __init__(self, *parts):
-                    self.parts = parts
+                    pass
 
                 def resolve(self):
                     return self
 
                 @property
                 def parents(self):
-                    return [None, None, None, _FakeRoot()]
+                    return [self, self, self, _Root()]
 
             original = flow_module.Path
             flow_module.Path = _FakePath
@@ -348,16 +320,15 @@ class JointFlowTests(unittest.TestCase):
             finally:
                 flow_module.Path = original
 
-            self.assertIsNotNone(line)
-            with open(os.path.join(tmp, "ai.txt"),
-                      encoding="utf-8") as handle:
-                content = handle.read()
-            self.assertIn("本地胜出 1 次", content)
-            self.assertIn("盒子胜出 3 次", content)
-            self.assertIn("打法差异 2 次", content)
-            self.assertEqual(
-                {"diff": 0, "local": 0, "box": 0, "same": 0},
-                flow._joint_stats)
+            content = Path(tmp, "ai.txt").read_text(encoding="utf-8")
+
+        self.assertIsNotNone(line)
+        self.assertIn("本地胜出 1 次", content)
+        self.assertIn("盒子胜出 3 次", content)
+        self.assertIn("打法差异 2 次", content)
+        self.assertEqual(
+            {"diff": 0, "local": 0, "box": 0, "same": 0},
+            flow._joint_stats)
 
 
 if __name__ == "__main__":

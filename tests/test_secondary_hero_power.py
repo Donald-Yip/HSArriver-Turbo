@@ -71,14 +71,12 @@ def state():
 
 
 class SecondaryHeroPowerTests(unittest.TestCase):
-    def test_parser_keeps_the_named_hero_power(self):
+    def test_parser_and_adapter_resolve_the_named_secondary_power(self):
         proposed = parse()
-
         self.assertEqual("吸血鬼之吻", proposed.source_name)
         self.assertEqual(6, proposed.target.index)
 
-    def test_adapter_uses_fixed_secondary_slot_and_binds_sixth_minion(self):
-        action = adapt_action(parse(), state()).manual_action
+        action = adapt_action(proposed, state()).manual_action
 
         self.assertEqual("JAIL_446hp", action.card_id)
         self.assertEqual("hp-secondary", action.hero_power_entity_id)

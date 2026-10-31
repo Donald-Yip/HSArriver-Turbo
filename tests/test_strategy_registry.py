@@ -28,26 +28,20 @@ EXCLUDED_FOLDER = "outofdate"
 class StrategyRegistryTests(unittest.TestCase):
     """注册表 + 配置选项（只读真实 ai/ 目录）。"""
 
-    def test_strategy_folders_lists_the_three_decks_sorted(self):
+    def test_registry_lists_and_resolves_the_decks(self):
         folders = deck_strategy_module.strategy_folders(refresh=True)
 
         self.assertEqual(EXPECTED_FOLDERS, folders)
         self.assertEqual(sorted(folders), folders)
         self.assertNotIn(EXCLUDED_FOLDER, folders)
+        self.assertEqual({name: name for name in EXPECTED_FOLDERS},
+                         deck_strategy_module.strategy_labels())
 
-    def test_strategy_labels_map_each_folder_to_itself(self):
-        labels = deck_strategy_module.strategy_labels()
-
-        self.assertEqual({name: name for name in EXPECTED_FOLDERS}, labels)
-
-    def test_strategy_class_has_rank_state_for_every_deck(self):
-        folders = deck_strategy_module.strategy_folders()
         for key in EXPECTED_FOLDERS:
             with self.subTest(deck=key):
                 self.assertIn(key, folders)
                 strategy_class = deck_strategy_module.strategy_class(key)
                 self.assertIsNotNone(strategy_class)
-                self.assertTrue(hasattr(strategy_class, "rankState"))
                 self.assertTrue(callable(strategy_class.rankState))
 
     def test_box_and_unknown_keys_have_no_deck_strategy(self):
@@ -60,7 +54,7 @@ class StrategyRegistryTests(unittest.TestCase):
         self.assertIsNone(deck_strategy_module.deck_strategy())
         self.assertIsNone(deck_strategy_module.strategy_class())
 
-    def test_config_strategy_choices_include_box_and_decks(self):
+    def test_config_choices_include_box_and_decks_and_default_to_box(self):
         choices = config.strategy_choices()
 
         self.assertIn(config.STRATEGY_BOX, choices)
@@ -71,7 +65,6 @@ class StrategyRegistryTests(unittest.TestCase):
                 self.assertEqual(key, choices[key])
         self.assertNotIn(EXCLUDED_FOLDER, choices)
 
-    def test_default_setting_is_box_ai(self):
         # 仓库默认策略 key 是 hsbox（ui_config.json 没写 strategy 时也回退到它），
         # 现有盒子路径 / 既有测试因此完全不受本地策略影响。
         self.assertEqual(config.STRATEGY_BOX, config.strategy_setting())
@@ -147,31 +140,22 @@ raise ImportError("boom: broken deck cannot load")
 class StrategyFailureIsolationTests(_DeckCacheGuard):
     """一个坏卡组文件夹不能拖垮整张下拉框/整局自动化。"""
 
-    def test_broken_deck_is_skipped_without_raising(self):
+    def test_broken_deck_is_skipped_once_without_raising(self):
         output = io.StringIO()
         with redirect_stdout(output):
             folders = deck_strategy_module.strategy_folders(refresh=True)
-            broken_class = deck_strategy_module.strategy_class("broken")
-            broken_strategy = deck_strategy_module.deck_strategy("broken")
+            for _ in range(3):
+                self.assertIsNone(deck_strategy_module.deck_strategy("broken"))
+            self.assertIsNone(deck_strategy_module.strategy_class("broken"))
             good_strategy = deck_strategy_module.deck_strategy("good")
 
         self.assertEqual(["broken", "good"], folders)
-        self.assertIsNone(broken_class)
-        self.assertIsNone(broken_strategy)
         self.assertIsNotNone(good_strategy)
         self.assertTrue(callable(good_strategy.rankState))
         # 失败只打印一次提示，异常不出模块边界。
         log = output.getvalue()
-        self.assertIn("加载「broken」失败", log)
+        self.assertEqual(1, log.count("加载「broken」失败"))
         self.assertIn("boom: broken deck cannot load", log)
-
-    def test_repeated_lookup_of_broken_deck_does_not_reload(self):
-        output = io.StringIO()
-        with redirect_stdout(output):
-            for _ in range(3):
-                self.assertIsNone(deck_strategy_module.deck_strategy("broken"))
-
-        self.assertEqual(1, output.getvalue().count("加载「broken」失败"))
 
 
 if __name__ == "__main__":

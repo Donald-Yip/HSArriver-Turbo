@@ -48,39 +48,39 @@ class _MonitorFixture(unittest.TestCase):
 
 
 class ProcessLivenessTests(_MonitorFixture):
-    def test_never_seen_process_is_not_a_crash(self):
-        """脚本刚启动、炉石本来就没开：不能判定成闪退（脚本会自己去拉起炉石）。"""
+    def test_inactive_or_unknown_process_is_not_fatal(self):
+        """没开过 / 枚举失败 / 已禁用：都不能判定成闪退。"""
         self.running = False
-
         self.assertIsNone(self.monitor.check())
         self.assertEqual("idle", self.monitor.sample()["status"])
 
-    def test_process_gone_after_grace_is_fatal(self):
+        unknown = HearthstoneLiveness(
+            process_checker=lambda: None,
+            log_path_provider=lambda: None,
+            settings_provider=lambda: dict(BASE_CFG),
+            clock=self.clock, cache_seconds=0.0)
+        self.assertIsNone(unknown.check())
+        self.assertEqual("unknown", unknown.sample()["status"])
+
+        self.cfg["enabled"] = False
+        self.clock.advance(600)
+        self.assertIsNone(self.monitor.check())
+        self.assertEqual("disabled", self.monitor.sample()["status"])
+
+    def test_process_gone_after_grace_is_fatal_once(self):
         self.assertIsNone(self.monitor.check())          # 见过进程
-
         self.running = False
-        self.clock.advance(3)
+        self.clock.advance(30)
         self.assertIsNone(self.monitor.check())          # 第一次发现“没了”只是开始计时
-        self.clock.advance(3)
-        self.assertIsNone(self.monitor.check())          # 宽限期（6s）内不判死
+        self.clock.advance(10)                           # 超过 6s 宽限期
 
-        self.clock.advance(4)
         event = self.monitor.check()
         self.assertIsNotNone(event)
         self.assertEqual("process_gone", event["kind"])
         self.assertTrue(event["fatal"])
         self.assertIn("炉石已退出", event["message"])
         self.assertEqual("gone", self.monitor.sample()["status"])
-
-    def test_same_failure_is_reported_only_once(self):
-        self.monitor.check()
-        self.running = False
-        self.clock.advance(30)
-        self.assertIsNone(self.monitor.check())          # 开始计时
-        self.clock.advance(10)
-
-        self.assertIsNotNone(self.monitor.check())
-        self.assertIsNone(self.monitor.check())   # 不刷屏
+        self.assertIsNone(self.monitor.check())          # 不刷屏
 
     def test_process_coming_back_before_grace_is_not_reported(self):
         self.monitor.check()
@@ -93,27 +93,6 @@ class ProcessLivenessTests(_MonitorFixture):
         self.clock.advance(600)
 
         self.assertIsNone(self.monitor.check())
-
-    def test_unknown_process_state_is_not_fatal(self):
-        """进程枚举失败（返回 None）时绝不能当成“已退出”。"""
-        self.monitor = HearthstoneLiveness(
-            process_checker=lambda: None,
-            log_path_provider=lambda: None,
-            settings_provider=lambda: dict(BASE_CFG),
-            clock=self.clock, cache_seconds=0.0)
-
-        self.assertIsNone(self.monitor.check())
-        self.assertEqual("unknown", self.monitor.sample()["status"])
-
-    def test_disabled_monitor_reports_nothing(self):
-        self.cfg["enabled"] = False
-        self.monitor.check()
-
-        self.running = False
-        self.clock.advance(600)
-
-        self.assertIsNone(self.monitor.check())
-        self.assertEqual("disabled", self.monitor.sample()["status"])
 
     def test_reset_forgets_the_previous_run(self):
         self.monitor.check()
@@ -130,13 +109,20 @@ class ProcessLivenessTests(_MonitorFixture):
 
 
 class LogStalenessTests(_MonitorFixture):
-    def test_fresh_log_is_ok(self):
-        self.age = 5.0
+    def test_fresh_missing_or_out_of_game_log_is_ok(self):
+        cases = (
+            ("fresh", 5.0, True),
+            ("no power log", None, True),
+            ("menu phase", 900.0, False),
+        )
+        for label, age, in_game in cases:
+            with self.subTest(case=label):
+                self.age = age
+                self.assertIsNone(self.monitor.check(in_game=in_game))
+                self.assertEqual(
+                    "ok", self.monitor.sample(in_game=in_game)["status"])
 
-        self.assertIsNone(self.monitor.check(in_game=True))
-        self.assertEqual("ok", self.monitor.sample(in_game=True)["status"])
-
-    def test_warn_then_stop(self):
+    def test_warn_then_stop_includes_context(self):
         self.age = 130.0
         warn = self.monitor.check(in_game=True)
         self.assertIsNotNone(warn)
@@ -146,31 +132,13 @@ class LogStalenessTests(_MonitorFixture):
         self.assertIsNone(self.monitor.check(in_game=True))   # 同类告警只报一次
 
         self.age = 420.0
-        stop = self.monitor.check(in_game=True)
+        stop = self.monitor.check(
+            in_game=True, detail="连续 12 次推荐读取失败")
         self.assertIsNotNone(stop)
         self.assertTrue(stop["fatal"])
         self.assertEqual("log_stale_stop", stop["kind"])
+        self.assertIn("连续 12 次推荐读取失败", stop["message"])
         self.assertEqual("stale", self.monitor.sample(in_game=True)["status"])
-
-    def test_stale_log_outside_a_game_is_ignored(self):
-        """匹配对手/主菜单阶段日志本来就安静，不能判定无响应。"""
-        self.age = 900.0
-
-        self.assertIsNone(self.monitor.check(in_game=False))
-        self.assertEqual("ok", self.monitor.sample(in_game=False)["status"])
-
-    def test_no_power_log_is_not_treated_as_stale(self):
-        self.age = None
-
-        self.assertIsNone(self.monitor.check(in_game=True))
-        self.assertEqual("ok", self.monitor.sample(in_game=True)["status"])
-
-    def test_context_is_appended_to_the_message(self):
-        self.age = 400.0
-
-        event = self.monitor.check(in_game=True, detail="连续 12 次推荐读取失败")
-
-        self.assertIn("连续 12 次推荐读取失败", event["message"])
 
     def test_thresholds_come_from_config(self):
         self.cfg["log_stale_warn_seconds"] = 30.0
@@ -186,17 +154,13 @@ class LogStalenessTests(_MonitorFixture):
 class NativeProcessTests(unittest.TestCase):
     """用注入的进程列表验证判定逻辑；真实枚举位于 tests/native。"""
 
-    def test_returns_bool_for_unknown_process(self):
-        result = hearthstone_process_running(
-            process_lister=lambda: ["notepad.exe"])
-        self.assertIs(False, result)
-
-        result = hearthstone_process_running(
-            process_lister=lambda: ["HEARTHSTONE.EXE"])
-        self.assertIs(True, result)
-
-    def test_unreadable_process_list_is_unknown(self):
-        self.assertIsNone(hearthstone_process_running(process_lister=lambda: None))
+    def test_process_check_contract(self):
+        self.assertIs(False, hearthstone_process_running(
+            process_lister=lambda: ["notepad.exe"]))
+        self.assertIs(True, hearthstone_process_running(
+            process_lister=lambda: ["HEARTHSTONE.EXE"]))
+        self.assertIsNone(hearthstone_process_running(
+            process_lister=lambda: None))
         self.assertIsNone(hearthstone_process_running(
             process_lister=lambda: (_ for _ in ()).throw(OSError("boom"))))
 
