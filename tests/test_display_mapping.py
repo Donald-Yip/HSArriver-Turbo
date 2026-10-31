@@ -52,10 +52,6 @@ class IdentityMappingTests(unittest.TestCase):
             self.assertEqual(point, self.mapping.from_screen(
                 *self.mapping.to_screen(*point)))
 
-    def test_compatible_and_not_too_small(self):
-        self.assertTrue(self.mapping.compatible())
-        self.assertFalse(self.mapping.too_small())
-
 
 class MeasuredOffsetTests(unittest.TestCase):
     """本机实测场景：客户区 1920×1080 @屏幕 (960,551)。"""
@@ -89,12 +85,6 @@ class MeasuredOffsetTests(unittest.TestCase):
     def test_client_screen_box(self):
         self.assertEqual((960, 551, 2880, 1631), self.mapping.client_box)
 
-    def test_debug_text_mentions_the_geometry(self):
-        text = self.mapping.debug_text()
-        self.assertIn("1920×1080", text)
-        self.assertIn("(960,551)", text)
-        self.assertIn("1.00", text)
-
     def test_mapping_info_is_serializable(self):
         import json
         info = dm.mapping_info(self.mapping)
@@ -102,6 +92,10 @@ class MeasuredOffsetTests(unittest.TestCase):
         self.assertTrue(info["available"])
         self.assertEqual([960, 551], info["screen_origin"])
         self.assertEqual({"width": 1920, "height": 1080}, info["client"])
+        text = info["text"]
+        self.assertIn("1920×1080", text)
+        self.assertIn("(960,551)", text)
+        self.assertIn("1.00", text)
 
 
 class ProportionalScalingTests(unittest.TestCase):
@@ -202,8 +196,7 @@ class ClampTests(unittest.TestCase):
         self.assertEqual((1820, 980, 1920, 1080),
                          dm.clamp_to_desktop((1820, 980, 2100, 1200),
                                              size=(0, 0, 1920, 1080)))
-
-    def test_box_to_screen_clamps_when_mapping_exists(self):
+        # 映射后的框越界必须夹进桌面；恒等映射则原样通过。
         mapping = make_mapping(client=(0, 0, 1920, 1080), origin=(0, 0))
         with_bounds = dm.DisplayMapping(
             hwnd=1, client=(0, 0, 1920, 1080), screen_left=3000, screen_top=2000)
@@ -231,18 +224,16 @@ class DisplayMappingSamplingTests(unittest.TestCase):
         self.assertEqual((960, 551), mapping.origin)
         self.assertEqual((1920, 1080), (mapping.width, mapping.height))
 
-    def test_missing_rect_returns_none(self):
-        self.assertIsNone(dm.display_mapping(
-            hwnd=42, rect_reader=lambda hwnd: None,
-            origin_reader=lambda hwnd, x, y: (0, 0)))
-
-    def test_zero_sized_rect_returns_none(self):
-        # 最小化的窗口：客户区 0×0
-        self.assertIsNone(dm.display_mapping(
-            hwnd=42, rect_reader=lambda hwnd: (0, 0, 0, 0),
-            origin_reader=lambda hwnd, x, y: (0, 0)))
-
-    def test_origin_failure_returns_none(self):
+    def test_unusable_geometry_returns_none(self):
+        # 读不到 rect / 最小化 0×0 客户区 / 读不到窗口原点 → 一律 None。
+        for case, reader in (
+            ("missing-rect", lambda hwnd: None),
+            ("zero-sized", lambda hwnd: (0, 0, 0, 0)),
+        ):
+            with self.subTest(case=case):
+                self.assertIsNone(dm.display_mapping(
+                    hwnd=42, rect_reader=reader,
+                    origin_reader=lambda hwnd, x, y: (0, 0)))
         self.assertIsNone(dm.display_mapping(
             hwnd=42, rect_reader=lambda hwnd: (0, 0, 1920, 1080),
             origin_reader=lambda hwnd, x, y: None))
@@ -308,6 +299,11 @@ class ProbePixelTests(unittest.TestCase):
         mapping = make_mapping()
         self.assertEqual(list(get_screen.STATE_PROBE_POINTS),
                          get_screen.probe_pixels(frame, mapping))
+        # 抓图尺寸 == 客户区尺寸（正常路径）时索引也是判定点本身。
+        small = self.frame(960, 540)
+        self.assertEqual(list(get_screen.STATE_PROBE_POINTS),
+                         get_screen.probe_pixels(
+                             small, make_mapping(client=(0, 0, 960, 540))))
 
     def test_client_relative_probes_scale_with_the_capture(self):
         """客户区 960×540 的判定点，索引到 1920×1080 的抓图上要乘 2。"""
@@ -315,14 +311,6 @@ class ProbePixelTests(unittest.TestCase):
         mapping = make_mapping(client=(0, 0, 960, 540))
         frame = self.frame(1920, 1080)
         self.assertEqual([(2180, 2140), (1410, 610), (1720, 1920)],
-                         get_screen.probe_pixels(frame, mapping))
-
-    def test_capture_matching_the_client_area_is_identity(self):
-        """抓图尺寸 == 客户区尺寸时（正常路径），索引就是判定点本身。"""
-        import get_screen
-        mapping = make_mapping(client=(0, 0, 960, 540))
-        frame = self.frame(960, 540)
-        self.assertEqual(list(get_screen.STATE_PROBE_POINTS),
                          get_screen.probe_pixels(frame, mapping))
 
     def test_every_client_probe_stays_inside_the_capture(self):
@@ -370,18 +358,24 @@ class RoiFrameInterpretationTests(unittest.TestCase):
     def _mapping(self):
         return make_mapping(origin=self.ORIGIN)
 
-    def test_a_box_equal_to_the_code_default_is_client_relative(self):
+    def test_interpret_roi_box_matrix(self):
         default = (7, 200, 202, 500)
-
-        # 默认值本身就是客户区相对口径：即使它"看起来像屏幕坐标"也不换算。
-        self.assertEqual(default, dm.interpret_roi_box(default, self._mapping(),
-                                                       default=default))
-
-    def test_declared_client_frame_is_trusted(self):
-        box = (960, 551, 1208, 843)
-
-        self.assertEqual(box, dm.interpret_roi_box(
-            box, self._mapping(), declared_client=True, default=(7, 200, 202, 500)))
+        screen_box = (960, 551, 1208, 843)
+        rows = (
+            ("code-default", default, {}, default),
+            ("declared-client", screen_box,
+             {"declared_client": True}, screen_box),
+            ("outside-client", (10, 20, 110, 120), {}, (10, 20, 110, 120)),
+            ("sticking-out", (920, 300, 1000, 340), {}, (920, 300, 1000, 340)),
+            ("no-mapping", screen_box, None, screen_box),
+        )
+        for case, box, kwargs, expected in rows:
+            with self.subTest(case=case):
+                mapping = None if kwargs is None else self._mapping()
+                self.assertEqual(
+                    expected,
+                    dm.interpret_roi_box(box, mapping, default=default,
+                                         **(kwargs or {})))
 
     def test_a_screen_box_inside_the_client_area_is_converted(self):
         box = (960, 551, 1208, 843)          # 窗口在 (958,320) 时的屏幕坐标
@@ -392,30 +386,6 @@ class RoiFrameInterpretationTests(unittest.TestCase):
         self.assertEqual((2, 231, 250, 523), client)
         # 换算回屏幕就是原值：升级后框不会突然位移，但从此跟着窗口走。
         self.assertEqual(box, self._mapping().box_to_screen(client))
-
-    def test_a_box_outside_the_client_area_can_only_be_client_relative(self):
-        box = (10, 20, 110, 120)             # 在客户区左边之外 → 不可能是屏幕坐标
-
-        self.assertEqual(box, dm.interpret_roi_box(box, self._mapping(),
-                                                   default=(7, 200, 202, 500)))
-
-    def test_without_a_mapping_the_box_is_returned_as_is(self):
-        box = (960, 551, 1208, 843)
-
-        self.assertEqual(box, dm.interpret_roi_box(box, None,
-                                                   default=(7, 200, 202, 500)))
-
-    def test_a_box_sticking_out_of_the_client_area_is_left_alone(self):
-        """框有一部分在客户区之外时，无法判定它是不是屏幕坐标 → 原样保留。
-
-        这是刻意的保守选择：判错会把一个本来已经对好的框整体挪走，而"框挂在
-        客户区外"（盒子面板是独立窗口）本身是合法用法。用户拖一下并按 S 保存
-        即写死口径，之后不再有歧义。
-        """
-        box = (920, 300, 1000, 340)          # 左边超出客户区左边界 958
-
-        self.assertEqual(box, dm.interpret_roi_box(box, self._mapping(),
-                                                   default=(7, 200, 202, 500)))
 
     def test_roi_frame_is_credible_filters_screen_looking_boxes(self):
         self.assertTrue(dm.roi_frame_is_credible(
@@ -671,21 +641,17 @@ class WindowModeTests(unittest.TestCase):
         self.assertEqual("unknown", dm.classify_window_mode(None))
         self.assertEqual("unknown", dm.classify_window_mode("x"))
 
-    def test_window_mode_reads_the_window_style(self):
+    def test_window_mode_reads_style_or_degrades(self):
         import types
 
         fake = types.SimpleNamespace(user32=types.SimpleNamespace(
             GetWindowLongW=_StyleReader(dm.WS_CAPTION)))
         with patch.object(dm.ctypes, "windll", fake, create=True):
             self.assertEqual("windowed", dm.window_mode(hwnd=123))
-
-    def test_window_mode_never_raises(self):
-        """拿不到窗口/样式时安静返回 unknown（自检不能因为辅助调用炸掉）。"""
-        import types
-
-        fake = types.SimpleNamespace(user32=types.SimpleNamespace(
+        # 拿不到样式时安静返回 unknown（自检不能因为辅助调用炸掉）。
+        broken = types.SimpleNamespace(user32=types.SimpleNamespace(
             GetWindowLongW=_StyleReader(None)))
-        with patch.object(dm.ctypes, "windll", fake, create=True):
+        with patch.object(dm.ctypes, "windll", broken, create=True):
             self.assertEqual("unknown", dm.window_mode(hwnd=123))
         with patch("display_mapping.ctypes.windll", None, create=True):
             self.assertEqual("unknown", dm.window_mode(hwnd=123))

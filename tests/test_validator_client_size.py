@@ -37,10 +37,9 @@ class ClientSizeFreshnessTests(unittest.TestCase):
                 rv._client_size_matches(self._frame((1920, 1080)), self.config)
             )
 
-    def test_missing_client_size_skips_the_check(self):
+    def test_unknown_client_size_uses_the_reference(self):
+        # 帧没带客户区 / 读不到实时客户区时，退回基准 1920×1080 判断。
         self.assertTrue(rv._client_size_matches(self._frame(None), self.config))
-
-    def test_falls_back_to_reference_when_live_unknown(self):
         with mock.patch.object(rv, "_live_client_size", return_value=None):
             self.assertTrue(
                 rv._client_size_matches(self._frame((1920, 1080)), self.config)

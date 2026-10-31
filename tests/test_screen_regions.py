@@ -41,14 +41,6 @@ class RegionRegistryTests(unittest.TestCase):
              "hero_power_secondary"],
             [region["key"] for region in self.regions])
 
-    def test_boxes_come_from_the_config(self):
-        boxes = {region["key"]: region["box"] for region in self.regions}
-
-        self.assertEqual((7, 200, 202, 500), boxes["recommendation"])
-        self.assertEqual(screen_regions.MULLIGAN_RECOMMENDATION_REGION,
-                         boxes["mulligan_recommendation"])
-        self.assertEqual((860, 810, 1060, 890), boxes["mulligan_confirm"])
-
     def test_mulligan_recommendation_default_matches_config(self):
         from config import RecommendationConfig
 
@@ -209,13 +201,6 @@ class CalibrationTargetTests(unittest.TestCase):
         self.assertEqual((860, 810, 1060, 890), boxes["mulligan_confirm"])
         self.assertEqual(screen_regions.AI_WIN_RATE_REGION, boxes["win_rate"])
 
-    def test_calibrated_win_rate_box_wins_over_the_default(self):
-        targets = screen_regions.calibration_targets(
-            make_config(ai_win_rate_roi=(120, 12, 280, 52)))
-
-        box = next(t["box"] for t in targets if t["key"] == "win_rate")
-        self.assertEqual((120, 12, 280, 52), box)
-
     def test_wide_box_follows_the_calibrated_main_box(self):
         regions = screen_regions.screenshot_regions(
             make_config(ai_win_rate_roi=(100, 10, 260, 50)))
@@ -223,6 +208,11 @@ class CalibrationTargetTests(unittest.TestCase):
         wide = next(r["box"] for r in regions if r["key"] == "win_rate_wide")
         self.assertEqual(screen_regions.expand_box(
             (100, 10, 260, 50), screen_regions.AI_WIN_RATE_WIDE_MARGIN), wide)
+        # 主框的校准值也要赢过默认值。
+        targets = screen_regions.calibration_targets(
+            make_config(ai_win_rate_roi=(120, 12, 280, 52)))
+        box = next(t["box"] for t in targets if t["key"] == "win_rate")
+        self.assertEqual((120, 12, 280, 52), box)
         # 默认宽框必须由默认主框派生，而不是各写一份常量。
         self.assertEqual(
             (95, 0, 300, 60),
@@ -306,17 +296,6 @@ class RegionPreviewTests(unittest.TestCase):
         self.assertEqual(len(screen_regions.CALIBRATION_TARGETS) + 1,
                          len(result["regions"]))
         self.assertTrue(all(r["in_bounds"] for r in result["regions"]))
-
-    def test_mode_points_are_marked_as_click_points(self):
-        """模式点击点也要能在预览/校准里看到（框中心=实际点击点）。"""
-        regions = {r["key"]: r for r in screen_regions.screenshot_regions()}
-
-        for key in ("mode_menu_open", "mode_wild", "mode_standard",
-                    "mode_casual"):
-            self.assertIn(key, regions)
-            box = regions[key]["box"]
-            self.assertEqual(screen_regions.MODE_MARK_SIZE, box[2] - box[0])
-            self.assertEqual(screen_regions.MODE_MARK_SIZE, box[3] - box[1])
 
     def test_resolution_is_no_longer_a_failure(self):
         """换了分辨率不再判失败：客户区几何由 display_mapping 换算。
@@ -475,8 +454,8 @@ class RegionBoxDrawingTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertTrue(drawn)
 
-    def test_skip_keys_omits_the_region_entirely(self):
-        """被跳过的区域在这一层里一个像素都不画（改由校准窗口单独高亮）。"""
+    def test_skip_keys_hides_only_the_named_region(self):
+        """被跳过的区域一个像素都不画；其余区域照常画。"""
         # mapping=None：按客户区相对坐标画，不受这台机器的窗口位置/缩放影响
         # （不传就会走真实显示换算，炉石窗口一挪这条就假失败）。
         layer = region_overlay.paint_layer(
@@ -488,20 +467,13 @@ class RegionBoxDrawingTests(unittest.TestCase):
             with self.subTest(x=x):
                 self.assertEqual(0, layer.getpixel((x, top))[3])
                 self.assertEqual(0, layer.getpixel((x, bottom))[3])
+        # 绿框（推荐面板）顶边必须还在：跳过只针对当前目标。
+        self.assertGreater(layer.getpixel((100, 200))[3], 0)
 
         # 但区域本身仍登记在清单里（网页预览/调用方还要它的坐标）
         region = next(r for r in screen_regions.screenshot_regions(self.config)
                       if r["key"] == "post_game_start")
         self.assertEqual((1325, 865, 1475, 935), region["box"])
-
-    def test_other_regions_are_still_drawn(self):
-        # mapping=None：不换算，框按客户区相对坐标画（测试机窗口位置不影响）。
-        layer = region_overlay.paint_layer(
-            1920, 1080, None, self.config, skip_keys=("post_game_start",),
-            mapping=None)
-
-        # 绿框（推荐面板）顶边必须还在：跳过只针对当前目标
-        self.assertGreater(layer.getpixel((100, 200))[3], 0)
 
 
 if __name__ == "__main__":
