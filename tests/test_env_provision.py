@@ -61,7 +61,11 @@ class EnvFileTests(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in patches])
         os.environ.pop("HS_PYTHON", None)
 
-    def test_missing_file_reads_as_empty(self):
+    def test_missing_and_broken_files_read_as_empty(self):
+        self.assertEqual({}, hsctl._read_env_file())
+
+        self.path.write_text("{ not json", encoding="utf8")
+
         self.assertEqual({}, hsctl._read_env_file())
 
     def test_write_then_read_roundtrip(self):
@@ -69,20 +73,14 @@ class EnvFileTests(unittest.TestCase):
 
         self.assertEqual("X:/py.exe", hsctl._read_env_file()["interpreter"])
 
-    def test_broken_json_reads_as_empty(self):
-        self.path.write_text("{ not json", encoding="utf8")
-
-        self.assertEqual({}, hsctl._read_env_file())
-
-    def test_pin_saves_and_reports_source(self):
+    def test_pin_and_env_var_sources(self):
         with mock.patch.object(hsctl, "verify_python",
-                               side_effect=fake_probe({"X:/py.exe"})), patched_exists():
+                               side_effect=fake_probe({"X:/py.exe"})), \
+                patched_exists():
             self.assertTrue(hsctl._persist_env("X:/py.exe", "hsctl env --pin"))
             self.assertEqual("X:/py.exe", hsctl._read_env_file()["interpreter"])
             self.assertEqual("file", hsctl.env_pin_source())
 
-    def test_env_var_wins_over_file(self):
-        hsctl._write_env_file({"interpreter": "X:/py.exe"})
         with mock.patch.dict(os.environ, {"HS_PYTHON": "Y:/py.exe"}):
             self.assertEqual("env", hsctl.env_pin_source())
 
@@ -97,36 +95,26 @@ class VerifyPythonTests(unittest.TestCase):
         self.assertFalse(record["ok"])
         self.assertIn("不存在", record["reason"])
 
-    def test_ok_probe(self):
-        out = json.dumps({"version": [3, 12, 14], "executable": "X:/py.exe",
-                          "missing": []})
+    def test_probe_accepts_only_312_with_every_dependency(self):
+        cases = (
+            ("ok", {"version": [3, 12, 14], "executable": "X:/py.exe",
+                    "missing": []}, True, ()),
+            ("旧版本", {"version": [3, 13, 5], "executable": "X:/py.exe",
+                        "missing": []}, False, ("3.13",)),
+            ("缺依赖", {"version": [3, 12, 1], "executable": "X:/py.exe",
+                        "missing": ["win32gui", "cv2"]}, False,
+             ("pywin32", "opencv_python_headless")),
+        )
+        for name, payload, expected, needles in cases:
+            with self.subTest(case=name), patched_exists():
+                record = hsctl.verify_python(
+                    "X:/py.exe", runner=lambda a, t: (0, json.dumps(payload)))
 
-        with patched_exists():
-            record = hsctl.verify_python("X:/py.exe", runner=lambda a, t: (0, out))
-
-        self.assertTrue(record["ok"], record)
-        self.assertEqual((3, 12, 14), record["version"])
-
-    def test_wrong_version_is_rejected(self):
-        out = json.dumps({"version": [3, 13, 5], "executable": "X:/py.exe",
-                          "missing": []})
-
-        with patched_exists():
-            record = hsctl.verify_python("X:/py.exe", runner=lambda a, t: (0, out))
-
-        self.assertFalse(record["ok"])
-        self.assertIn("3.13", record["reason"])
-
-    def test_missing_dependencies_name_the_pip_packages(self):
-        out = json.dumps({"version": [3, 12, 1], "executable": "X:/py.exe",
-                          "missing": ["win32gui", "cv2"]})
-
-        with patched_exists():
-            record = hsctl.verify_python("X:/py.exe", runner=lambda a, t: (0, out))
-
-        self.assertFalse(record["ok"])
-        self.assertIn("pywin32", record["reason"])
-        self.assertIn("opencv_python_headless", record["reason"])
+                self.assertEqual(expected, record["ok"], record)
+                for needle in needles:
+                    self.assertIn(needle, record["reason"])
+                if expected:
+                    self.assertEqual((3, 12, 14), record["version"])
 
     def test_unparseable_output_is_rejected(self):
         with patched_exists():
@@ -165,17 +153,15 @@ class DiscoverTests(unittest.TestCase):
         self.assertEqual(str(self.tmp / "w" / "python.exe"),
                          hsctl._normalize_python(str(self.tmp / "w" / "pythonw.exe")))
 
-    def test_conda_prefix_env_var_is_a_candidate(self):
-        path = self._touch("envs/HTL/Scripts/python.exe")
-        with mock.patch.dict(os.environ, {"CONDA_PREFIX": str(self.tmp / "envs" / "HTL")}):
+    def test_env_and_repo_venv_are_candidates(self):
+        conda = self._touch("envs/HTL/Scripts/python.exe")
+        repo = self._touch(".venv/Scripts/python.exe")
+        with mock.patch.dict(os.environ,
+                             {"CONDA_PREFIX": str(self.tmp / "envs" / "HTL")}):
             candidates = hsctl.discover_candidates()
 
-        self.assertIn(path, candidates)
-
-    def test_repo_venv_is_a_candidate(self):
-        path = self._touch(".venv/Scripts/python.exe")
-
-        self.assertIn(path, hsctl.discover_candidates())
+        self.assertIn(conda, candidates)
+        self.assertIn(repo, candidates)
 
     def test_duplicates_are_removed_case_insensitively(self):
         path = self._touch(".venv/Scripts/python.exe")
@@ -211,7 +197,7 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual("X:/py.exe", resolved["path"])
         self.assertEqual("file", resolved["source"])
 
-    def test_candidates_are_probed_in_order(self):
+    def test_candidates_are_probed_in_order_or_report_none(self):
         good = str(self.tmp / ".venv" / "Scripts" / "python.exe")
         Path(good).parent.mkdir(parents=True, exist_ok=True)
         Path(good).write_text("", encoding="utf8")
@@ -220,15 +206,12 @@ class ResolveTests(unittest.TestCase):
         Path(bad).write_text("", encoding="utf8")
 
         resolved = hsctl.resolve_interpreter(probe=fake_probe({good}))
-
         self.assertEqual(good, resolved["path"])
         self.assertEqual("candidate", resolved["source"])
 
-    def test_no_usable_interpreter_returns_empty_path(self):
-        resolved = hsctl.resolve_interpreter(probe=fake_probe(set()))
-
-        self.assertEqual("", resolved["path"])
-        self.assertEqual("none", resolved["source"])
+        none = hsctl.resolve_interpreter(probe=fake_probe(set()))
+        self.assertEqual("", none["path"])
+        self.assertEqual("none", none["source"])
 
 
 class EnsureInterpreterTests(unittest.TestCase):
@@ -252,14 +235,22 @@ class EnsureInterpreterTests(unittest.TestCase):
         self.assertFalse(outcome["changed"])
         execve.assert_not_called()
 
-    def test_no_proxy_escape_hatch(self):
-        with mock.patch.dict(os.environ, {"HSCTL_NO_PROXY": "1"}), \
-                mock.patch.object(hsctl.os, "execve") as execve:
-            outcome = hsctl.ensure_interpreter(probe=fake_probe(set()))
+    def test_escape_hatches_prevent_a_reexec(self):
+        cases = (
+            ("no proxy", {"HSCTL_NO_PROXY": "1"}, "HSCTL_NO_PROXY"),
+            ("marker", {hsctl.REEXEC_MARKER: "1"}, None),
+        )
+        hsctl._write_env_file({"interpreter": "X:/py.exe"})
+        for name, environ, reason in cases:
+            with self.subTest(case=name), \
+                    mock.patch.dict(os.environ, environ), \
+                    mock.patch.object(hsctl.os, "execve") as execve:
+                outcome = hsctl.ensure_interpreter(probe=fake_probe({"X:/py.exe"}))
 
-        self.assertFalse(outcome["changed"])
-        self.assertIn("HSCTL_NO_PROXY", outcome["reason"])
-        execve.assert_not_called()
+                self.assertFalse(outcome["changed"])
+                execve.assert_not_called()
+                if reason:
+                    self.assertIn(reason, outcome["reason"])
 
     def test_reexecs_into_the_pinned_interpreter_and_saves_it(self):
         """本机已固定别的解释器时：重入过去，并把固定值留在 log/env.json。"""
@@ -272,8 +263,7 @@ class EnsureInterpreterTests(unittest.TestCase):
         argv = execve.call_args[0][1]
         self.assertEqual("X:/py.exe", argv[0])
         self.assertTrue(str(argv[1]).endswith("hsctl.py"))
-        self.assertEqual("X:/py.exe",
-                         hsctl._read_env_file()["interpreter"])
+        self.assertEqual("X:/py.exe", hsctl._read_env_file()["interpreter"])
 
     def test_auto_pins_the_first_ok_candidate(self):
         """当前解释器不合格、只探到一个合格候选时：自动保存它。"""
@@ -285,15 +275,6 @@ class EnsureInterpreterTests(unittest.TestCase):
 
         self.assertTrue(execve.called)
         self.assertEqual(good, hsctl._read_env_file()["interpreter"])
-
-    def test_marker_prevents_an_infinite_reexec_loop(self):
-        hsctl._write_env_file({"interpreter": "X:/py.exe"})
-        with mock.patch.dict(os.environ, {hsctl.REEXEC_MARKER: "1"}), \
-                mock.patch.object(hsctl.os, "execve") as execve:
-            outcome = hsctl.ensure_interpreter(probe=fake_probe({"X:/py.exe"}))
-
-        self.assertFalse(outcome["changed"])
-        execve.assert_not_called()
 
     def test_nothing_usable_reports_the_reason(self):
         outcome = hsctl.ensure_interpreter(probe=fake_probe(set()))
@@ -311,39 +292,34 @@ class DoctorVerdictTests(unittest.TestCase):
         self.addCleanup(self.patcher.stop)
         os.environ.pop("HS_PYTHON", None)
 
-    def _env(self, current_ok=False, pinned_ok=False, missing=None,
-             ok_candidates=()):
-        current = {"path": "X:/cur.exe", "ok": current_ok, "missing": list(missing or [])}
-        pinned = ({"path": "X:/pinned.exe", "ok": pinned_ok}
-                  if pinned_ok or pinned_ok is False and False else None)
-        return {"current": current, "pinned": pinned,
-                "candidates": [{"path": p, "ok": True} for p in ok_candidates]}
+    def test_ok_and_unsaved_verdicts(self):
+        cases = (
+            ("已保存", {"current": {"path": "X:/cur.exe", "ok": True},
+                        "pinned": {"path": "X:/pinned.exe", "ok": True},
+                        "candidates": []},
+             "env_ok", None, True),
+            ("当前解释器没保存", {"current": {"path": "X:/cur.exe", "ok": True},
+                                  "pinned": None, "candidates": []},
+             "env_ok_unsaved", 'hsctl env --pin "X:/cur.exe"', False),
+            ("唯一合格候选", {"current": {"path": "X:/bad.exe", "ok": False,
+                                          "missing": []},
+                               "pinned": None,
+                               "candidates": [{"path": "X:/good.exe", "ok": True}]},
+             "env_ok_unsaved", 'hsctl env --pin "X:/good.exe"', False),
+        )
+        for name, env, expected, pin_step, pinned_file in cases:
+            with self.subTest(case=name):
+                if pinned_file:
+                    hsctl._write_env_file({"interpreter": "X:/pinned.exe"})
+                elif hsctl.ENV_FILE.exists():
+                    hsctl.ENV_FILE.unlink()
+                verdict, steps = hsctl._doctor_env_verdict(env)
 
-    def test_env_ok_when_saved_and_usable(self):
-        hsctl._write_env_file({"interpreter": "X:/pinned.exe"})
-        verdict, steps = hsctl._doctor_env_verdict(
-            {"current": {"path": "X:/cur.exe", "ok": True},
-             "pinned": {"path": "X:/pinned.exe", "ok": True},
-             "candidates": []})
-
-        self.assertEqual("env_ok", verdict)
-        self.assertEqual([], steps)
-
-    def test_usable_but_unsaved_asks_to_save_the_current_interpreter(self):
-        verdict, steps = hsctl._doctor_env_verdict(
-            {"current": {"path": "X:/cur.exe", "ok": True}, "pinned": None,
-             "candidates": []})
-
-        self.assertEqual("env_ok_unsaved", verdict)
-        self.assertIn('hsctl env --pin "X:/cur.exe"', steps[0])
-
-    def test_unsaved_uses_the_only_ok_candidate(self):
-        verdict, steps = hsctl._doctor_env_verdict(
-            {"current": {"path": "X:/bad.exe", "ok": False, "missing": []},
-             "pinned": None, "candidates": [{"path": "X:/good.exe", "ok": True}]})
-
-        self.assertEqual("env_ok_unsaved", verdict)
-        self.assertIn('hsctl env --pin "X:/good.exe"', steps[0])
+                self.assertEqual(expected, verdict)
+                if pin_step is None:
+                    self.assertEqual([], steps)
+                else:
+                    self.assertIn(pin_step, steps[0])
 
     def test_missing_dependencies_give_a_pip_command(self):
         verdict, steps = hsctl._doctor_env_verdict(

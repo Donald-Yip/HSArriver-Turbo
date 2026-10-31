@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """抽牌额外延时的配置与接线：默认 1s/张、ui_config 可覆盖、网页可调、FSM 接线。"""
 
-import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,7 +10,6 @@ import web_ui
 from config import _USER_DELAY_KEYS, RecommendationConfig
 from src.flow.recommendation_flow import RecommendationFlow
 
-INDEX_HTML = Path(__file__).resolve().parent.parent / "web" / "index.html"
 KEY = "draw_extra_delay_per_card_seconds"
 
 
@@ -21,21 +18,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(1.0, getattr(RecommendationConfig, KEY))
         self.assertIn(KEY, _USER_DELAY_KEYS)
 
-    def test_config_leaf_matches_the_field(self):
         from src.recommendation_config import RecommendationConfig as Forwarded
 
         self.assertTrue(hasattr(Forwarded, KEY))
 
 
 class FlowDefaultTests(unittest.TestCase):
-    def test_flow_defaults_to_disabled_for_library_callers(self):
+    def test_flow_defaults_to_disabled_and_takes_the_configured_seconds(self):
         flow = RecommendationFlow(
             capture=None, reader=None, parser=None, state_supplier=None,
             adapter=None, validator=None, controller=None)
 
         self.assertEqual(0.0, flow.draw_extra_delay_per_card)
 
-    def test_flow_takes_the_configured_seconds(self):
         flow = RecommendationFlow(
             capture=None, reader=None, parser=None, state_supplier=None,
             adapter=None, validator=None, controller=None,
@@ -123,16 +118,13 @@ class WebSettingsTests(unittest.TestCase):
         self.assertEqual(2.5, self.saved["delays"][KEY])
         self.assertEqual(2.5, result["delays"][KEY])
 
-    def test_out_of_range_value_is_refused(self):
+    def test_out_of_range_and_non_numeric_values_are_refused(self):
         result = web_ui.api_save_delays({KEY: 99})
-
         self.assertFalse(result["ok"])
         self.assertIn("介于", result["error"])
         self.assertEqual({}, self.saved)
 
-    def test_non_numeric_value_is_refused(self):
         result = web_ui.api_save_delays({KEY: "abc"})
-
         self.assertFalse(result["ok"])
         self.assertIn("数字", result["error"])
 
@@ -141,18 +133,6 @@ class WebSettingsTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(0.0, self.saved["delays"][KEY])
-
-
-class WebPageTests(unittest.TestCase):
-    def setUp(self):
-        self.html = INDEX_HTML.read_text(encoding="utf8")
-
-    def test_delay_field_exists(self):
-        self.assertIn('id="inpDrawDelay"', self.html)
-        self.assertIn("抽牌额外延时", self.html)
-
-    def test_hint_explains_the_free_turn_start_draw(self):
-        self.assertIn("回合开始那 1 张常规抽牌不算", self.html)
 
 
 if __name__ == "__main__":

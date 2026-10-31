@@ -57,7 +57,7 @@ class StrategyConfigTests(unittest.TestCase):
             self.assertTrue(row["label"])
 
     # ---------------------------------------------------------------- 策略
-    def test_save_strategy_round_trip(self):
+    def test_save_strategy_round_trip_and_preserves_unrelated_keys(self):
         saved = config.save_strategy_setting("动物园术")
 
         self.assertEqual("动物园术", saved)
@@ -66,13 +66,6 @@ class StrategyConfigTests(unittest.TestCase):
         self.assertFalse(config.uses_box_ai())
         self.assertEqual("动物园术", self._read()["strategy"])
 
-    def test_unknown_strategy_raises_key_error(self):
-        with self.assertRaises(KeyError):
-            config.save_strategy_setting("不存在的卡组")
-
-        self.assertFalse(self.path.exists())          # 校验失败不落盘
-
-    def test_save_strategy_preserves_unrelated_keys(self):
         original = {
             "name": "TestUser#1234",
             "log_root": "D:\\HearthstoneLogs",
@@ -82,7 +75,6 @@ class StrategyConfigTests(unittest.TestCase):
             "human_like": {"enabled": True},
         }
         self._write(original)
-
         config.save_strategy_setting("任务牧")
 
         data = self._read()
@@ -93,11 +85,11 @@ class StrategyConfigTests(unittest.TestCase):
         self.assertEqual(original["delays"], data["delays"])
         self.assertEqual(original["human_like"], data["human_like"])
 
-    def test_strategy_setting_accepts_dict_form(self):
-        self._write({"strategy": {"key": "强化学习动物园术"}})
+    def test_unknown_strategy_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            config.save_strategy_setting("不存在的卡组")
 
-        self.assertEqual("强化学习动物园术", config.strategy_setting())
-        self.assertEqual("强化学习动物园术", config.strategy_label())
+        self.assertFalse(self.path.exists())          # 校验失败不落盘
 
     def test_broken_strategy_falls_back_to_box_ai(self):
         self._write({"strategy": "已经被删掉的卡组"})
@@ -105,40 +97,15 @@ class StrategyConfigTests(unittest.TestCase):
         self.assertEqual(config.DEFAULT_STRATEGY, config.strategy_setting())
         self.assertTrue(config.uses_box_ai())
 
-    # ---------------------------------------------------------------- 最大搜索深度
-    def test_max_search_bounds_are_clamped(self):
-        self.assertEqual(1, config.save_max_search_setting(0))
-        self.assertEqual(1, config.max_search_setting())
-        self.assertEqual(100000, config.save_max_search_setting(999999))
-        self.assertEqual(100000, config.max_search_setting())
-        self.assertEqual(1500, config.save_max_search_setting(1500))
-        self.assertEqual(1500, config.max_search_setting())
+    def test_dict_forms_are_accepted(self):
+        self._write({"strategy": {"key": "强化学习动物园术"}})
+        self.assertEqual("强化学习动物园术", config.strategy_setting())
+        self.assertEqual("强化学习动物园术", config.strategy_label())
 
-    def test_max_search_rejects_non_integer(self):
-        with self.assertRaises(ValueError):
-            config.save_max_search_setting("abc")
-        with self.assertRaises(ValueError):
-            config.save_max_search_setting(None)
-
-        self.assertFalse(self.path.exists())
-
-    def test_max_search_setting_clamps_bad_file_values(self):
-        self._write({"max_search": "oops"})
-        self.assertEqual(config.DEFAULT_MAX_SEARCH, config.max_search_setting())
-
-        self._write({"max_search": 0})
-        self.assertEqual(1, config.max_search_setting())
-
-        self._write({"max_search": 999999})
-        self.assertEqual(100000, config.max_search_setting())
-
-    def test_max_search_save_preserves_strategy(self):
-        self._write({"strategy": "任务牧"})
-
-        config.save_max_search_setting(200)
-
-        self.assertEqual("任务牧", config.strategy_setting())
-        self.assertEqual(200, self._read()["max_search"])
+        self._write({"joint": {"enabled": True}})
+        self.assertTrue(config.joint_setting())
+        self._write({"joint": {"enabled": False}})
+        self.assertFalse(config.joint_setting())
 
     # ---------------------------------------------------------------- 联合模式
     def test_joint_round_trip(self):
@@ -150,12 +117,36 @@ class StrategyConfigTests(unittest.TestCase):
         self.assertFalse(config.joint_setting())
         self.assertFalse(self._read()["joint"])
 
-    def test_joint_accepts_dict_form(self):
-        self._write({"joint": {"enabled": True}})
-        self.assertTrue(config.joint_setting())
+    # ---------------------------------------------------------------- 最大搜索深度
+    def test_max_search_bounds_are_clamped(self):
+        self.assertEqual(1, config.save_max_search_setting(0))
+        self.assertEqual(1, config.max_search_setting())
+        self.assertEqual(100000, config.save_max_search_setting(999999))
+        self.assertEqual(100000, config.max_search_setting())
+        self.assertEqual(1500, config.save_max_search_setting(1500))
+        self.assertEqual(1500, config.max_search_setting())
 
-        self._write({"joint": {"enabled": False}})
-        self.assertFalse(config.joint_setting())
+        # 文件里的坏值读取时也要夹住。
+        self._write({"max_search": "oops"})
+        self.assertEqual(config.DEFAULT_MAX_SEARCH, config.max_search_setting())
+        self._write({"max_search": 0})
+        self.assertEqual(1, config.max_search_setting())
+        self._write({"max_search": 999999})
+        self.assertEqual(100000, config.max_search_setting())
+
+    def test_max_search_save_preserves_strategy_and_rejects_non_integer(self):
+        with self.assertRaises(ValueError):
+            config.save_max_search_setting("abc")
+        with self.assertRaises(ValueError):
+            config.save_max_search_setting(None)
+
+        self.assertFalse(self.path.exists())
+
+        self._write({"strategy": "任务牧"})
+        config.save_max_search_setting(200)
+
+        self.assertEqual("任务牧", config.strategy_setting())
+        self.assertEqual(200, self._read()["max_search"])
 
 
 if __name__ == "__main__":

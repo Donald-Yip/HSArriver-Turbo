@@ -41,28 +41,73 @@ def active_snapshot(turn=5):
 class EndTurnButtonProbeTests(unittest.TestCase):
     def setUp(self):
         self.saved_config = FSM_action.recommendation_config
+        self.saved_text = FSM_action._turn_end_last_text
         FSM_action.recommendation_config = SimpleNamespace(
             turn_end_button_roi=(1390, 430, 1710, 570),
         )
+        FSM_action._turn_end_last_text = ""
 
     def tearDown(self):
         FSM_action.recommendation_config = self.saved_config
+        FSM_action._turn_end_last_text = self.saved_text
 
-    def test_opponent_turn_label_does_not_count_as_ready(self):
-        with patch.object(
-            FSM_action,
-            "_ocr_lines",
-            return_value=[OcrLine("对手回合", 0.99)],
-        ):
-            self.assertFalse(FSM_action.end_turn_button_present())
+    def _probe(self, lines):
+        with patch.object(FSM_action, "_ocr_lines", return_value=lines):
+            return FSM_action.end_turn_button_present()
 
-    def test_end_turn_label_is_the_ready_signal(self):
-        with patch.object(
-            FSM_action,
-            "_ocr_lines",
-            return_value=[OcrLine("结束回合", 0.99)],
-        ):
+    def test_end_turn_label_variants_are_ready(self):
+        cases = {
+            "完整": [OcrLine("结束回合", 0.99)],
+            # 客户区缩放时 ROI 会把最后一个字裁掉：实测读到「结束回」（用户 2026-10-31）。
+            "截断": [OcrLine("01:07", 0.98), OcrLine("结束回", 0.90)],
+            # OCR 也可能把「结束回合」拆成两行。
+            "拆行": [OcrLine("结束", 0.95), OcrLine("回合", 0.95)],
+            "英文": [OcrLine("End Turn", 0.95)],
+        }
+        for name, lines in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(self._probe(lines))
+
+    def test_opponent_label_and_timer_are_not_ready(self):
+        self.assertFalse(self._probe([OcrLine("对手回合", 0.99)]))
+        self.assertFalse(self._probe([OcrLine("01:07", 0.99)]))
+
+    def test_short_or_low_confidence_read_is_not_ready(self):
+        # 只读到「结束」太短，可能是动画中的半截字：不认。
+        self.assertFalse(self._probe([OcrLine("结束", 0.99)]))
+        self.assertFalse(self._probe([OcrLine("结束回", 0.30)]))
+
+    def test_fallback_box_is_tried_when_the_main_box_misses(self):
+        boxes = []
+
+        def fake_ocr(box, _scale, _tag):
+            boxes.append(box)
+            if box == FSM_action._TURN_END_FALLBACK_ROI:
+                return [OcrLine("结束回合", 0.92)]
+            return [OcrLine("对手回合", 0.90)]
+
+        with patch.object(FSM_action, "_ocr_lines", side_effect=fake_ocr):
             self.assertTrue(FSM_action.end_turn_button_present())
+
+        self.assertEqual(2, len(boxes))
+        self.assertEqual(FSM_action._TURN_END_FALLBACK_ROI, boxes[1])
+
+    def test_main_box_success_skips_the_fallback(self):
+        boxes = []
+
+        def fake_ocr(box, _scale, _tag):
+            boxes.append(box)
+            return [OcrLine("结束回合", 0.92)]
+
+        with patch.object(FSM_action, "_ocr_lines", side_effect=fake_ocr):
+            self.assertTrue(FSM_action.end_turn_button_present())
+
+        self.assertEqual(1, len(boxes))
+
+    def test_failure_records_the_text_read_for_the_diagnostic(self):
+        self.assertFalse(self._probe([OcrLine("对手回合", 0.90)]))
+
+        self.assertIn("对手回合", FSM_action._turn_end_last_text)
 
 
 class _TurnGateFixture(unittest.TestCase):
@@ -172,9 +217,8 @@ class _TurnGateFixture(unittest.TestCase):
 class TurnStartGateTests(_TurnGateFixture):
     def test_recommendation_is_blocked_until_end_turn_is_visible(self):
         probe = Mock(return_value=False)
-        clock = [0.0]
 
-        first, sleep = self._step(probe, clock[0])
+        first, sleep = self._step(probe, 0.0)
         sleep.assert_not_called()
         self.assertIsNone(first)
         self.assertEqual(1, self.flow.calls)
@@ -184,15 +228,13 @@ class TurnStartGateTests(_TurnGateFixture):
         )
         self.assertEqual(1, probe.call_count)
 
-        clock[0] = 1.0
-        second, _ = self._step(probe, clock[0])
+        second, _ = self._step(probe, 1.0)
         self.assertIsNone(second)
         self.assertEqual(1, self.flow.calls)
         self.assertEqual(1, probe.call_count)
 
-        clock[0] = 2.0
         probe.return_value = True
-        third, _ = self._step(probe, clock[0])
+        third, _ = self._step(probe, 2.0)
         self.assertIsNone(third)
         self.assertEqual(2, self.flow.calls)
         self.assertIsNone(self.flow.allowed_actions[-1])
@@ -211,6 +253,16 @@ class TurnStartGateTests(_TurnGateFixture):
             self.flow.allowed_actions[0],
         )
 
+    def test_waiting_diagnostic_includes_the_text_ocr_read(self):
+        def probe():
+            FSM_action._turn_end_last_text = "对手回合 / 01:07"
+            return False
+
+        self._step(probe, 0.0, report_diagnostics=True)
+
+        self.assertTrue(any("OCR 读到：对手回合 / 01:07" in message
+                            for message in self.outputs))
+
 
 class ChoicePanelGateTests(_TurnGateFixture):
     """「进行选择」面板盖住右侧按钮：不能干等，要放行选项点击。"""
@@ -228,11 +280,11 @@ class ChoicePanelGateTests(_TurnGateFixture):
             self.flow.allowed_actions[0],
         )
 
-    def test_pending_choice_panel_opens_the_gate_too(self):
         # 选项行先到、ChoiceCardMgr BEGIN 后到：这期间也要放行。
+        self.flow.allowed_actions.clear()
         self._open_choice_panel(ready=False)
 
-        self._step(Mock(return_value=False), 0.0)
+        self._step(Mock(return_value=False), 3.0)
 
         self.assertIn(ActionKind.CHOOSE_DISCOVER,
                       self.flow.allowed_actions[0])
@@ -265,7 +317,7 @@ class LocalFlowChoiceGateTests(_TurnGateFixture):
 
 
 class CalibrationRegistrationTests(unittest.TestCase):
-    def test_turn_end_button_defaults_stay_in_sync(self):
+    def test_turn_end_button_defaults_and_calibration_target_agree(self):
         from config import RecommendationConfig
 
         field = RecommendationConfig.__dataclass_fields__["turn_end_button_roi"]
@@ -273,7 +325,6 @@ class CalibrationRegistrationTests(unittest.TestCase):
         self.assertEqual(screen_regions.TURN_END_BUTTON_REGION,
                          FSM_action._TURN_END_BUTTON_ROI)
 
-    def test_turn_end_button_is_a_calibratable_region(self):
         targets = screen_regions.calibration_targets(SimpleNamespace(
             turn_end_button_roi=(1400, 440, 1700, 560),
         ))

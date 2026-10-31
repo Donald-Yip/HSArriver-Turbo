@@ -18,45 +18,38 @@ class PythonVersionTests(unittest.TestCase):
         self.assertEqual(selfcheck.STATUS_OK, item["status"])
         self.assertIn("3.12.14", item["detail"])
 
-    def test_rejects_311(self):
-        item = selfcheck.python_item(version=(3, 11, 9), bits=64)
+    def test_other_versions_and_bits_are_rejected(self):
+        cases = (
+            ("3.11", (3, 11, 9), 64, "hint", "3.12"),
+            ("3.13", (3, 13, 1), 64, "hint", None),
+            ("3.14", (3, 14, 0), 64, "hint", None),
+            ("32 位", (3, 12, 14), 32, "detail", "32 位"),
+        )
+        for name, version, bits, field, needle in cases:
+            with self.subTest(version=version, bits=bits):
+                item = selfcheck.python_item(version=version, bits=bits)
 
-        self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
-        self.assertIn("3.12", item["hint"])
-
-    def test_rejects_313_and_newer(self):
-        for version in ((3, 13, 1), (3, 14, 0)):
-            with self.subTest(version=version):
-                item = selfcheck.python_item(version=version, bits=64)
                 self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
+                if needle:
+                    self.assertIn(needle, item[field])
 
-    def test_rejects_32bit_even_on_312(self):
-        item = selfcheck.python_item(version=(3, 12, 14), bits=32)
-
-        self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
-        self.assertIn("32 位", item["detail"])
 
 class DependencyManifestTests(unittest.TestCase):
-    def test_requirements_pins_are_parsed(self):
+    def test_requirements_pins_are_parsed_and_tolerate_a_broken_file(self):
         pins = selfcheck._requirements_pins()
 
         self.assertEqual("2.6.2", pins["paddlepaddle"])
         self.assertEqual("2.5.2", pins["numpy"])
         self.assertEqual("8.4.2", pins["click"])
+        self.assertEqual({}, selfcheck._requirements_pins("# 注释\n随便写点什么\n\n"))
 
-    def test_manifest_covers_every_requirement(self):
+    def test_manifest_covers_every_requirement_without_strangers(self):
         """requirements.txt 里每个包都要能在自检清单里看到（不许漏检）。"""
-        pins = selfcheck._requirements_pins()
-        covered = {selfcheck._normalize(dist)
-                   for spec in selfcheck.DEPENDENCIES for dist in spec["dist"]}
-
-        self.assertEqual(set(), set(pins) - covered)
-
-    def test_manifest_only_lists_known_packages(self):
         pins = selfcheck._requirements_pins()
         listed = {selfcheck._normalize(dist)
                   for spec in selfcheck.DEPENDENCIES for dist in spec["dist"]}
 
+        self.assertEqual(set(), set(pins) - listed)
         # opencv-python 是 opencv-python-headless 的合法替代实现，额外允许。
         self.assertEqual({"opencv-python"}, listed - set(pins))
 
@@ -68,11 +61,6 @@ class DependencyManifestTests(unittest.TestCase):
                          "opencv-python-headless", "pillow", "pynput",
                          "keyboard", "psutil", "requests"):
             self.assertIn(expected, keys)
-
-    def test_requirements_parsing_tolerates_a_broken_file(self):
-        pins = selfcheck._requirements_pins("# 注释\n随便写点什么\n\n")
-
-        self.assertEqual({}, pins)
 
 
 class DependencyItemTests(unittest.TestCase):
@@ -91,44 +79,36 @@ class DependencyItemTests(unittest.TestCase):
         self.assertIn("ImportError", item["detail"])
         self.assertIn("pip install", item["hint"])
 
-    def test_version_mismatch_warns_but_still_counts_as_usable(self):
+    def test_version_mismatch_and_unreadable_version_are_warnings(self):
         items = selfcheck.dependency_items(importer=lambda name: object(),
                                           version_reader=lambda dists: "9.9.9",
                                           pins={"numpy": "2.5.2"})
         item = next(i for i in items if i["key"] == "numpy")
-
         self.assertEqual(selfcheck.STATUS_WARN, item["status"])
         self.assertIn("2.5.2", item["detail"])
         self.assertTrue(item["required"])
 
-    def test_click_is_checked_by_metadata_only(self):
-        """仓库自带的 click.py 会遮蔽第三方 click，所以只认发行包元数据。"""
-        items = selfcheck.dependency_items(importer=lambda name: object(),
-                                          version_reader=lambda dists: None,
-                                          pins={})
-        item = next(i for i in items if i["key"] == "click")
-
-        self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
-        self.assertIn("click", item["detail"])
-
-    def test_optional_dependency_is_not_required(self):
-        items = selfcheck.dependency_items(
-            importer=lambda name: object(),
-            version_reader=lambda dists: (None if "setuptools" in dists else "1.0"),
-            pins={})
-        item = next(i for i in items if i["key"] == "setuptools")
-
-        self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
-        self.assertFalse(item["required"])
-        self.assertIn("可选", item["hint"])
-
-    def test_unreadable_version_is_only_a_warning(self):
         items = selfcheck.dependency_items(importer=lambda name: object(),
                                           version_reader=lambda dists: None,
                                           pins={})
         item = next(i for i in items if i["key"] == "numpy")
-
         self.assertEqual(selfcheck.STATUS_WARN, item["status"])
+
+    def test_click_is_metadata_only_and_optional_dependency_is_not_required(self):
+        """仓库自带的 click.py 会遮蔽第三方 click，所以只认发行包元数据。"""
+        items = selfcheck.dependency_items(
+            importer=lambda name: object(),
+            version_reader=lambda dists: (
+                None if "click" in dists or "setuptools" in dists else "1.0"),
+            pins={})
+        click = next(i for i in items if i["key"] == "click")
+        self.assertEqual(selfcheck.STATUS_FAIL, click["status"])
+        self.assertIn("click", click["detail"])
+
+        extras = next(i for i in items if i["key"] == "setuptools")
+        self.assertEqual(selfcheck.STATUS_FAIL, extras["status"])
+        self.assertFalse(extras["required"])
+        self.assertIn("可选", extras["hint"])
 
 
 class RunChecksTests(unittest.TestCase):
@@ -167,7 +147,7 @@ class RunChecksTests(unittest.TestCase):
         self.assertEqual(1, result["failed"])
         self.assertIn("管理员权限", result["summary"])
 
-    def test_probe_exception_is_contained_as_a_warning(self):
+    def test_probe_and_importer_exceptions_are_contained(self):
         def broken():
             raise RuntimeError("探测器炸了")
 
@@ -178,7 +158,6 @@ class RunChecksTests(unittest.TestCase):
         self.assertEqual(selfcheck.STATUS_WARN, item["status"])
         self.assertIn("探测器炸了", item["detail"])
 
-    def test_importer_exception_never_escapes(self):
         def importer(name):
             raise RuntimeError("boom")
 
@@ -223,15 +202,11 @@ class WindowedClientSizeTests(unittest.TestCase):
             items = selfcheck._client_mapping_items(None)
         return {item["key"]: item for item in items}
 
-    def test_windowed_at_1920x1080_is_ok(self):
-        items = self._items(1920, 1080, "windowed")
+    def test_windowed_size_is_checked_without_blocking(self):
+        item = self._items(1920, 1080, "windowed")["client-windowed"]
+        self.assertEqual(selfcheck.STATUS_OK, item["status"])
 
-        self.assertEqual(selfcheck.STATUS_OK, items["client-windowed"]["status"])
-
-    def test_windowed_at_other_size_warns_without_blocking(self):
-        items = self._items(1600, 900, "windowed")
-        item = items["client-windowed"]
-
+        item = self._items(1600, 900, "windowed")["client-windowed"]
         self.assertEqual(selfcheck.STATUS_WARN, item["status"])
         self.assertFalse(item["required"], "只是口径建议，不该拦运行")
         self.assertIn("1920×1080", item["hint"])

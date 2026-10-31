@@ -62,10 +62,13 @@ class FeedbackTests(unittest.TestCase):
         cfg.update(over)
         return patch.object(feedback, "_settings", lambda: cfg)
 
-    def test_retry_below_threshold_records_nothing(self):
+    def test_retry_streak_needs_the_threshold_and_success_resets_it(self):
         with self._settings():
             self.assertIsNone(feedback.note_event(retry_info(), now=1.0))
             self.assertIsNone(feedback.note_event(retry_info(), now=2.0))
+            feedback.mark_success()
+            self.assertIsNone(feedback.note_event(retry_info(), now=3.0))
+
         self.assertEqual([], feedback.incidents())
         self.assertEqual([], self.calls)
 
@@ -84,15 +87,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(1, len(self.calls))
         self.assertEqual(1, len(feedback.incidents()[0]["screenshots"]))
 
-    def test_success_resets_streak(self):
-        with self._settings():
-            feedback.note_event(retry_info(), now=1.0)
-            feedback.note_event(retry_info(), now=2.0)
-            feedback.mark_success()
-            self.assertIsNone(feedback.note_event(retry_info(), now=3.0))
-        self.assertEqual([], feedback.incidents())
-
-    def test_error_records_and_captures_immediately(self):
+    def test_error_records_and_captures_immediately_unless_disabled(self):
         with self._settings():
             hit = feedback.note_event(
                 error_info("invalid_entity"),
@@ -102,10 +97,10 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn("invalid_entity", hit["detail"])
         self.assertEqual(1, len(self.calls))
 
-    def test_error_not_recorded_when_disabled(self):
         with self._settings(enabled=False):
-            self.assertIsNone(feedback.note_event(error_info(), now=1.0))
-        self.assertEqual([], feedback.incidents())
+            self.assertIsNone(feedback.note_event(error_info(), now=2.0))
+        self.assertEqual(1, len(feedback.incidents()))
+        self.assertEqual(1, len(self.calls))
 
     def test_throttle_skips_second_retry_capture(self):
         ctx = {"turn": 2, "phase": "对手回合"}
@@ -157,6 +152,11 @@ class FeedbackTests(unittest.TestCase):
                         ctx={"turn": 2, "phase": phase}, now=1.0)
                 self.assertIsNone(hit)
                 self.assertEqual([], self.calls)
+        with self._settings(retry_threshold=1):
+            self.assertIsNone(feedback.note_event(
+                retry_info("recommendation_changed"),
+                ctx={"turn": 2, "phase": "换牌"}, now=1.0))
+        self.assertEqual([], self.calls)
         self.assertEqual([], feedback.incidents())
 
     def test_post_game_error_is_recorded_without_screenshot(self):
@@ -169,16 +169,6 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual(
             feedback.CAPTURE_SKIPPED_NOT_IN_TURN, hit["capture_skipped"])
         self.assertEqual([], self.calls)
-
-    def test_pregame_retry_is_not_recorded(self):
-        with self._settings(retry_threshold=1):
-            hit = feedback.note_event(
-                retry_info("recommendation_changed"),
-                ctx={"turn": 2, "phase": "换牌"}, now=1.0)
-
-        self.assertIsNone(hit)
-        self.assertEqual([], self.calls)
-        self.assertEqual([], feedback.incidents())
 
 
 class ReportTests(unittest.TestCase):
@@ -267,7 +257,11 @@ class ExportTests(unittest.TestCase):
 
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_export_bundle_contents(self):
+    def test_export_bundle_contents_only_from_the_current_run(self):
+        other = (self.tmp / f"{feedback.ARCHIVE_PREFIX}20260101"
+                 / "20250101_000000-99_回合9_报错")
+        other.mkdir(parents=True, exist_ok=True)
+        (other / feedback.ERROR_TEXT_NAME).write_text("old", encoding="utf-8")
         dst = self.tmp / "out.zip"
         result = feedback.export_bundle(dst=dst)
         self.assertTrue(result["ok"], result.get("error"))
@@ -298,6 +292,9 @@ class ExportTests(unittest.TestCase):
             jsonl_line = [n for n in names if n.endswith(".jsonl")][0]
             for line in zf.read(jsonl_line).decode("utf-8").splitlines():
                 json.loads(line)  # 每行都是合法 JSON
+            # 本次运行的存档要进包，别的运行留下的不进包。
+            self.assertTrue(any("20260101_010101-01" in n for n in names))
+            self.assertFalse(any("20250101_000000-99" in n for n in names))
 
 
 class ZipNameTests(unittest.TestCase):
@@ -320,15 +317,14 @@ class ZipNameTests(unittest.TestCase):
         return feedback.feedback_zip_name(items, log_dir=self.tmp)
 
     def test_name_uses_event_date_and_recommendation(self):
-        self.assertEqual(
-            "20261018-打出1号位随从-错误反馈.zip", self._name("打出1号位随从")
+        cases = (
+            ("打出1号位随从", "20261018-打出1号位随从-错误反馈.zip"),
+            ("", "20261018-未知推荐-错误反馈.zip"),
+            ("A/B:C*D?", "20261018-ABCD-错误反馈.zip"),
         )
-
-    def test_name_falls_back_when_no_recommendation(self):
-        self.assertEqual("20261018-未知推荐-错误反馈.zip", self._name(""))
-
-    def test_name_sanitizes_illegal_chars(self):
-        self.assertEqual("20261018-ABCD-错误反馈.zip", self._name("A/B:C*D?"))
+        for instruction, expected in cases:
+            with self.subTest(instruction=instruction):
+                self.assertEqual(expected, self._name(instruction))
 
     def test_name_appends_index_on_conflict(self):
         (self.tmp / "20261018-打出1号位随从-错误反馈.zip").write_bytes(b"")
@@ -479,26 +475,6 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual([], self._folders())  # 未达阈值不建
             feedback.note_event(retry_info(), ctx=ctx, now=1_766_000_002.0)
         self.assertEqual(1, len(self._folders()))  # 达阈值建一份
-
-    def test_export_includes_only_current_run(self):
-        ctx = {"turn": 2, "phase": "我方出牌"}
-        with self._settings():
-            feedback.note_event(error_info("boom"), ctx=ctx, now=1_766_000_000.0)
-        # 另造一个“别的运行”的文件夹，导出时不该被打包。
-        other = (
-            self.tmp
-            / f"{feedback.ARCHIVE_PREFIX}20260101"
-            / "20250101_000000-99_回合9_报错"
-        )
-        other.mkdir(parents=True, exist_ok=True)
-        (other / feedback.ERROR_TEXT_NAME).write_text("old", encoding="utf-8")
-
-        result = feedback.export_bundle(dst=self.tmp / "out.zip")
-        self.assertTrue(result["ok"], result.get("error"))
-        with zipfile.ZipFile(self.tmp / "out.zip") as zf:
-            names = zf.namelist()
-        self.assertTrue(any("20260101_010101-01" in n for n in names))
-        self.assertFalse(any("20250101_000000-99" in n for n in names))
 
 
 if __name__ == "__main__":

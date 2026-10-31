@@ -27,19 +27,12 @@ def reset_state(record=None):
 
 
 class ParseVersionTests(unittest.TestCase):
-    def test_accepts_the_formats_we_use(self):
+    def test_accepts_the_formats_we_use_and_compares(self):
         for raw in ("v2026.10.24", "2026.10.24", "2026-10-24", "2026-1024",
                     "20261024", " V2026.10.24 "):
             with self.subTest(raw=raw):
                 self.assertEqual("2026.10.24", uc.parse_version(raw))
 
-    def test_rejects_non_dates_and_old_tags(self):
-        for raw in ("", None, "v1.0.0", "2026.13.40", "2026.02.30",
-                    "v2026.10.24+abc", "2026/10/24", "not-a-date"):
-            with self.subTest(raw=raw):
-                self.assertIsNone(uc.parse_version(raw))
-
-    def test_compare_versions(self):
         self.assertEqual("update_available",
                          uc.compare_versions("2026.10.24", "2026.10.25"))
         self.assertEqual("latest",
@@ -48,6 +41,12 @@ class ParseVersionTests(unittest.TestCase):
                          uc.compare_versions("2026.10.25", "2026.10.24"))
         self.assertEqual("unknown",
                          uc.compare_versions("2026.10.24", "bad"))
+
+    def test_rejects_non_dates_and_old_tags(self):
+        for raw in ("", None, "v1.0.0", "2026.13.40", "2026.02.30",
+                    "v2026.10.24+abc", "2026/10/24", "not-a-date"):
+            with self.subTest(raw=raw):
+                self.assertIsNone(uc.parse_version(raw))
 
 
 class FetchLatestTests(unittest.TestCase):
@@ -102,31 +101,40 @@ class FetchLatestTests(unittest.TestCase):
         self.assertEqual("2026.10.24", result["latest"])
         self.assertEqual("owner/repo-b", result["repo"])
 
-    def test_all_404_means_remote_missing(self):
+    def test_failures_never_look_latest(self):
+        # 所有 URL 都抛 OSError：网络失败，不是"线上没发布"。
         with self.env:
-            fetch, _ = self.fake_fetch({})   # 所有 URL 都抛 OSError
+            fetch, _ = self.fake_fetch({})
             result = uc.fetch_latest(fetch=fetch)
-
         self.assertIsNone(result["latest"])
         self.assertFalse(result["missing"])
         self.assertIn("OSError", result["error"] or "")
 
+        # 所有源 404：线上还没发布。
         with self.env:
             fetch, _ = self.fake_fetch({"": (404, "")})
             result = uc.fetch_latest(fetch=fetch)
-
         self.assertIsNone(result["latest"])
         self.assertTrue(result["missing"])
         self.assertIsNone(result["error"])
 
-    def test_network_errors_are_unknown_not_missing(self):
+        # 网络错误同样是 unknown。
         with self.env:
             fetch, _ = self.fake_fetch({"": OSError("blocked")})
             result = uc.fetch_latest(fetch=fetch)
-
         self.assertIsNone(result["latest"])
         self.assertFalse(result["missing"])
         self.assertTrue(result["error"])
+
+        # 拿到非法版本载荷：跳过，不冒充。
+        with self.env:
+            fetch, _ = self.fake_fetch({
+                "version.py": (200, VERSION_PY.format("v1.0.0")),
+                "releases/latest": (200, '{"tag_name": "2026.13.40"}'),
+            })
+            result = uc.fetch_latest(fetch=fetch)
+        self.assertIsNone(result["latest"])
+        self.assertEqual("invalid_version_payload", result["error"])
 
     def test_release_tag_is_the_fallback_source(self):
         with self.env:
@@ -139,17 +147,6 @@ class FetchLatestTests(unittest.TestCase):
 
         self.assertEqual("2026.10.25", result["latest"])
         self.assertIn("release", result["source"])
-
-    def test_invalid_payloads_are_skipped(self):
-        with self.env:
-            fetch, _ = self.fake_fetch({
-                "version.py": (200, VERSION_PY.format("v1.0.0")),
-                "releases/latest": (200, '{"tag_name": "2026.13.40"}'),
-            })
-            result = uc.fetch_latest(fetch=fetch)
-
-        self.assertIsNone(result["latest"])
-        self.assertEqual("invalid_version_payload", result["error"])
 
 
 class StatusTests(unittest.TestCase):
@@ -210,7 +207,7 @@ class RefreshTests(unittest.TestCase):
         self.saved.stop()
         reset_state()
 
-    def test_fresh_cache_skips_the_network(self):
+    def test_fresh_cache_skips_the_network_and_stale_cache_refreshes(self):
         reset_state({"latest": "2026.10.24", "fetched_at": 10_000.0,
                      "checked_at": 10_000.0, "missing": False})
         called = []
@@ -222,7 +219,6 @@ class RefreshTests(unittest.TestCase):
         uc.refresh(force=False, fetch=fetch, now=10_000.0 + 10)
         self.assertEqual([], called)
 
-    def test_stale_cache_refreshes_and_updates_status(self):
         reset_state({"latest": "2026.10.20", "fetched_at": 0.0,
                      "checked_at": 0.0, "missing": False})
         with patch.dict(os.environ, {"HS_UPDATE_REPO": "owner/repo-a"}):

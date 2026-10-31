@@ -13,12 +13,7 @@
 """
 from __future__ import annotations
 
-import contextlib
-import io
-import json
-import threading
 import unittest
-import unittest.mock
 from unittest.mock import patch
 
 import battle_entry
@@ -86,12 +81,12 @@ class CancelSwitchTests(unittest.TestCase):
     def setUp(self):
         _cancel_off(self)
 
-    def test_default_is_not_cancelled(self):
+    def test_default_request_and_clear(self):
         self.assertFalse(battle_entry.is_cancelled())
 
-    def test_request_and_clear(self):
         battle_entry.request_cancel()
         self.assertTrue(battle_entry.is_cancelled())
+
         battle_entry.clear_cancel()
         self.assertFalse(battle_entry.is_cancelled())
 
@@ -102,7 +97,7 @@ class WaitLoopCancelTests(unittest.TestCase):
     def setUp(self):
         _cancel_off(self)
 
-    def test_wait_for_main_menu_aborts_and_stops_clicking(self):
+    def test_wait_loops_abort_and_stop_clicking(self):
         clock = _Clock(cancel_after_sleeps=6)
         clicks = _Clicks()
         with patch.object(battle_entry, "identify",
@@ -117,9 +112,7 @@ class WaitLoopCancelTests(unittest.TestCase):
         self.assertLessEqual(len(clicks.points), 3)
         self.assertLess(clock.t, 10.0)
 
-    def test_no_click_after_cancel_is_observed(self):
-        """已经置位时：一次都不点，立刻返回。"""
-        battle_entry.request_cancel()
+        # 已经置位时：一次都不点，立刻返回。
         clicks = _Clicks()
         result = battle_entry.wait_for_main_menu(
             timeout=180.0, interval=0.5, capture=_unknown_frame,
@@ -128,7 +121,8 @@ class WaitLoopCancelTests(unittest.TestCase):
         self.assertEqual(result["reason"], "aborted")
         self.assertEqual(len(clicks.points), 0)
 
-    def test_wait_for_deck_select_is_cancellable_too(self):
+        # 选套牌等待同样可取消。
+        battle_entry.clear_cancel()
         clock = _Clock(cancel_after_sleeps=4)
         clicks = _Clicks()
         with patch.object(battle_entry, "identify",
@@ -210,8 +204,6 @@ class CancelApiTests(unittest.TestCase):
         self.saved_thread = web_ui.CTRL.automation_thread
         self.saved_fsm = web_ui.CTRL.fsm
         self.addCleanup(self._restore)
-        with patch.object(web_ui, "_log"):
-            pass
 
     def _restore(self):
         web_ui._ENTER_STATE.update(self.saved_enter)
@@ -231,14 +223,13 @@ class CancelApiTests(unittest.TestCase):
         # 关键：空闲时喊停不能给下一次单击留个"已取消"的坑。
         self.assertFalse(battle_entry.is_cancelled())
 
-    def test_cancel_flips_switch_while_enter_battle_runs(self):
+    def test_cancel_flips_switch_and_stops_the_running_fsm(self):
         web_ui._ENTER_STATE["running"] = True
         with patch.object(web_ui, "_log"):
             result = web_ui.api_cancel({})
         self.assertTrue(battle_entry.is_cancelled())
         self.assertTrue(any("进入对战" in item for item in result["cancelled"]))
 
-    def test_cancel_stops_running_fsm(self):
         class _Fsm:
             def __init__(self):
                 self.called = False
@@ -247,6 +238,7 @@ class CancelApiTests(unittest.TestCase):
                 self.called = True
 
         fsm = _Fsm()
+        web_ui._ENTER_STATE["running"] = False
         web_ui.CTRL.automation_thread = object()
         web_ui.CTRL.fsm = fsm
         with patch.object(web_ui, "_log"):
@@ -317,7 +309,7 @@ class CtrlQHotkeyTests(unittest.TestCase):
         web_ui.CTRL.fsm = self.saved_fsm
         web_ui.CTRL.hotkey_registered = self.saved_hotkey
 
-    def test_ctrl_q_stops_manual_enter_battle(self):
+    def test_ctrl_q_stops_manual_enter_battle_and_idle_stays_clean(self):
         web_ui._ENTER_STATE["running"] = True
         web_ui.CTRL.automation_thread = None
         with patch.object(web_ui, "_log") as logger, \
@@ -328,7 +320,7 @@ class CtrlQHotkeyTests(unittest.TestCase):
         messages = [c.args[1] for c in logger.call_args_list]
         self.assertTrue(any("Ctrl+Q" in m for m in messages))
 
-    def test_ctrl_q_when_idle_reports_nothing_and_keeps_switch_clean(self):
+        battle_entry.clear_cancel()
         web_ui._ENTER_STATE["running"] = False
         web_ui._RESTART_STATE["running"] = False
         web_ui.CTRL.automation_thread = None
@@ -419,7 +411,7 @@ class CancelCliTests(unittest.TestCase):
         self.assertIn("叫停", err)
         self.assertIn("/api/cancel", [p[1] for p in self.console.posts()])
 
-    def test_enter_battle_does_not_override_console_interval(self):
+    def test_enter_battle_forwards_only_an_explicit_interval(self):
         """CLI 不再默认下发 interval=3.0（那会把控制台的 0.5s 轮询盖掉）。"""
         self.console.httpd.routes["/api/enter_battle"] = {
             "ok": True, "message": "已开始",
@@ -429,10 +421,6 @@ class CancelCliTests(unittest.TestCase):
         body = self.console.posts()[-1][2]
         self.assertNotIn("interval", body)
 
-    def test_explicit_interval_is_still_forwarded(self):
-        self.console.httpd.routes["/api/enter_battle"] = {
-            "ok": True, "message": "已开始",
-            "enter_battle": {"running": False, "stage": "done", "ok": True}}
         run_cli([*self._base(), "enter-battle", "--interval", "2",
                  "--no-wait"])
         self.assertEqual(self.console.posts()[-1][2]["interval"], 2.0)

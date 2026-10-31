@@ -87,7 +87,7 @@ class TrackerTests(unittest.TestCase):
                         f"挂钩是异步的，应同步等到第 {count} 次挂上")
         self.assertTrue(self.tracker.wait_ready(timeout=2.0))
 
-    def test_ensure_started_is_idempotent(self):
+    def test_ensure_started_is_idempotent_and_needs_a_window(self):
         self.assertTrue(self.tracker.ensure_started(4242))
         self._wait_attached_and_ready()
 
@@ -97,7 +97,6 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(1, len(self.hook.handles))
         self.assertTrue(self.tracker.available())
 
-    def test_no_window_means_not_started(self):
         tracker = wt.WindowMoveTracker(hook_factory=self.hook.factory,
                                        unhook=self.hook.unhook,
                                        hwnd_provider=lambda: 0,
@@ -108,7 +107,7 @@ class TrackerTests(unittest.TestCase):
         finally:
             tracker.stop()
 
-    def test_hook_failure_degrades_without_raising(self):
+    def test_hook_failure_degrades_and_wait_ready_ends(self):
         failed_hook = FakeHook(succeeds=False)
         tracker = wt.WindowMoveTracker(
             hook_factory=failed_hook.factory,
@@ -118,12 +117,18 @@ class TrackerTests(unittest.TestCase):
         try:
             self.assertTrue(tracker.ensure_started(4242))
             self.assertTrue(failed_hook.wait_for_attempt())
+
             self.assertFalse(tracker.wait_ready(timeout=2.0),
                              "挂钩失败应报告不可用")
+            self.assertFalse(tracker.starting(), "失败也必须结束等待状态")
         finally:
             tracker.stop()
 
-    def test_event_updates_timestamp_and_count(self):
+    def test_event_updates_timestamp_count_and_stats_shape(self):
+        self.assertEqual({"available", "events", "polls", "last_move_at", "hwnd"},
+                         set(self.tracker.stats()))
+        self.assertFalse(self.tracker.stats()["available"])
+
         self.tracker.ensure_started(4242)
         self._wait_attached_and_ready()
         self.assertFalse(self.tracker.moved_since(0.0))
@@ -135,14 +140,6 @@ class TrackerTests(unittest.TestCase):
         self.assertFalse(self.tracker.moved_since(120.0))
         self.assertEqual(120.0, self.tracker.last_move_at())
         self.assertEqual(1, self.tracker.stats()["events"])
-
-    def test_stop_stops_recording(self):
-        self.tracker.ensure_started(4242)
-        self._wait_attached_and_ready()
-        self.tracker.stop()
-
-        self.assertTrue(self.hook.wait_for_unhook())
-        self.assertFalse(self.tracker.available())
 
     def test_stop_unhooks_synchronously_exactly_once(self):
         self.tracker.ensure_started(4242)
@@ -160,7 +157,7 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual([1001], self.hook.unhooked,
                          "线程 finally 不得再次摘 hook")
 
-    def test_poll_detects_geometry_change(self):
+    def test_poll_detects_geometry_change_and_tolerates_no_reader(self):
         geometries = [(1920, 1080, 960, 362)]
 
         def reader(hwnd):
@@ -187,17 +184,16 @@ class TrackerTests(unittest.TestCase):
         finally:
             tracker.stop()
 
-    def test_poll_without_reader_is_safe(self):
-        tracker = wt.WindowMoveTracker(hook_factory=self.hook.factory,
-                                       unhook=self.hook.unhook,
-                                       hwnd_provider=lambda: 4242,
-                                       poll_reader=lambda hwnd: None,
-                                       clock=lambda: self.now[0])
+        no_reader = wt.WindowMoveTracker(hook_factory=self.hook.factory,
+                                         unhook=self.hook.unhook,
+                                         hwnd_provider=lambda: 4242,
+                                         poll_reader=lambda hwnd: None,
+                                         clock=lambda: self.now[0])
         try:
-            self.assertFalse(tracker.poll())
-            self.assertFalse(tracker.poll())
+            self.assertFalse(no_reader.poll())
+            self.assertFalse(no_reader.poll())
         finally:
-            tracker.stop()
+            no_reader.stop()
 
     def test_rehook_when_handle_changes(self):
         self.tracker.ensure_started(4242)
@@ -209,13 +205,6 @@ class TrackerTests(unittest.TestCase):
                         "句柄变化应重新挂钩")
         self.assertTrue(self.tracker.wait_ready(timeout=2.0))
 
-    def test_stats_shape(self):
-        stats = self.tracker.stats()
-
-        self.assertEqual({"available", "events", "polls", "last_move_at", "hwnd"},
-                         set(stats))
-        self.assertFalse(stats["available"])
-
     def test_wait_ready_sees_the_hook_after_startup(self):
         """挂钩是异步的：状态显示前要等线程挂完，否则会误报"轮询兜底"。"""
         self.tracker.ensure_started(4242)
@@ -223,22 +212,6 @@ class TrackerTests(unittest.TestCase):
 
         self.assertTrue(self.tracker.wait_ready(timeout=2.0))
         self.assertFalse(self.tracker.starting())
-
-    def test_wait_ready_gives_up_when_the_hook_fails(self):
-        failed_hook = FakeHook(succeeds=False)
-        tracker = wt.WindowMoveTracker(
-            hook_factory=failed_hook.factory,
-            unhook=failed_hook.unhook,
-            hwnd_provider=lambda: 4242,
-            clock=lambda: self.now[0])
-        try:
-            tracker.ensure_started(4242)
-            self.assertTrue(failed_hook.wait_for_attempt())
-
-            self.assertFalse(tracker.wait_ready(timeout=2.0))
-            self.assertFalse(tracker.starting(), "失败也必须结束等待状态")
-        finally:
-            tracker.stop()
 
     def test_wait_ready_never_blocks_when_nothing_is_starting(self):
         """按帧调用（叠加层/预览）不能每帧都等：没在启动就立刻返回。"""
@@ -284,7 +257,7 @@ class ClockConsistencyTests(unittest.TestCase):
 
 
 class ModuleSingletonTests(unittest.TestCase):
-    def test_module_helpers_do_not_raise_without_window(self):
+    def test_module_helpers_do_not_raise_and_stop_is_reentrant(self):
         # 本机有没有炉石都不该抛异常
         wt.ensure_started()
         wt.moved_since(0.0)
@@ -293,7 +266,6 @@ class ModuleSingletonTests(unittest.TestCase):
         wt.poll()
         wt.stop()
 
-    def test_stop_is_reentrant(self):
         wt.stop()
         wt.stop()
 

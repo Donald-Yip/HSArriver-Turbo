@@ -9,12 +9,11 @@ from tools import release
 
 
 class ReleaseDateTests(unittest.TestCase):
-    def test_accepts_the_formats_we_type(self):
+    def test_accepts_the_formats_we_type_and_rejects_bad_dates(self):
         for raw in ("2026.10.24", "2026-10-24", "2026-1024"):
             with self.subTest(raw=raw):
                 self.assertEqual("2026.10.24", release.parse_release_date(raw))
 
-    def test_rejects_bad_dates(self):
         for raw in ("", "2026.13.40", "2026.02.30", "v2026.10.24", "abc"):
             with self.subTest(raw=raw):
                 with self.assertRaises(SystemExit):
@@ -60,12 +59,11 @@ class ChangelogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             release.changelog_row("2026.10.24", "   ")
 
-    def test_same_date_is_refused(self):
+    def test_insert_refuses_same_date_and_a_broken_table(self):
         row = release.changelog_row("2026.10.18", "重复")
         with self.assertRaises(RuntimeError):
             release.insert_changelog_row(self.SAMPLE, row)
 
-    def test_broken_table_is_refused(self):
         with self.assertRaises(RuntimeError):
             release.insert_changelog_row("# 空文件\n", "| 2026-10-24 | x | y |")
 
@@ -73,19 +71,19 @@ class ChangelogTests(unittest.TestCase):
 class WriteLikeTests(unittest.TestCase):
     """写回时保留原文件换行符：CHANGELOG 是 LF，version.py 是 CRLF。"""
 
-    def test_lf_file_stays_lf(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "a.md"
-            path.write_bytes(b"a\nb\n")
-            release._write_like(path, "a\nb\nc\n", path.read_bytes())
-            self.assertEqual(b"a\nb\nc\n", path.read_bytes())
+    def test_line_endings_are_preserved(self):
+        cases = (
+            (".md", b"a\nb\n", b"a\nb\nc\n"),
+            (".py", b"a\r\nb\r\n", b"a\r\nb\r\nc\r\n"),
+        )
+        for suffix, original, expected in cases:
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"a{suffix}"
+                path.write_bytes(original)
 
-    def test_crlf_file_stays_crlf(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "a.py"
-            path.write_bytes(b"a\r\nb\r\n")
-            release._write_like(path, "a\nb\nc\n", path.read_bytes())
-            self.assertEqual(b"a\r\nb\r\nc\r\n", path.read_bytes())
+                release._write_like(path, "a\nb\nc\n", path.read_bytes())
+
+                self.assertEqual(expected, path.read_bytes())
 
 
 if __name__ == "__main__":

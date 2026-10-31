@@ -1,7 +1,7 @@
 """卡牌库查询：中文名 → cardId 集合、模糊纠正、多版本合并。
 
 这些用例全部跑合成小卡库（毫秒级），只有最后一个冒烟用例读真实
-`cards.json`——它验证的是"真库里确实有阿扎莉娜 / 神秘访客"这类事实，
+`cards.json`——它验证的是"真库里确实有阿莉扎娜 / 神秘访客"这类事实，
 不联网、不依赖炉石。
 """
 
@@ -47,11 +47,10 @@ class ParseClassTests(unittest.TestCase):
         self.assertEqual(parse_class(" 法师 "), "MAGE")
         self.assertEqual(parse_class("瞎子"), "DEMONHUNTER")
 
-    def test_unknown_returns_none_instead_of_silently_neutral(self):
+    def test_unknown_returns_none_and_class_label_reads_chinese(self):
         self.assertIsNone(parse_class("牧师家"))
         self.assertIsNone(parse_class(""))
 
-    def test_class_label(self):
         self.assertEqual(class_label("PRIEST"), "牧师")
         self.assertEqual(class_label(None), "中立")
 
@@ -60,16 +59,15 @@ class LookupTests(unittest.TestCase):
     def setUp(self):
         self.catalog = _mini_catalog()
 
-    def test_lookup_by_chinese_name(self):
+    def test_lookup_by_chinese_name_and_card_id(self):
         result = self.catalog.lookup("裂魂者阿扎莉娜")
         self.assertTrue(result.ok)
         self.assertEqual(result.name, "裂魂者阿扎莉娜")
         self.assertEqual(result.card_ids, {"JAIL_430"})
 
-    def test_lookup_by_card_id(self):
-        result = self.catalog.lookup("JAIL_430")
-        self.assertTrue(result.ok)
-        self.assertEqual(result.card_ids, {"JAIL_430"})
+        by_id = self.catalog.lookup("JAIL_430")
+        self.assertTrue(by_id.ok)
+        self.assertEqual(by_id.card_ids, {"JAIL_430"})
 
     def test_same_name_multiple_versions_merged(self):
         result = self.catalog.lookup("神秘访客")
@@ -84,23 +82,21 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(result.name, "裂魂者阿扎莉娜")
         self.assertIn("已自动纠正", result.warning())
 
-    def test_partial_name_unique_hits(self):
+    def test_partial_name_unique_and_ambiguous(self):
         result = self.catalog.lookup("裂魂者")
         self.assertTrue(result.ok)
         self.assertEqual(result.name, "裂魂者阿扎莉娜")
 
-    def test_ambiguous_partial_name_reports_suggestions(self):
-        result = self.catalog.lookup("阿扎莉娜")
-        self.assertFalse(result.ok)
-        self.assertIn("请写全名", result.error)
-        self.assertTrue(result.suggestions)
+        ambiguous = self.catalog.lookup("阿扎莉娜")
+        self.assertFalse(ambiguous.ok)
+        self.assertIn("请写全名", ambiguous.error)
+        self.assertTrue(ambiguous.suggestions)
 
-    def test_missing_card_reports_error_and_suggestions(self):
+    def test_missing_card_and_empty_query_report_errors(self):
         result = self.catalog.lookup("完全不存在的卡牌名")
         self.assertFalse(result.ok)
         self.assertIn("找不到卡牌", result.error)
 
-    def test_empty_query(self):
         self.assertFalse(self.catalog.lookup("  ").ok)
 
     def test_alias_table_is_honoured(self):
@@ -108,11 +104,10 @@ class LookupTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.card_ids, {"JAIL_430"})
 
-    def test_card_type_filter(self):
+    def test_card_type_filter_and_class_of(self):
         self.assertTrue(self.catalog.lookup("裂魂者", card_type="MINION").ok)
         self.assertFalse(self.catalog.lookup("裂魂者", card_type="SPELL").ok)
 
-    def test_class_of(self):
         self.assertEqual(self.catalog.class_of("JAIL_430"), "PRIEST")
         self.assertEqual(self.catalog.class_of("NOPE"), "")
 
@@ -121,13 +116,14 @@ class SearchTests(unittest.TestCase):
     def setUp(self):
         self.catalog = _mini_catalog()
 
-    def test_prefix_match_returns_card_with_ids(self):
+    def test_prefix_match_returns_card_with_ids_and_honours_limit(self):
         hits = self.catalog.search("神秘")
         names = [hit.name for hit in hits]
         self.assertIn("神秘访客", names)
         guest = next(hit for hit in hits if hit.name == "神秘访客")
         self.assertEqual(set(guest.ids), {"REV_246", "CORE_REV_246"})
         self.assertEqual(guest.primary_id, "REV_246")
+        self.assertLessEqual(len(self.catalog.search("神秘", limit=1)), 1)
 
     def test_battleground_only_cards_are_hidden(self):
         names = [hit.name for hit in self.catalog.search("神秘")]
@@ -136,9 +132,6 @@ class SearchTests(unittest.TestCase):
     def test_empty_query_returns_nothing(self):
         self.assertEqual(self.catalog.search(""), [])
         self.assertEqual(self.catalog.search("   "), [])
-
-    def test_limit(self):
-        self.assertLessEqual(len(self.catalog.search("神秘", limit=1)), 1)
 
     def test_describe_shows_name_class_and_id(self):
         hit = self.catalog.search("裂魂")[0]
@@ -159,7 +152,7 @@ class RealCardsJsonSmokeTests(unittest.TestCase):
         if self.catalog is None:
             self.skipTest(f"cards.json 不可用：{card_catalog.catalog_error()}")
 
-    def test_alizana_and_guest(self):
+    def test_real_cards_and_misspelling(self):
         alizana = self.catalog.lookup("裂魂者阿扎莉娜")
         self.assertTrue(alizana.ok)
         self.assertIn("JAIL_430", alizana.card_ids)
@@ -169,10 +162,9 @@ class RealCardsJsonSmokeTests(unittest.TestCase):
         # 至少要有 REV_246（对战版本）；核心版存在时也要一起进集合。
         self.assertIn("REV_246", guest.card_ids)
 
-    def test_misspelled_alizana_is_corrected(self):
-        result = self.catalog.lookup("裂魂者阿莉扎娜")
-        self.assertTrue(result.ok)
-        self.assertEqual(result.name, "裂魂者阿扎莉娜")
+        corrected = self.catalog.lookup("裂魂者阿莉扎娜")
+        self.assertTrue(corrected.ok)
+        self.assertEqual(corrected.name, "裂魂者阿扎莉娜")
 
 
 if __name__ == "__main__":

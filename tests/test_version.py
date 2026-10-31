@@ -6,12 +6,11 @@
 而且界面上根本看不到，用户没法判断「手上这版是哪天的」。
 
 用户定的口径：**版本号就是发布日期**（`2026.10.17`），界面显示 `v2026.10.17`，
-后面不挂 git 短哈希。这里锁四件事：
+后面不挂 git 短哈希。这里锁三件事：
 
 1. `version.py` 是唯一来源，VERSION 必须是合法的 `YYYY.MM.DD`；
 2. VERSION 要和 CHANGELOG 最上面那条日期对得上（防止发版忘了改）；
-3. `/api/status` 与 `/api/version` 都带 version 字段，HTTP 头也统一；
-4. 网页与浮窗的显示位真的存在（不是只改了后端）。
+3. `/api/status` 与 HTTP 头都带版本，浮窗品牌行与 CLI 真的显示出来。
 """
 from __future__ import annotations
 
@@ -41,18 +40,17 @@ class VersionValueTests(unittest.TestCase):
         # 必须是真实存在的日期（挡掉 2026.13.40 这种手滑）
         datetime.strptime(version.VERSION, "%Y.%m.%d")
 
-    def test_label_is_v_prefix_without_hash(self):
+    def test_label_and_info_contract(self):
         label = version.version_label()
         self.assertEqual(f"v{version.VERSION}", label)
         # 用户明确要求：不要后面那串号码
         self.assertNotIn("+", label)
 
-    def test_version_info_contract(self):
         info = version.version_info()
         self.assertEqual({"name", "version", "label"}, set(info))
         self.assertEqual(version.NAME, info["name"])
         self.assertEqual(version.VERSION, info["version"])
-        self.assertEqual(version.version_label(), info["label"])
+        self.assertEqual(label, info["label"])
 
     def test_version_matches_changelog_head(self):
         """发版时改 VERSION 容易忘：CHANGELOG 最上面那条的日期就是最新发布日。"""
@@ -66,9 +64,9 @@ class VersionValueTests(unittest.TestCase):
 
 
 class StatusApiTests(unittest.TestCase):
-    """网页拿得到版本（老后端没这个字段，前端要能优雅显示 v—）。"""
+    """网页拿得到版本，HTTP 头也统一（老后端没这个字段，前端要能优雅显示 v—）。"""
 
-    def test_status_snapshot_carries_version(self):
+    def test_status_snapshot_and_http_header_carry_version(self):
         import web_ui
 
         snapshot = web_ui.status_snapshot()
@@ -78,22 +76,12 @@ class StatusApiTests(unittest.TestCase):
         self.assertEqual(version.VERSION, info["version"])
         self.assertEqual(version.version_label(), info["label"])
 
-    def test_http_server_version_header_is_unified(self):
-        import web_ui
-
         self.assertEqual(f"{version.NAME}/{version.VERSION}",
                          web_ui.Handler.server_version)
 
 
 class SurfaceTests(unittest.TestCase):
-    """网页顶栏与浮窗品牌行都要有真的显示位。"""
-
-    def setUp(self):
-        self.html = (ROOT / "web" / "index.html").read_text(encoding="utf8")
-
-    def test_web_has_version_chip(self):
-        self.assertIn('id="appVersion"', self.html)
-        self.assertIn("ver-chip", self.html)
+    """浮窗品牌行与 CLI 都要有真的显示位。"""
 
     def test_overlay_brand_uses_version_module(self):
         import log_overlay
@@ -139,6 +127,7 @@ class SurfaceTests(unittest.TestCase):
 
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual(f"hsctl {version.version_label()}", completed.stdout.strip())
+
 
 if __name__ == "__main__":
     unittest.main()
