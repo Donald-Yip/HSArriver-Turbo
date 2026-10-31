@@ -43,8 +43,9 @@ class ModePointMarkerTests(unittest.TestCase):
             self.assertEqual((255, 0, 0), pixels[x, y],
                              f"{item['key']} 的十字中心不在点击点上")
 
-    def test_scales_with_a_degraded_fullscreen_frame(self):
-        """客户区抓不到时拍的是整屏：标记要按信息里的映射挪 + 按比例缩放。"""
+    def test_markers_follow_the_frame_mapping(self):
+        """客户区抓不到时拍的是整屏：标记要按信息里的映射挪 + 按比例缩放；
+        没有 marks 时则直接用客户区坐标。"""
         image = self.blank(3840, 2160)
         info = {"kind": "client", "fallback": "full",
                 "marks": {"wild": [1234, 760]}}
@@ -55,19 +56,11 @@ class ModePointMarkerTests(unittest.TestCase):
 
         self.assertEqual([1234, 760], drawn[0]["image"])
 
-    def test_points_without_marks_use_client_coordinates(self):
-        image = self.blank(1920, 1080)
-
-        with mock.patch.object(
-            web_ui,
-            "_target_frame_size",
-            return_value=(1920, 1080),
-        ):
+        plain = self.blank(1920, 1080)
+        with mock.patch.object(web_ui, "_target_frame_size",
+                               return_value=(1920, 1080)):
             drawn = web_ui._draw_mode_points(
-                image,
-                {"kind": "client"},
-                {"wild": (617, 380)},
-            )
+                plain, {"kind": "client"}, {"wild": (617, 380)})
 
         self.assertEqual([617, 380], drawn[0]["image"])
         self.assertEqual([617, 380], drawn[0]["client"])
@@ -119,18 +112,17 @@ class ScreenshotPointsApiTests(unittest.TestCase):
             self.assertEqual((255, 0, 0), pixels[x, y],
                              f"{item['key']} 的十字中心不在点击点上")
 
-    def test_without_points_nothing_is_drawn(self):
+    def test_points_are_optional_and_validated(self):
         payload = self._call({"out": "test_points_off.png"})
 
         self.assertNotIn("mode_points", payload)
         with Image.open(payload["path"]) as saved:
             self.assertEqual((0, 0, 0), saved.convert("RGB").load()[617, 380])
 
-    def test_unknown_points_value_is_rejected(self):
-        payload = self._call({"points": "whatever"})
+        bad = self._call({"points": "whatever"})
 
-        self.assertFalse(payload["ok"])
-        self.assertIn("points", payload["error"])
+        self.assertFalse(bad["ok"])
+        self.assertIn("points", bad["error"])
 
 
 class ServeStopApiTests(unittest.TestCase):
@@ -141,17 +133,13 @@ class ServeStopApiTests(unittest.TestCase):
         self.shutdown_mock = self.shutdown.start()
         self.addCleanup(self.shutdown.stop)
 
-    def test_missing_token_is_forbidden(self):
-        payload, code = web_ui.api_serve_stop({})
-
-        self.assertEqual(403, code)
-        self.assertFalse(payload["ok"])
-
-    def test_wrong_token_is_forbidden(self):
-        payload, code = web_ui.api_serve_stop({"token": "nope"})
-
-        self.assertEqual(403, code)
-        self.assertFalse(payload["ok"])
+    def test_bad_token_is_forbidden_and_never_shuts_down(self):
+        for body in ({}, {"token": "nope"}):
+            with self.subTest(body=body):
+                payload, code = web_ui.api_serve_stop(body)
+                self.assertEqual(403, code)
+                self.assertFalse(payload["ok"])
+        self.shutdown_mock.assert_not_called()
 
     def test_correct_token_is_accepted(self):
         payload, code = web_ui.api_serve_stop({"token": web_ui._SERVE_TOKEN})

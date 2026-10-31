@@ -39,7 +39,7 @@ class SaveLivenessTests(unittest.TestCase):
         self.assertTrue(cfg["enabled"])
         self.assertEqual(300.0, cfg["log_stale_stop_seconds"])
 
-    def test_save_writes_thresholds(self):
+    def test_save_writes_thresholds_and_keeps_stop_above_warn(self):
         result = web_ui.api_save_liveness(
             {"enabled": True, "log_stale_warn_seconds": 90,
              "log_stale_stop_seconds": 240})
@@ -50,7 +50,7 @@ class SaveLivenessTests(unittest.TestCase):
              "log_stale_warn_seconds": 90.0, "log_stale_stop_seconds": 240.0},
             self.saved["liveness"])
 
-    def test_stop_threshold_cannot_be_below_warn_threshold(self):
+        # stop 不能低于 warn：低于时被抬到 warn
         web_ui.api_save_liveness({"enabled": True,
                                   "log_stale_warn_seconds": 200,
                                   "log_stale_stop_seconds": 100})
@@ -74,9 +74,6 @@ class SaveLivenessTests(unittest.TestCase):
 
 
 class LivenessStateTests(unittest.TestCase):
-    def tearDown(self):
-        pass
-
     def test_prefers_live_state_from_the_state_machine(self):
         live = {"enabled": True, "status": "gone", "process": "stopped",
                 "log_age": None, "alert": "炉石已退出", "in_game": True}
@@ -119,7 +116,7 @@ class LivenessStateTests(unittest.TestCase):
         self.assertEqual("炉石疑似无响应", snapshot["liveness_alert"])
         self.assertTrue(snapshot["liveness"]["enabled"])
 
-    def test_name_match_state_falls_back_to_config(self):
+    def test_name_match_state_prefers_the_state_machine(self):
         with (
             patch.object(web_ui.CTRL, "fsm", None),
             patch.object(web_ui, "load_config",
@@ -127,21 +124,19 @@ class LivenessStateTests(unittest.TestCase):
         ):
             state = web_ui._name_match_state()
 
+        # 没有流程对象时回落到配置里的昵称，且不谎称匹配
         self.assertIsNone(state["matched"])
         self.assertEqual("TestUser#12345", state["config"])
 
-    def test_name_match_state_prefers_state_machine(self):
         live = {"config": "Old#1", "players": {"1": "New#2"}, "matched": False}
         fsm = SimpleNamespace(player_name_state=lambda: dict(live))
 
         with patch.object(web_ui.CTRL, "fsm", fsm):
-            state = web_ui._name_match_state()
-
-        self.assertFalse(state["matched"])
+            self.assertFalse(web_ui._name_match_state()["matched"])
 
 
 class OverlayCallbackTests(unittest.TestCase):
-    def test_overlay_liveness_callback_renders_a_row(self):
+    def test_overlay_rows_reflect_liveness_and_account(self):
         live = {"enabled": True, "status": "ok", "log_age": 5.0,
                 "in_game": True, "alert": None}
 
@@ -151,10 +146,8 @@ class OverlayCallbackTests(unittest.TestCase):
         self.assertEqual("运行中", row["value"])
         self.assertEqual(log_overlay.GREEN, row["value_color"])
 
-    def test_overlay_account_callback_renders_a_row(self):
-        live = {"config": "Old#1", "players": {"1": "New#2"}, "matched": False}
-
-        with patch.object(web_ui, "_name_match_state", return_value=dict(live)):
+        account = {"config": "Old#1", "players": {"1": "New#2"}, "matched": False}
+        with patch.object(web_ui, "_name_match_state", return_value=dict(account)):
             row = log_overlay.account_row(web_ui._overlay_account())
 
         self.assertEqual("不匹配", row["value"])
@@ -176,6 +169,12 @@ class OverlayCallbackTests(unittest.TestCase):
         self.assertIn("account_callback", bound)
         self.assertIs(bound["liveness_callback"], web_ui._overlay_liveness)
         self.assertIs(bound["account_callback"], web_ui._overlay_account)
+        # 浮窗「常驻」页签的三个回调（R3 页签 ↔ R2 装配的契约）。
+        for key in ("resident_callback", "on_resident_toggle", "on_resident_apply"):
+            self.assertIn(key, bound)
+        self.assertIs(bound["resident_callback"], web_ui._overlay_resident)
+        self.assertIs(bound["on_resident_toggle"], web_ui._overlay_resident_toggle)
+        self.assertIs(bound["on_resident_apply"], web_ui._overlay_resident_apply)
 
     def test_alerts_reach_the_overlay_log(self):
         alert = ("[12:00:00 ERROR] ⚠️ 炉石已退出：Hearthstone.exe 进程消失；"
@@ -191,19 +190,13 @@ class WebPageTests(unittest.TestCase):
     def setUp(self):
         self.html = INDEX_HTML.read_text(encoding="utf8")
 
-    def test_liveness_card_exists(self):
+    def test_page_contract_for_liveness(self):
         for token in ('id="chkLiveness"', 'id="inpLvWarn"', 'id="inpLvStop"',
                       'id="btnSaveLiveness"', 'id="livenessStatus"',
-                      'id="nameMatch"'):
-            self.assertIn(token, self.html)
-
-    def test_page_posts_to_the_liveness_api(self):
-        self.assertIn('post("/api/liveness"', self.html)
-
-    def test_page_warns_about_fullscreen_and_full_nickname(self):
-        self.assertIn("全屏", self.html)
-        self.assertIn("最大化", self.html)
-        self.assertIn("#编号", self.html)
+                      'id="nameMatch"', 'post("/api/liveness"',
+                      "全屏", "最大化", "#编号"):
+            with self.subTest(token=token):
+                self.assertIn(token, self.html)
 
 
 if __name__ == "__main__":

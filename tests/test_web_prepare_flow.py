@@ -31,6 +31,7 @@ class PrepareTests(unittest.TestCase):
          web_ui.CTRL.starting) = self._saved
 
     def test_prepare_never_starts_automation(self):
+        """包括「退出浮窗后再点开始运行」：只开浮窗、切前台，绝不自动开战。"""
         started, bound, foreground = [], [], []
         overlay = types.SimpleNamespace(is_running=lambda: False)
 
@@ -54,7 +55,7 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual([], started)          # 关键：没有自动开始对战
         self.assertEqual(1, len(bound))        # 浮窗已开启
         self.assertEqual(1, len(foreground))   # 已切炉石前台
-        self.assertTrue(web_ui.CTRL.prepared)
+        self.assertTrue(web_ui.CTRL.prepared)  # 就绪 → 按钮变「开始对战」
 
     def test_prepare_skips_overlay_when_already_open(self):
         bound = []
@@ -73,53 +74,26 @@ class PrepareTests(unittest.TestCase):
 
         self.assertEqual([], bound)
 
-    def test_prepare_refused_while_running(self):
-        web_ui.CTRL.automation_thread = object()
+    def test_prepare_refused_while_running_or_starting(self):
+        cases = (
+            ("running", object(), False, "运行中"),
+            ("starting", None, True, "启动中"),
+        )
+        for name, thread, starting, fragment in cases:
+            with self.subTest(state=name):
+                web_ui.CTRL.automation_thread = thread
+                web_ui.CTRL.starting = starting
 
-        result = web_ui.api_prepare({})
+                result = web_ui.api_prepare({})
 
-        self.assertFalse(result["ok"])
-        self.assertIn("运行中", result["error"])
-
-    def test_prepare_refused_while_starting(self):
-        web_ui.CTRL.automation_thread = None
-        web_ui.CTRL.starting = True
-
-        result = web_ui.api_prepare({})
-
-        self.assertFalse(result["ok"])
-        self.assertIn("启动中", result["error"])
+                self.assertFalse(result["ok"])
+                self.assertIn(fragment, result["error"])
 
     def test_status_exposes_prepared_flag(self):
         web_ui.CTRL.prepared = False
         self.assertFalse(web_ui.status_snapshot()["prepared"])
         web_ui.CTRL.prepared = True
         self.assertTrue(web_ui.status_snapshot()["prepared"])
-
-    def test_prepare_reopens_the_overlay_without_starting(self):
-        """退出浮窗 → 再点「开始运行」：只把浮窗开回来，绝不开始对战。"""
-        started, bound = [], []
-        overlay = types.SimpleNamespace(is_running=lambda: False)
-
-        with (
-            patch.object(web_ui, "log_overlay", overlay),
-            patch.object(web_ui, "api_start",
-                         side_effect=lambda body=None: started.append(body)),
-            patch.object(web_ui, "_bind_overlay",
-                         side_effect=lambda: bound.append(1)),
-            patch.object(web_ui, "_bring_hearthstone_foreground"),
-            patch.object(web_ui.threading, "Thread", _SyncThread),
-            patch.object(web_ui, "_log"),
-        ):
-            web_ui.CTRL.automation_thread = None
-            web_ui.CTRL.starting = False
-            web_ui.CTRL.prepared = False        # 刚点过「退出浮窗」
-            result = web_ui.api_prepare({})
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(1, len(bound))         # 浮窗重新开出来
-        self.assertEqual([], started)           # 关键：没有开始操作
-        self.assertTrue(web_ui.CTRL.prepared)   # 就绪 → 按钮变「开始对战」
 
 
 class OverlayStateSyncTests(unittest.TestCase):
@@ -148,7 +122,7 @@ class OverlayStateSyncTests(unittest.TestCase):
         self.assertIn("开始运行", logged[0][1])
         self.assertIn("开始对战", logged[0][1])
 
-    def test_toggle_overlay_off_resets_prepared(self):
+    def test_toggle_overlay_follows_the_overlay_state(self):
         stopped = []
         overlay = types.SimpleNamespace(is_running=lambda: True,
                                         stop=lambda: stopped.append(1))
@@ -162,7 +136,6 @@ class OverlayStateSyncTests(unittest.TestCase):
         self.assertFalse(web_ui.CTRL.prepared)
         self.assertIn("开始运行", result["message"])
 
-    def test_toggle_overlay_on_marks_prepared(self):
         bound = []
         overlay = types.SimpleNamespace(is_running=lambda: False)
         web_ui.CTRL.prepared = False
@@ -188,25 +161,21 @@ class OverlayStateSyncTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(web_ui.CTRL.prepared)      # 没动就绪状态
 
-    def test_status_exposes_overlay_running(self):
-        with patch.object(web_ui, "log_overlay",
-                          types.SimpleNamespace(is_running=lambda: True)):
-            self.assertTrue(web_ui.status_snapshot()["overlay_running"])
-
-        with patch.object(web_ui, "log_overlay",
-                          types.SimpleNamespace(is_running=lambda: False)):
-            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
-
-        with patch.object(web_ui, "log_overlay", None):
-            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
-
-    def test_status_tolerates_a_broken_overlay_module(self):
+    def test_status_exposes_overlay_running_and_tolerates_failures(self):
         def _boom():
             raise RuntimeError("浮窗线程崩了")
 
-        with patch.object(web_ui, "log_overlay",
-                          types.SimpleNamespace(is_running=_boom)):
-            self.assertFalse(web_ui.status_snapshot()["overlay_running"])
+        cases = (
+            ("running", types.SimpleNamespace(is_running=lambda: True), True),
+            ("stopped", types.SimpleNamespace(is_running=lambda: False), False),
+            ("missing_module", None, False),
+            ("broken_module", types.SimpleNamespace(is_running=_boom), False),
+        )
+        for name, overlay, expected in cases:
+            with self.subTest(overlay=name), \
+                    patch.object(web_ui, "log_overlay", overlay):
+                self.assertEqual(expected,
+                                 web_ui.status_snapshot()["overlay_running"])
 
 
 class OverlayPageTests(unittest.TestCase):
@@ -285,7 +254,7 @@ class OverlayVerificationTests(unittest.TestCase):
         self.assertTrue(any(level == "WARN" and "没能打开" in msg
                             for level, msg in logged), logged)
 
-    def test_overlay_that_really_runs_keeps_prepared(self):
+    def test_verification_only_acts_on_known_statuses(self):
         overlay = types.SimpleNamespace(is_running=lambda: True)
 
         with patch.object(web_ui, "log_overlay", overlay):
@@ -295,8 +264,7 @@ class OverlayVerificationTests(unittest.TestCase):
         self.assertTrue(shown)
         self.assertTrue(web_ui.CTRL.prepared)
 
-    def test_verification_skips_unknown_statuses(self):
-        """未知状态不改变 prepared，也不替换当前自动化线程。"""
+        # 未知状态不改变 prepared，也不替换当前自动化线程
         current_thread = object()
         web_ui.CTRL.prepared = True
         web_ui.CTRL.automation_thread = current_thread

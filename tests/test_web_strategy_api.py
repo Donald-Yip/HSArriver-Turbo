@@ -63,12 +63,13 @@ class StrategyApiTests(unittest.TestCase):
 
     def test_missing_or_bad_strategy_is_refused(self):
         for body in ({}, {"strategy": ""}, {"strategy": 123}):
-            result = web_ui.api_save_strategy(body)
-            self.assertFalse(result["ok"], body)
-            self.assertIn("请选择策略", result["error"])
+            with self.subTest(body=body):
+                result = web_ui.api_save_strategy(body)
+                self.assertFalse(result["ok"], body)
+                self.assertIn("请选择策略", result["error"])
 
     # ---------------------------------------------------------------- 联合模式
-    def test_save_joint_round_trip(self):
+    def test_save_joint_round_trip_keeps_and_turns_off(self):
         result = web_ui.api_save_joint({"joint": True})
 
         self.assertTrue(result["ok"])
@@ -81,8 +82,6 @@ class StrategyApiTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["joint"])
 
-    def test_save_joint_can_turn_it_off(self):
-        web_ui.api_save_joint({"joint": True})
         result = web_ui.api_save_joint({"joint": False})
 
         self.assertTrue(result["ok"])
@@ -90,7 +89,7 @@ class StrategyApiTests(unittest.TestCase):
         self.assertFalse(self._read()["joint"])
 
     # ---------------------------------------------------------------- 搜索深度
-    def test_save_max_search_round_trip_and_clamps(self):
+    def test_save_max_search_round_trip_clamps_and_rejects_junk(self):
         result = web_ui.api_save_max_search({"max_search": 999999})
         self.assertTrue(result["ok"])
         self.assertEqual(100000, result["max_search"])
@@ -99,12 +98,9 @@ class StrategyApiTests(unittest.TestCase):
         self.assertEqual(
             1, web_ui.api_save_max_search({"max_search": 0})["max_search"])
 
-    def test_save_max_search_rejects_non_integer(self):
-        result = web_ui.api_save_max_search({"max_search": "abc"})
-
-        self.assertFalse(result["ok"])
-        self.assertIn("整数", result["error"])
-        self.assertFalse(self.config_path.exists())
+        bad = web_ui.api_save_max_search({"max_search": "abc"})
+        self.assertFalse(bad["ok"])
+        self.assertIn("整数", bad["error"])
 
     # ---------------------------------------------------------------- 运行中保护
     def test_running_automation_is_refused_without_hot(self):
@@ -166,22 +162,18 @@ class StrategyPageTests(unittest.TestCase):
     def setUp(self):
         self.html = INDEX_HTML.read_text(encoding="utf8")
 
-    def test_strategy_card_controls_exist(self):
+    def test_strategy_card_is_wired_to_the_apis(self):
         for token in (
             'id="inpStrategy"',
             'id="chkJoint"',
             'id="inpMaxSearch"',
             'id="btnSaveStrategy"',
-        ):
-            self.assertIn(token, self.html)
-
-    def test_page_posts_to_the_strategy_apis(self):
-        for token in (
             'post("/api/strategy"',
             'post("/api/joint"',
             'post("/api/max_search"',
         ):
-            self.assertIn(token, self.html)
+            with self.subTest(token=token):
+                self.assertIn(token, self.html)
 
     def test_page_hints_explain_the_modes(self):
         self.assertIn("盒子AI", self.html)

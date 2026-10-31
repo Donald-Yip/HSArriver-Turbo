@@ -57,10 +57,9 @@ class SelfcheckCacheTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(first["summary"], third["summary"])
 
-    def test_status_is_unchecked_before_the_first_run(self):
+    def test_status_summary_before_and_after_a_run(self):
         self.assertEqual({"checked": False}, web_ui.selfcheck_summary())
 
-    def test_status_carries_the_summary_after_a_run(self):
         runner = FakeSelfcheckRunner(lambda: fake_result(ok=False, failed=2))
         with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             web_ui.run_selfcheck(force=True)
@@ -184,23 +183,19 @@ class SelfcheckApiTests(unittest.TestCase):
         with urlopen(request, timeout=60) as resp:
             return json.loads(resp.read().decode("utf8"))
 
-    def test_get_selfcheck_returns_the_items(self):
+    def test_get_returns_items_and_post_forces_a_rerun(self):
         runner = FakeSelfcheckRunner(fake_result)
         with patch.object(web_ui.selfcheck, "run_checks", new=runner):
             data = self._get("/api/selfcheck")
 
-        self.assertTrue(data["ok"])
-        self.assertTrue(data["result"]["ok"])
-        self.assertEqual(1, len(data["result"]["items"]))
-        self.assertEqual(1, runner.calls)
+            self.assertTrue(data["ok"])
+            self.assertTrue(data["result"]["ok"])
+            self.assertEqual(1, len(data["result"]["items"]))
+            self.assertEqual(1, runner.calls)      # GET 命中缓存只跑一次
 
-    def test_post_selfcheck_forces_a_rerun(self):
-        runner = FakeSelfcheckRunner(fake_result)
-        with patch.object(web_ui.selfcheck, "run_checks", new=runner):
-            self._get("/api/selfcheck")
             self._post("/api/selfcheck")
 
-        self.assertEqual(2, runner.calls)
+        self.assertEqual(2, runner.calls)          # POST 强制重跑
 
     def test_status_exposes_the_selfcheck_summary(self):
         web_ui._selfcheck_state["result"] = fake_result(ok=False, failed=1)
@@ -221,23 +216,15 @@ class SelfcheckPageTests(unittest.TestCase):
     def setUp(self):
         self.html = INDEX_HTML.read_text(encoding="utf8")
 
-    def test_selfcheck_card_exists(self):
+    def test_page_contract_for_selfcheck(self):
         for token in ('id="selfcheckBadge"', 'id="btnSelfcheck"',
                       'id="selfcheckSummary"', 'id="selfcheckList"',
-                      'id="cardSelfcheck"'):
-            self.assertIn(token, self.html)
-
-    def test_page_calls_the_selfcheck_api(self):
-        self.assertIn('post("/api/selfcheck"', self.html)
-        self.assertIn('get("/api/selfcheck")', self.html)
-
-    def test_page_spells_out_the_python_312_requirement(self):
-        self.assertIn("Python 必须是 3.12", self.html)
-        self.assertIn("paddlepaddle", self.html)
-
-    def test_banner_prompts_on_selfcheck_failure(self):
-        self.assertIn("环境自检发现", self.html)
-        self.assertIn("pip install -r requirements.txt", self.html)
+                      'id="cardSelfcheck"',
+                      'post("/api/selfcheck"', 'get("/api/selfcheck")',
+                      "Python 必须是 3.12", "paddlepaddle",
+                      "环境自检发现", "pip install -r requirements.txt"):
+            with self.subTest(token=token):
+                self.assertIn(token, self.html)
 
 
 if __name__ == "__main__":

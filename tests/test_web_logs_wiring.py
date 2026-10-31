@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """浮窗「日志」行的数据链：扫描缓存、体积配色、打开位置、一键清理、运行日志裁剪。"""
 
-import json
 import os
 import shutil
 import tempfile
-import threading
 import time
 import unittest
 import uuid
@@ -56,71 +54,49 @@ class TempLogsCase(unittest.TestCase):
 class LogsRowTests(unittest.TestCase):
     """浮窗「日志」行的配色与文案（纯函数，不建窗口）。"""
 
-    def test_unknown_data_shows_a_dash(self):
-        row = log_overlay.logs_row(None)
+    def test_unknown_or_broken_data_shows_a_dash(self):
+        for info in (None, {"bytes": "坏数据", "files": None}):
+            with self.subTest(info=info):
+                self.assertEqual("—", log_overlay.logs_row(info)["value"])
+        self.assertEqual(
+            log_overlay.MARKER_UNKNOWN, log_overlay.logs_row(None)["marker"])
 
-        self.assertEqual("—", row["value"])
-        self.assertEqual(log_overlay.MARKER_UNKNOWN, row["marker"])
-
-    def test_small_logs_are_green(self):
-        row = log_overlay.logs_row({"bytes": 40 * 1024**2, "files": 12})
-
-        self.assertEqual("40.0 MB", row["value"])
-        self.assertEqual("12 个文件", row["detail"])
-        self.assertEqual(log_overlay.GREEN, row["marker"])
-        self.assertEqual(log_overlay.GREEN, row["value_color"])
-
-    def test_mid_size_logs_are_warn(self):
-        row = log_overlay.logs_row({"bytes": 270 * 1024**2, "files": 194})
-
-        self.assertEqual("270.0 MB", row["value"])
-        self.assertEqual(log_overlay.WARN, row["marker"])
-
-    def test_huge_logs_are_danger(self):
-        row = log_overlay.logs_row({"bytes": 2 * 1024**3, "files": 900})
-
-        self.assertEqual(log_overlay.DANGER, row["marker"])
-        self.assertEqual("2.0 GB", row["value"])
-
-    def test_thresholds_come_from_the_caller(self):
-        row = log_overlay.logs_row(
-            {
-                "bytes": 10 * 1024**2,
-                "files": 1,
-                "warn_bytes": 5 * 1024**2,
-                "danger_bytes": 8 * 1024**2,
-            }
+    def test_size_thresholds_pick_the_marker(self):
+        cases = (
+            ("small", {"bytes": 40 * 1024**2, "files": 12},
+             "40.0 MB", "12 个文件", log_overlay.GREEN),
+            ("mid", {"bytes": 270 * 1024**2, "files": 194},
+             "270.0 MB", None, log_overlay.WARN),
+            ("huge", {"bytes": 2 * 1024**3, "files": 900},
+             "2.0 GB", None, log_overlay.DANGER),
+            # 阈值由调用方传入时以调用方为准
+            ("caller_thresholds",
+             {"bytes": 10 * 1024**2, "files": 1,
+              "warn_bytes": 5 * 1024**2, "danger_bytes": 8 * 1024**2},
+             None, None, log_overlay.DANGER),
         )
+        for name, info, value, detail, marker in cases:
+            with self.subTest(size=name):
+                row = log_overlay.logs_row(info)
+                if value is not None:
+                    self.assertEqual(value, row["value"])
+                if detail is not None:
+                    self.assertEqual(detail, row["detail"])
+                self.assertEqual(marker, row["marker"])
+                if name == "small":
+                    self.assertEqual(log_overlay.GREEN, row["value_color"])
 
-        self.assertEqual(log_overlay.DANGER, row["marker"])
-
-    def test_recent_clear_is_flashed_in_the_detail(self):
+    def test_recent_clear_flashes_then_falls_back_to_file_count(self):
         now = time.time()
-        row = log_overlay.logs_row(
-            {
-                "bytes": 0,
-                "files": 0,
-                "cleared_at": now - 1.0,
-                "cleared_bytes": 270 * 1024**2,
-            },
-            now=now,
+        cases = (
+            ("recent", {"bytes": 0, "files": 0, "cleared_at": now - 1.0,
+                        "cleared_bytes": 270 * 1024**2}, "已清理 270.0 MB"),
+            ("old", {"bytes": 0, "files": 0, "cleared_at": now - 60.0,
+                     "cleared_bytes": 123}, "0 个文件"),
         )
-
-        self.assertEqual("已清理 270.0 MB", row["detail"])
-
-    def test_old_clear_goes_back_to_the_file_count(self):
-        now = time.time()
-        row = log_overlay.logs_row(
-            {"bytes": 0, "files": 0, "cleared_at": now - 60.0, "cleared_bytes": 123},
-            now=now,
-        )
-
-        self.assertEqual("0 个文件", row["detail"])
-
-    def test_broken_value_does_not_crash_the_row(self):
-        row = log_overlay.logs_row({"bytes": "坏数据", "files": None})
-
-        self.assertEqual("—", row["value"])
+        for name, info, detail in cases:
+            with self.subTest(cleared=name):
+                self.assertEqual(detail, log_overlay.logs_row(info, now=now)["detail"])
 
 
 class SnapshotTests(TempLogsCase):
@@ -136,7 +112,7 @@ class SnapshotTests(TempLogsCase):
         self.assertEqual(500, data["runtime_bytes"])
         self.assertEqual(web_ui.LOG_WARN_BYTES, data["warn_bytes"])
 
-    def test_snapshot_is_cached_until_ttl_or_force(self):
+    def test_snapshot_cache_honours_ttl_force_and_invalidation(self):
         self._battle_log(size=10)
         first = web_ui._script_logs_snapshot(force=True)
         self._battle_log("对战日志_20261008_130000.txt", size=20)
@@ -147,14 +123,9 @@ class SnapshotTests(TempLogsCase):
         self.assertEqual(first["bytes"], cached["bytes"])  # 还是旧结果
         self.assertEqual(30, forced["bytes"])  # 强制重扫
 
-    def test_invalidate_makes_the_next_read_fresh(self):
-        self._battle_log(size=10)
-        web_ui._script_logs_snapshot(force=True)
-        self._battle_log("对战日志_20261008_130000.txt", size=20)
-
+        self._battle_log("对战日志_20261008_140000.txt", size=5)
         web_ui._script_logs_invalidate()
-
-        self.assertEqual(30, web_ui._script_logs_snapshot()["bytes"])
+        self.assertEqual(35, web_ui._script_logs_snapshot()["bytes"])
 
     def test_overlay_callback_survives_a_broken_scanner(self):
         with patch.object(
@@ -196,21 +167,18 @@ class OverlayLogActionsTests(TempLogsCase):
         # 清完缓存也要失效：浮窗下一拍就显示 0
         self.assertIsNone(web_ui._log_scan_cache["data"])
 
-    def test_clear_worker_says_when_there_is_nothing_to_clear(self):
+    def test_clear_worker_reports_nothing_to_do_or_undeletable_files(self):
         logged = []
 
-        with patch.object(
-            web_ui,
-            "_log",
-            side_effect=lambda level, msg: logged.append((level, str(msg))),
-        ):
-            web_ui._clear_script_logs_worker()
+        def capture(level, msg):
+            logged.append((level, str(msg)))
 
+        with patch.object(web_ui, "_log", side_effect=capture):
+            web_ui._clear_script_logs_worker()
         self.assertEqual([("SYS", "已无可清理的脚本日志。")], logged)
 
-    def test_clear_worker_warns_about_files_it_could_not_delete(self):
         self._battle_log()
-        logged = []
+        logged.clear()
 
         def fake_clear(log_dir=None, runtime_log=None, logger=None):
             return {
@@ -224,11 +192,7 @@ class OverlayLogActionsTests(TempLogsCase):
 
         with (
             patch.object(script_logs, "clear", side_effect=fake_clear),
-            patch.object(
-                web_ui,
-                "_log",
-                side_effect=lambda level, msg: logged.append((level, str(msg))),
-            ),
+            patch.object(web_ui, "_log", side_effect=capture),
         ):
             web_ui._clear_script_logs_worker()
 
@@ -261,14 +225,14 @@ class OverlayLogActionsTests(TempLogsCase):
             logged,
         )
 
-    def test_open_logs_failure_is_a_warning(self):
-        logged = []
+        # 打不开时降级成 WARN，而不是静默成功
+        logged.clear()
 
-        def fake_open(log_dir=None, opener=None, runner=None):
+        def fake_fail(log_dir=None, opener=None, runner=None):
             return {"ok": False, "opened": None, "target": "", "error": "炸了"}
 
         with (
-            patch.object(script_logs, "open_location", side_effect=fake_open),
+            patch.object(script_logs, "open_location", side_effect=fake_fail),
             patch.object(
                 web_ui,
                 "_log",
@@ -276,18 +240,17 @@ class OverlayLogActionsTests(TempLogsCase):
             ),
         ):
             self.assertFalse(web_ui._overlay_open_logs())
-
         self.assertEqual("WARN", logged[0][0])
 
 
 class OverlayKeyTests(unittest.TestCase):
-    def test_log_lines_reach_the_overlay(self):
-        self.assertTrue(
-            web_ui._overlay_key("已清理脚本日志：删除 193 个文件，释放 214.2 MB")
-        )
-        self.assertTrue(web_ui._overlay_key("已打开最新一份对战日志：C:\\logs"))
-
-    def test_ocr_spam_still_filtered(self):
+    def test_log_lines_reach_the_overlay_and_ocr_spam_does_not(self):
+        for line in (
+            "已清理脚本日志：删除 193 个文件，释放 214.2 MB",
+            "已打开最新一份对战日志：C:\\logs",
+        ):
+            with self.subTest(line=line):
+                self.assertTrue(web_ui._overlay_key(line))
         self.assertFalse(web_ui._overlay_key("[OCR] 图 273x347 行 0 置信 0.00"))
 
 
@@ -346,9 +309,9 @@ class LogTrimTests(TempLogsCase):
         self.assertIn("[SYS] 小日志", written)
         self.assertLess(len(written), web_ui.LOG_TRIM_BYTES)
         self.assertFalse(self.runtime.with_suffix(".txt.tmp").exists())
-
-    def test_trim_helper_returns_false_for_a_missing_file(self):
-        self.assertFalse(web_ui._trim_runtime_log(self.tmp / "nope.txt", time.time()))
+        # 文件不存在时裁剪助手如实返回 False（不抛异常）
+        self.assertFalse(
+            web_ui._trim_runtime_log(self.tmp / "nope.txt", time.time()))
 
 
 class OverlayWiringTests(unittest.TestCase):
@@ -361,7 +324,7 @@ class OverlayWiringTests(unittest.TestCase):
         for name in ("logs_callback", "on_open_logs", "on_clear_logs"):
             self.assertIn(name, params)
 
-    def test_buttons_exist_and_do_not_share_slots(self):
+    def test_layout_pins_the_log_buttons_and_the_self_check_span(self):
         layout = log_overlay.BTN_LAYOUT
         self.assertEqual((3, 0), layout["open_logs"])
         self.assertEqual((3, 1), layout["clear_logs"])
@@ -370,9 +333,7 @@ class OverlayWiringTests(unittest.TestCase):
         slots = list(layout.values())
         self.assertEqual(len(slots), len(set(slots)))
 
-    def test_self_check_is_the_last_spanning_row(self):
-        layout = log_overlay.BTN_LAYOUT
-        # 「装好没反应？」是新增的最后一行（横跨整行）；退出脚本仍在它上面。
+        # 「装好没反应？」是最后一行（横跨整行）；退出脚本仍在它上面。
         row, _column = layout["self_check"]
         rows = [r for key, (r, _c) in layout.items() if key != "self_check"]
         self.assertEqual(max(rows) + 1, row)
@@ -423,19 +384,16 @@ class OverlayWiringTests(unittest.TestCase):
         self.assertIs(bound["on_open_logs"], web_ui._overlay_open_logs)
         self.assertIs(bound["on_clear_logs"], web_ui._overlay_clear_logs)
 
-    def test_confirm_dialog_text_mentions_both_files(self):
+    def test_confirm_dialog_spells_out_what_gets_deleted(self):
         detail = log_overlay.confirm_clear_detail(
             193, "214.2 MB", "56.0 MB", "270.2 MB"
         )
+        for token in ("193 个对战日志", "214.2 MB", "ui_log_last.txt", "270.2 MB"):
+            self.assertIn(token, detail)
+        self.assertNotIn("出错存档", detail)
 
-        self.assertIn("193 个对战日志", detail)
-        self.assertIn("214.2 MB", detail)
-        self.assertIn("ui_log_last.txt", detail)
-        self.assertIn("270.2 MB", detail)
-
-    def test_confirm_dialog_warns_about_error_archives(self):
         # 有出错存档时，必须把「会删掉未导出的错误截图/日志」的危害写清楚。
-        detail = log_overlay.confirm_clear_detail(
+        with_archives = log_overlay.confirm_clear_detail(
             10,
             "10.0 MB",
             "1.0 MB",
@@ -443,15 +401,8 @@ class OverlayWiringTests(unittest.TestCase):
             feedback_count=12,
             feedback_size="18.0 MB",
         )
-        self.assertIn("出错存档", detail)
-        self.assertIn("12 份", detail)
-        self.assertIn("18.0 MB", detail)
-        self.assertIn("无法恢复", detail)
-        self.assertIn("建议先", detail)
-
-    def test_confirm_without_archives_no_danger_line(self):
-        detail = log_overlay.confirm_clear_detail(1, "1.0 MB", "0 B", "1.0 MB")
-        self.assertNotIn("出错存档", detail)
+        for token in ("出错存档", "12 份", "18.0 MB", "无法恢复", "建议先"):
+            self.assertIn(token, with_archives)
 
 
 class BattleFeedbackContextTests(unittest.TestCase):

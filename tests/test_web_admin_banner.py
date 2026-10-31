@@ -23,14 +23,10 @@ def render(ansi):
 
 
 class AdminWarningBannerTests(unittest.TestCase):
-    def test_message_is_printed_three_times(self):
+    def test_plain_banner_repeats_warning_and_hint_three_times(self):
         output = render(ansi=False)
 
         self.assertEqual(3, output.count(web_ui.ADMIN_WARNING_TITLE))
-
-    def test_banner_carries_the_fix_hint(self):
-        output = render(ansi=False)
-
         self.assertEqual(3, output.count(web_ui.ADMIN_WARNING_HINT))
         self.assertIn("管理员身份", output)
         self.assertIn("python web_ui.py", output)
@@ -41,18 +37,15 @@ class AdminWarningBannerTests(unittest.TestCase):
         self.assertNotIn("\x1b[", output)
         self.assertIn("█", output)  # 块字符整框：纯文本下也醒目
 
-    def test_ansi_terminal_gets_bold_and_bright_colors(self):
+    def test_ansi_terminal_gets_bold_bright_colors_and_configurable_repeat(self):
         output = render(ansi=True)
 
         self.assertIn("\x1b[1;4;91m", output)   # 加粗 + 下划线 + 亮红
         self.assertIn("\x1b[0m", output)
         self.assertEqual(3, output.count(web_ui.ADMIN_WARNING_TITLE))
 
-    def test_repeat_count_is_configurable(self):
         stream = io.StringIO()
-
         web_ui._print_admin_warning(stream=stream, ansi=False, repeat=1)
-
         self.assertEqual(1, stream.getvalue().count(web_ui.ADMIN_WARNING_TITLE))
 
     def test_no_ansi_when_output_is_not_a_terminal(self):

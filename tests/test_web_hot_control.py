@@ -14,7 +14,7 @@ import os
 import sys
 import types
 import unittest
-import unittest.mock
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -63,56 +63,49 @@ class HotChannelTests(unittest.TestCase):
         self.saved_cfg = dict(cfg)
 
     # ------------------------------------------------ 守卫没有被放松
-    def test_delays_without_hot_is_still_blocked_while_running(self):
-        result = web_ui.api_save_delays({"pre_action_delay_seconds": 1})
-        self.assertFalse(result["ok"])
-        self.assertIn("运行中", result["error"])
-        self.assertEqual(self.saved_cfg, {})
-
-    def test_human_like_without_hot_is_still_blocked(self):
-        self.assertFalse(web_ui.api_save_human_like({"enabled": True})["ok"])
-
-    def test_liveness_without_hot_is_still_blocked(self):
-        self.assertFalse(web_ui.api_save_liveness({"enabled": False})["ok"])
-
-    def test_concede_without_hot_is_still_blocked(self):
-        self.assertFalse(web_ui.api_save_concede({"enabled": True})["ok"])
-
-    def test_rank_stop_without_hot_is_still_blocked(self):
-        self.assertFalse(web_ui.api_save_rank_stop({"enabled": True})["ok"])
-
-    def test_config_without_hot_is_still_blocked(self):
-        self.assertFalse(web_ui.api_save_config({"name": "A#1"})["ok"])
+    def test_endpoints_without_hot_stay_blocked_while_running(self):
+        cases = (
+            ("delays", web_ui.api_save_delays, {"pre_action_delay_seconds": 1}),
+            ("human_like", web_ui.api_save_human_like, {"enabled": True}),
+            ("liveness", web_ui.api_save_liveness, {"enabled": False}),
+            ("concede", web_ui.api_save_concede, {"enabled": True}),
+            ("rank_stop", web_ui.api_save_rank_stop, {"enabled": True}),
+            ("config", web_ui.api_save_config, {"name": "A#1"}),
+        )
+        for name, api, body in cases:
+            with self.subTest(endpoint=name):
+                result = api(body)
+                self.assertFalse(result["ok"])
+                self.assertIn("运行中", result["error"])
+        self.assertEqual({}, self.saved_cfg)
 
     # ------------------------------------------------ 带 hot 就能改
-    def test_human_like_hot_saves_while_running(self):
-        result = web_ui.api_save_human_like(
-            {"hot": True, "enabled": True, "post_delay_min": 0.5,
-             "post_delay_max": 2.0})
-        self.assertTrue(result["ok"])
-        self.assertTrue(self.saved_cfg["human_like"]["enabled"])
-        self.assertEqual(self.saved_cfg["human_like"]["post_delay_max"], 2.0)
-
-    def test_liveness_hot_saves_while_running(self):
-        result = web_ui.api_save_liveness(
-            {"hot": True, "enabled": False, "log_stale_warn_seconds": 60,
-             "log_stale_stop_seconds": 120})
-        self.assertTrue(result["ok"])
-        self.assertFalse(self.saved_cfg["liveness"]["enabled"])
-
-    def test_concede_hot_saves_while_running(self):
-        result = web_ui.api_save_concede(
-            {"hot": True, "enabled": True, "threshold": 12, "rounds": 4})
-        self.assertTrue(result["ok"])
-        self.assertEqual(self.saved_cfg["auto_concede"]["rounds"], 4)
-        self.assertEqual(self.saved_cfg["auto_concede"]["threshold"], 12.0)
-
-    def test_rank_stop_hot_saves_while_running(self):
-        result = web_ui.api_save_rank_stop(
-            {"hot": True, "enabled": True, "mode": "legend_number",
-             "legend_number": 500})
-        self.assertTrue(result["ok"])
-        self.assertEqual(self.saved_cfg["rank_stop"]["legend_number"], 500)
+    def test_hot_flag_saves_through_while_running(self):
+        cases = (
+            ("human_like", web_ui.api_save_human_like,
+             {"enabled": True, "post_delay_min": 0.5, "post_delay_max": 2.0},
+             lambda saved: (
+                 self.assertTrue(saved["human_like"]["enabled"]),
+                 self.assertEqual(saved["human_like"]["post_delay_max"], 2.0))),
+            ("liveness", web_ui.api_save_liveness,
+             {"enabled": False, "log_stale_warn_seconds": 60,
+              "log_stale_stop_seconds": 120},
+             lambda saved: self.assertFalse(saved["liveness"]["enabled"])),
+            ("concede", web_ui.api_save_concede,
+             {"enabled": True, "threshold": 12, "rounds": 4},
+             lambda saved: (
+                 self.assertEqual(saved["auto_concede"]["rounds"], 4),
+                 self.assertEqual(saved["auto_concede"]["threshold"], 12.0))),
+            ("rank_stop", web_ui.api_save_rank_stop,
+             {"enabled": True, "mode": "legend_number", "legend_number": 500},
+             lambda saved: self.assertEqual(
+                 saved["rank_stop"]["legend_number"], 500)),
+        )
+        for name, api, body, check in cases:
+            with self.subTest(endpoint=name):
+                result = api(dict(body, hot=True))
+                self.assertTrue(result["ok"])
+                check(self.saved_cfg)
 
     def test_config_hot_applies_constants_while_running(self):
         with patch.object(web_ui, "_apply_constants") as apply_constants:
@@ -164,6 +157,7 @@ class HotChannelTests(unittest.TestCase):
         # 没在跑就不该动内存里的实例（下次「开始对战」会重新读盘）
         self.assertEqual(fake.recommendation_config.pre_action_delay_seconds, 7.0)
 
+    # ------------------------------------------------ 校验规则照旧
     def test_hot_delays_still_enforces_bounds(self):
         result = web_ui.api_save_delays(
             {"hot": True, "pre_action_delay_seconds": 9999})
@@ -185,6 +179,7 @@ class HotChannelTests(unittest.TestCase):
         self.assertFalse(web_ui._hot_requested({}))
         self.assertFalse(web_ui._hot_requested(None))
         self.assertFalse(web_ui._hot_requested({"hot": 0}))
+
 
 class ScreenshotApiTests(unittest.TestCase):
     """按需抓图 API：只截图、落盘、返回路径；参数错误要优雅拒绝。"""
@@ -280,45 +275,32 @@ class ScreenshotApiTests(unittest.TestCase):
             log.assert_not_called()
 
     # ---------------------------------------------------------- 窗口状态守卫
-    def test_minimized_window_falls_back_to_full_screen(self):
-        """炉石最小化时 get_HS_hwnd() 仍有句柄但客户区是 0×0 —— 必须退化为整屏，
-        而不是截一块没意义的画面还自称"炉石客户区"。"""
+    def test_window_state_guard(self):
+        """最小化 / 屏幕外 / 没窗口都必须退化为整屏，只放行健康的客户区。"""
         import display_mapping
-        with patch.object(display_mapping, "hwnd_of", return_value=4242), \
-                patch.object(display_mapping, "read_client_rect",
-                             return_value=(0, 0, 0, 0)):
-            ok, why = web_ui._hs_client_capture_ready()
-        self.assertFalse(ok)
-        self.assertIn("最小化", why)
-
-    def test_offscreen_window_is_rejected(self):
-        import display_mapping
-        with patch.object(display_mapping, "hwnd_of", return_value=4242), \
-                patch.object(display_mapping, "read_client_rect",
-                             return_value=(0, 0, 1920, 1080)), \
-                patch.object(display_mapping, "client_to_screen",
-                             return_value=(-32000, -32000)):
-            ok, why = web_ui._hs_client_capture_ready()
-        self.assertFalse(ok)
-        self.assertIn("屏幕外", why)
-
-    def test_no_window_is_reported(self):
-        import display_mapping
-        with patch.object(display_mapping, "hwnd_of", return_value=0):
-            ok, why = web_ui._hs_client_capture_ready()
-        self.assertFalse(ok)
-        self.assertIn("未运行", why)
-
-    def test_healthy_window_passes(self):
-        import display_mapping
-        with patch.object(display_mapping, "hwnd_of", return_value=4242), \
-                patch.object(display_mapping, "read_client_rect",
-                             return_value=(0, 0, 1920, 1080)), \
-                patch.object(display_mapping, "client_to_screen",
-                             return_value=(787, 491)):
-            ok, why = web_ui._hs_client_capture_ready()
-        self.assertTrue(ok)
-        self.assertEqual(why, "")
+        cases = (
+            ("no_window", {"hwnd_of": 0}, False, "未运行"),
+            ("minimized", {"hwnd_of": 4242,
+                           "read_client_rect": (0, 0, 0, 0)}, False, "最小化"),
+            ("offscreen", {"hwnd_of": 4242,
+                           "read_client_rect": (0, 0, 1920, 1080),
+                           "client_to_screen": (-32000, -32000)},
+             False, "屏幕外"),
+            ("healthy", {"hwnd_of": 4242,
+                         "read_client_rect": (0, 0, 1920, 1080),
+                         "client_to_screen": (787, 491)}, True, ""),
+        )
+        for name, mocks, expected_ok, fragment in cases:
+            with self.subTest(window=name), ExitStack() as stack:
+                for attr, value in mocks.items():
+                    stack.enter_context(
+                        patch.object(display_mapping, attr, return_value=value))
+                ok, why = web_ui._hs_client_capture_ready()
+                self.assertEqual(expected_ok, ok)
+                if fragment:
+                    self.assertIn(fragment, why)
+                else:
+                    self.assertEqual("", why)
 
     def test_client_capture_falls_back_when_minimized(self):
         import display_mapping
@@ -339,16 +321,14 @@ class PortExclusivityTests(unittest.TestCase):
     端口顺延逻辑因此形同虚设，必须显式关掉。"""
 
     def test_control_server_refuses_to_share_a_port(self):
+        self.assertFalse(web_ui._ControlServer.allow_reuse_address,
+                         "开着它 = 端口顺延失效（Windows 语义）")
         first = web_ui._ControlServer(("127.0.0.1", 0), web_ui.Handler)
         self.addCleanup(first.server_close)
         port = int(first.server_address[1])
         with self.assertRaises(OSError):
             second = web_ui._ControlServer(("127.0.0.1", port), web_ui.Handler)
             second.server_close()
-
-    def test_allow_reuse_address_is_disabled(self):
-        self.assertFalse(web_ui._ControlServer.allow_reuse_address,
-                         "开着它 = 端口顺延失效（Windows 语义）")
 
 
 class PortFileTests(unittest.TestCase):
@@ -374,15 +354,10 @@ class PortFileTests(unittest.TestCase):
             self.assertEqual(info["port"], 8790)
             self.assertEqual(info["pid"], os.getpid())
             self.assertIn(":8790", info["url"])
+            # 原子写：落盘后不留半截临时文件
+            self.assertFalse(target.with_name(target.name + ".tmp").exists())
             web_ui._clear_port_file()
             self.assertFalse(target.exists())
-
-    def test_write_is_atomic_and_leaves_no_tmp_file(self):
-        target = self._scratch("atomic")
-        with patch.object(web_ui, "PORT_FILE", target):
-            web_ui._write_port_file(8765)
-            self.assertTrue(target.exists())
-            self.assertFalse(target.with_name(target.name + ".tmp").exists())
 
     def test_clear_is_silent_when_missing(self):
         target = self._scratch("missing")
