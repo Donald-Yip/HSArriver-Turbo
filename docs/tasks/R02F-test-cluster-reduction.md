@@ -43,11 +43,9 @@ surrender coverage is not to be dismantled.
 
 ## Current Increment
 
-B1 is executed in this task: the surrender cluster is consolidated from
-109 to 85 default tests by merging sibling cases (window boundary, class
-gating, rejection matrices, CLI on/off, confirm guard, nested round-trip)
-and deleting assertions already covered by rules-level or integration-level
-tests.
+All four batches are executed in this task (109 -> 85, 226 -> 166,
+183 -> 129, 96 -> 31). The default headless gate went from 1,850 to
+1,647 runnable tests with 0 failures / 0 errors.
 
 ## Non-Goals
 
@@ -68,7 +66,8 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 
 B1 pre-batch baseline: 1,850 run / 3 known screen-size dependent failures
 (local 1920x1080 DPI assertions, unrelated to the surrender cluster).
-B1 post-batch result: 1,826 run / 0 failures / 0 errors.
+Batch results after B1: 1,826 run / 0 failures / 0 errors.
+Final gate after B2/B3/B4: 1,647 run / 0 failures / 0 errors (86s).
 
 ## Allowed Files
 
@@ -94,6 +93,7 @@ B1 post-batch result: 1,826 run / 0 failures / 0 errors.
 - `tests/test_friendly_hand_target_battlecries.py`
 - `tests/test_starship_launch.py`
 - `tests/test_targeted_locations.py`
+- `tests/test_human_like.py`
 - `tests/test_human_like_*.py`
 - `tests/test_overlay_human_like_status.py`
 - `tests/test_strategy_*.py`
