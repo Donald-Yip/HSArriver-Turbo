@@ -185,28 +185,19 @@ class CalibrationTargetTests(unittest.TestCase):
         preview = next(r for r in regions if r["key"] == "rank")
         self.assertEqual("post_game_rank_roi", preview["config_key"])
 
-    def test_calibrated_rank_box_wins_over_the_default(self):
-        targets = screen_regions.calibration_targets(
-            make_config(post_game_rank_roi=(1200, 170, 1400, 230)))
-        regions = screen_regions.screenshot_regions(
-            make_config(post_game_rank_roi=(1200, 170, 1400, 230)))
-
-        box = next(t["box"] for t in targets if t["key"] == "rank")
-        preview = next(r["box"] for r in regions if r["key"] == "rank")
-        self.assertEqual((1200, 170, 1400, 230), box)
-        self.assertEqual((1200, 170, 1400, 230), preview)
-
-    def test_calibrated_post_game_start_box_wins_over_the_default(self):
-        targets = screen_regions.calibration_targets(
-            make_config(post_game_start_roi=(1500, 850, 1600, 950)))
-
-        box = next(t["box"] for t in targets if t["key"] == "post_game_start")
-        regions = screen_regions.screenshot_regions(
-            make_config(post_game_start_roi=(1500, 850, 1600, 950)))
-        preview = next(r["box"] for r in regions
-                       if r["key"] == "post_game_start")
-        self.assertEqual((1500, 850, 1600, 950), box)
-        self.assertEqual((1500, 850, 1600, 950), preview)
+    def test_calibrated_boxes_win_over_the_defaults(self):
+        for key, field, box in (
+            ("rank", "post_game_rank_roi", (1200, 170, 1400, 230)),
+            ("post_game_start", "post_game_start_roi", (1500, 850, 1600, 950)),
+        ):
+            with self.subTest(key=key):
+                config = make_config(**{field: box})
+                targets = screen_regions.calibration_targets(config)
+                regions = screen_regions.screenshot_regions(config)
+                self.assertEqual(box, next(t["box"] for t in targets
+                                           if t["key"] == key))
+                self.assertEqual(box, next(r["box"] for r in regions
+                                           if r["key"] == key))
 
     def test_boxes_come_from_the_config_with_defaults(self):
         boxes = {target["key"]: target["box"]
@@ -232,8 +223,7 @@ class CalibrationTargetTests(unittest.TestCase):
         wide = next(r["box"] for r in regions if r["key"] == "win_rate_wide")
         self.assertEqual(screen_regions.expand_box(
             (100, 10, 260, 50), screen_regions.AI_WIN_RATE_WIDE_MARGIN), wide)
-
-    def test_default_wide_box_is_derived_from_the_default_main_box(self):
+        # 默认宽框必须由默认主框派生，而不是各写一份常量。
         self.assertEqual(
             (95, 0, 300, 60),
             screen_regions.expand_box(

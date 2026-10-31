@@ -36,17 +36,13 @@ class IdentityMappingTests(unittest.TestCase):
         self.assertEqual(1.0, self.mapping.scale_x)
         self.assertEqual(1.0, self.mapping.scale_y)
 
-    def test_points_pass_through(self):
+    def test_points_and_boxes_pass_through(self):
         self.assertEqual((1090, 1070), self.mapping.to_screen(1090, 1070))
         self.assertEqual((705, 305), self.mapping.to_screen(705, 305))
-
-    def test_boxes_pass_through(self):
         self.assertEqual((1, 296, 196, 544),
                          self.mapping.box_to_screen((1, 296, 196, 544)))
         self.assertEqual((1325, 865, 1475, 935),
                          self.mapping.box_to_screen((1325, 865, 1475, 935)))
-
-    def test_module_helpers_pass_through(self):
         self.assertEqual((960, 850), dm.to_screen(960, 850, self.mapping))
         self.assertEqual((860, 810, 1060, 890),
                          dm.box_to_screen((860, 810, 1060, 890), self.mapping))
@@ -66,10 +62,6 @@ class MeasuredOffsetTests(unittest.TestCase):
 
     def setUp(self):
         self.mapping = make_mapping(origin=MEASURED_ORIGIN)
-
-    def test_scale_is_still_one(self):
-        self.assertEqual(1.0, self.mapping.scale_x)
-        self.assertEqual(1.0, self.mapping.scale_y)
 
     def test_state_probe_point_gets_the_offset(self):
         # get_screen.get_state() 的主判定点 (1090,1070)
@@ -115,23 +107,20 @@ class MeasuredOffsetTests(unittest.TestCase):
 class ProportionalScalingTests(unittest.TestCase):
     """其他 16:9 客户区：等比换算。"""
 
-    def test_1600x900(self):
-        mapping = make_mapping(client=(0, 0, 1600, 900))
-        self.assertAlmostEqual(1600 / 1920, mapping.scale_x, places=6)
-        self.assertEqual((833, 750), mapping.to_screen(1000, 900))
-        self.assertEqual((640, 371), mapping.to_screen(768, 445))
-
-    def test_1280x720(self):
-        mapping = make_mapping(client=(0, 0, 1280, 720))
-        self.assertAlmostEqual(2 / 3, mapping.scale_x, places=6)
-        self.assertEqual((640, 600), mapping.to_screen(960, 900))
-
-    def test_3840x2160_is_double(self):
-        mapping = make_mapping(client=(0, 0, 3840, 2160))
-        self.assertEqual(2.0, mapping.scale_x)
-        self.assertEqual((2180, 2140), mapping.to_screen(1090, 1070))
+    def test_scales_by_the_client_ratio(self):
+        for client, scale, point, expected in (
+            ((1600, 900), 1600 / 1920, (1000, 900), (833, 750)),
+            ((1600, 900), 1600 / 1920, (768, 445), (640, 371)),
+            ((1280, 720), 2 / 3, (960, 900), (640, 600)),
+            ((3840, 2160), 2.0, (1090, 1070), (2180, 2140)),
+        ):
+            with self.subTest(client=client, point=point):
+                mapping = make_mapping(client=(0, 0) + client)
+                self.assertAlmostEqual(scale, mapping.scale_x, places=6)
+                self.assertEqual(expected, mapping.to_screen(*point))
+        double = make_mapping(client=(0, 0, 3840, 2160))
         self.assertEqual((2, 592, 392, 1088),
-                         mapping.box_to_screen((1, 296, 196, 544)))
+                         double.box_to_screen((1, 296, 196, 544)))
 
     def test_scaling_with_origin(self):
         mapping = make_mapping(client=(0, 0, 960, 540), origin=(100, 50))
@@ -149,11 +138,6 @@ class BoxRoundingTests(unittest.TestCase):
         left, top, right, bottom = mapping.box_to_screen((1, 1, 2, 2))
         self.assertGreaterEqual(right - left, 1)
         self.assertGreaterEqual(bottom - top, 1)
-
-    def test_integer_scales_are_exact(self):
-        mapping = make_mapping(client=(0, 0, 3840, 2160))
-        self.assertEqual((2, 592, 392, 1088),
-                         mapping.box_to_screen((1, 296, 196, 544)))
 
     def test_box_from_screen_round_trip(self):
         mapping = make_mapping(client=(0, 0, 1920, 1080), origin=(960, 551))
@@ -316,15 +300,11 @@ class ProbePixelTests(unittest.TestCase):
         except Exception:
             return [[[0, 0, 0] for _ in range(width)] for _ in range(height)]
 
-    def test_screen_probes_when_no_mapping(self):
+    def test_reference_frame_probes_are_identity(self):
         import get_screen
         frame = self.frame(1920, 1080)
         self.assertEqual(list(get_screen.STATE_PROBE_POINTS),
                          get_screen.probe_pixels(frame, None))
-
-    def test_client_relative_probes_at_reference_size(self):
-        import get_screen
-        frame = self.frame(1920, 1080)
         mapping = make_mapping()
         self.assertEqual(list(get_screen.STATE_PROBE_POINTS),
                          get_screen.probe_pixels(frame, mapping))
@@ -437,11 +417,9 @@ class RoiFrameInterpretationTests(unittest.TestCase):
         self.assertEqual(box, dm.interpret_roi_box(box, self._mapping(),
                                                    default=(7, 200, 202, 500)))
 
-    def test_roi_frame_is_credible_accepts_plausible_boxes(self):
+    def test_roi_frame_is_credible_filters_screen_looking_boxes(self):
         self.assertTrue(dm.roi_frame_is_credible(
             [(0, 0, 1920, 1080), (1230, 180, 1385, 225), (-40, -20, 42, 20)]))
-
-    def test_roi_frame_is_credible_rejects_screen_looking_boxes(self):
         # 保存时窗口在 (960,551)：这些值作为客户区相对坐标是不可能的。
         self.assertFalse(dm.roi_frame_is_credible(
             [(2, 231, 250, 523), (2276, 1200, 2442, 1295)]))
@@ -685,15 +663,11 @@ class _StyleReader:
 class WindowModeTests(unittest.TestCase):
     """全屏 / 窗口化的判定：只认标题栏，不认尺寸。"""
 
-    def test_caption_means_windowed(self):
+    def test_classify_window_mode_by_caption_only(self):
         self.assertEqual("windowed", dm.classify_window_mode(dm.WS_CAPTION))
         self.assertEqual("windowed", dm.classify_window_mode(0x16CF0000))
-
-    def test_popup_without_caption_means_fullscreen(self):
         self.assertEqual("fullscreen", dm.classify_window_mode(0x80000000))
         self.assertEqual("fullscreen", dm.classify_window_mode(0x86000000))
-
-    def test_broken_style_is_unknown(self):
         self.assertEqual("unknown", dm.classify_window_mode(None))
         self.assertEqual("unknown", dm.classify_window_mode("x"))
 

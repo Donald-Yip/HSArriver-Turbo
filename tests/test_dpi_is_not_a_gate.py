@@ -114,16 +114,12 @@ class RecommendationValidatorDpiTests(unittest.TestCase):
             proposed, adapted, stable_frame, current_frame, current_ocr,
             state, 7, "PLAYER_TURN", ConsumedActionStore(), False)
 
-    def test_144_dpi_frame_is_accepted(self):
-        result = self._validate(144)
-
-        self.assertTrue(result.accepted, result.code)
-
-    def test_dpi_is_never_the_reject_code(self):
-        """即便 DPI 与配置基准不同，拒绝码里也不该出现 "dpi"。"""
+    def test_dpi_is_recorded_never_rejected(self):
+        """DPI 只作记录：96/120/144/192 都必须放行，拒绝码里不出现 "dpi"。"""
         for dpi in (96, 120, 144, 192):
             with self.subTest(dpi=dpi):
                 result = self._validate(dpi)
+                self.assertTrue(result.accepted, result.code)
                 self.assertNotEqual("dpi", result.code)
 
 
