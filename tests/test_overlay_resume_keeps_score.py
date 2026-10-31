@@ -125,23 +125,22 @@ class StartAutomationScoreTests(unittest.TestCase):
         ):
             return web_ui._start_automation(reset_stats=reset_stats)
 
-    def test_resume_keeps_win_loss_counters(self):
-        fake = _fake_fsm(5, 3, 1)
+    def test_reset_stats_controls_the_win_loss_counters(self):
+        cases = (
+            # 恢复：保留已累计战绩；重新开始：清零后重新计数。
+            (False, (5, 3, 1)),
+            (True, (0, 0, 0)),
+        )
+        for reset_stats, expected in cases:
+            with self.subTest(reset_stats=reset_stats):
+                fake = _fake_fsm(5, 3, 1)
 
-        ok, _msg = self._start(fake, reset_stats=False)
+                ok, _msg = self._start(fake, reset_stats=reset_stats)
 
-        self.assertTrue(ok)
-        self.assertEqual((5, 3, 1), (fake.game_count, fake.win_count,
-                                     fake.concede_count))
-
-    def test_fresh_start_still_resets_counters(self):
-        fake = _fake_fsm(5, 3, 1)
-
-        ok, _msg = self._start(fake, reset_stats=True)
-
-        self.assertTrue(ok)
-        self.assertEqual((0, 0, 0), (fake.game_count, fake.win_count,
-                                     fake.concede_count))
+                self.assertTrue(ok)
+                self.assertEqual(
+                    expected,
+                    (fake.game_count, fake.win_count, fake.concede_count))
 
     def test_reset_score_zeroes_all_three_counters(self):
         fake = _fake_fsm(9, 4, 2)

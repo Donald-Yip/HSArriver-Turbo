@@ -187,7 +187,16 @@ class RunTeardownBehaviorTests(OverlayStateTestCase):
 
 
 class JoinPreviousThreadTests(OverlayStateTestCase):
-    def test_no_previous_thread_is_a_noop(self):
+    def test_no_previous_thread_and_bare_double_are_released(self):
+        log_overlay._join_previous_thread()
+        self.assertIsNone(log_overlay._THREAD)
+
+        class _Bare:
+            def join(self, timeout=None):
+                raise AssertionError("不该调用 join")
+
+        log_overlay._THREAD = _Bare()
+
         log_overlay._join_previous_thread()
 
         self.assertIsNone(log_overlay._THREAD)
@@ -199,19 +208,6 @@ class JoinPreviousThreadTests(OverlayStateTestCase):
         log_overlay._join_previous_thread()
 
         self.assertEqual([log_overlay._SHUTDOWN_TIMEOUT], thread.joined)
-        self.assertIsNone(log_overlay._THREAD)
-
-    def test_thread_double_without_is_alive_is_released(self):
-        """测试替身没有 is_alive() 时不能炸（有些老替身就长这样）。"""
-
-        class _Bare:
-            def join(self, timeout=None):
-                raise AssertionError("不该调用 join")
-
-        log_overlay._THREAD = _Bare()
-
-        log_overlay._join_previous_thread()
-
         self.assertIsNone(log_overlay._THREAD)
 
     def test_current_thread_is_never_joined(self):
@@ -230,25 +226,17 @@ class JoinPreviousThreadTests(OverlayStateTestCase):
 
 
 class StartLifecycleTests(OverlayStateTestCase):
-    def test_start_records_the_thread(self):
+    def test_start_reports_status_and_records_the_thread_once(self):
         factory = self._factory()
 
         with patch.object(log_overlay.threading, "Thread", factory):
-            log_overlay.start()
+            self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
+            self.assertEqual(log_overlay.OPEN_ALREADY, log_overlay.start())
 
         self.assertEqual(1, len(factory.created))
         self.assertTrue(factory.created[0].started)
         self.assertIs(factory.created[0], log_overlay._THREAD)
         self.assertTrue(log_overlay._STARTED[0])
-
-    def test_start_is_a_noop_while_running(self):
-        factory = self._factory()
-
-        with patch.object(log_overlay.threading, "Thread", factory):
-            log_overlay.start()
-            log_overlay.start()
-
-        self.assertEqual(1, len(factory.created))
 
     def test_reopening_waits_for_the_previous_thread(self):
         """正在退出时点重开：必须先等旧线程收尾，再建新的 Tk。"""
@@ -288,15 +276,6 @@ class StartLifecycleTests(OverlayStateTestCase):
 
 class ReopenRaceTests(OverlayStateTestCase):
     """「退出浮窗」→ 立刻从网页点开始：必须把浮窗重新开出来。"""
-
-    def test_start_reports_already_open_and_started(self):
-        factory = self._factory()
-
-        with patch.object(log_overlay.threading, "Thread", factory):
-            self.assertEqual(log_overlay.OPEN_STARTED, log_overlay.start())
-            self.assertEqual(log_overlay.OPEN_ALREADY, log_overlay.start())
-
-        self.assertEqual(1, len(factory.created))
 
     def test_exit_then_immediate_reopen_closes_the_old_window_and_reopens(self):
         """复现用户反馈：退出按钮按下（stop 还有 150ms 才到）就点网页开始。"""
@@ -374,7 +353,7 @@ class DeferredOpenTests(OverlayStateTestCase):
 class ReportTests(OverlayStateTestCase):
     """浮窗内部异常要能被上层日志看到（否则用户只看到"点了没反应"）。"""
 
-    def test_report_reaches_the_injected_logger(self):
+    def test_report_reaches_the_logger_and_survives_a_broken_one(self):
         messages = []
 
         log_overlay.set_logger(messages.append)
@@ -385,7 +364,6 @@ class ReportTests(OverlayStateTestCase):
 
         self.assertEqual(["窗口没能打开"], messages)
 
-    def test_report_survives_a_broken_logger(self):
         def boom(_text):
             raise RuntimeError("日志回调坏了")
 
@@ -406,27 +384,21 @@ class IsRunningTests(OverlayStateTestCase):
 
         self.assertFalse(log_overlay.is_running())    # 退出中 = 可以立刻重开
 
-    def test_closing_window_is_not_running(self):
-        """「退出浮窗」按下就立刻算没在跑（那 150ms 延时不能骗过网页）。"""
-        log_overlay._STARTED[0] = True
-
-        log_overlay.mark_closing()
+        log_overlay._STARTED[0] = False
 
         self.assertFalse(log_overlay.is_running())
 
-    def test_stop_marks_the_window_as_closing(self):
+    def test_closing_window_is_not_running_and_stop_marks_it_closing(self):
+        """「退出浮窗」按下就立刻算没在跑（那 150ms 延时不能骗过网页）。"""
         log_overlay._STARTED[0] = True
+        log_overlay.mark_closing()
+        self.assertFalse(log_overlay.is_running())
 
         # 别让 stop() 顺手去动真正注册过的校准窗口回调。
         with patch.object(log_overlay, "_ON_CALIBRATE_CLOSE", None):
             log_overlay.stop()
 
         self.assertTrue(log_overlay._CLOSING.is_set())
-        self.assertFalse(log_overlay.is_running())
-
-    def test_stopped_means_not_running(self):
-        log_overlay._STARTED[0] = False
-
         self.assertFalse(log_overlay.is_running())
 
 

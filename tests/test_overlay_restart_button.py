@@ -158,106 +158,110 @@ class RestartWorkerTests(unittest.TestCase):
         self.assertTrue(any("炉石已重新启动" in msg for msg in self._messages(logger)))
         self.assertTrue(any("主界面" in msg for msg in self._messages(logger)))
 
-    def test_fails_when_main_menu_never_shows_up(self):
-        """炉石进程起来了但一直没到主界面：不能谎报重启成功。"""
-        logger = self._run(
-            self._fake_hs_restart(),
-            menu_result={"ok": False, "state": "unknown",
-                         "message": "等待主界面（传统对战）超时（最近一次匹配分 0.29）"})
+    def test_stops_a_running_automation_or_gives_up_when_it_will_not_stop(self):
+        with self.subTest(case="stops_first"):
+            def fake_stop(body):
+                self.calls.append(("stop", body))
+                web_ui.CTRL.automation_thread = None
+                return {"ok": True}
 
-        self.assertEqual("wait_main_menu", self.calls[-1][0])
-        self.assertEqual("WARN", logger.call_args_list[-1].args[0])
-        self.assertIn("没到主界面", logger.call_args_list[-1].args[1])
-        # 状态要对得上：没成功就不能是 running
-        self.assertFalse(web_ui._restart_snapshot()["running"])
-        self.assertFalse(web_ui._restart_snapshot()["ok"])
+            web_ui.CTRL.automation_thread = object()
+            with patch.object(web_ui, "api_stop", side_effect=fake_stop) as stop:
+                logger = self._run(self._fake_hs_restart())
 
-    def test_stops_a_running_automation_before_touching_anything(self):
-        def fake_stop(body):
-            self.calls.append(("stop", body))
-            web_ui.CTRL.automation_thread = None
-            return {"ok": True}
+            stop.assert_called_once()
+            self.assertEqual("now", stop.call_args.args[0]["mode"])
+            self.assertEqual(["resolve", "stop", "fsm_init", "kill", "clear",
+                              "launch", "wait_main_menu"],
+                             [call[0] for call in self.calls])
+            self.assertTrue(any("自动化已停止" in msg
+                                for msg in self._messages(logger)))
 
-        web_ui.CTRL.automation_thread = object()
-        with patch.object(web_ui, "api_stop", side_effect=fake_stop) as stop:
-            logger = self._run(self._fake_hs_restart())
+        with self.subTest(case="will_not_stop"):
+            self.calls.clear()
+            web_ui.CTRL.automation_thread = object()      # 永远不会被清掉
+            with (
+                patch.object(web_ui, "api_stop"),
+                patch.object(web_ui, "AUTOMATION_STOP_TIMEOUT", 0.0),
+            ):
+                logger = self._run(self._fake_hs_restart())
 
-        stop.assert_called_once_with({"mode": "now"})
-        self.assertEqual(["resolve", "stop", "fsm_init", "kill", "clear",
-                          "launch", "wait_main_menu"],
-                         [call[0] for call in self.calls])
-        self.assertTrue(any("自动化已停止" in msg for msg in self._messages(logger)))
+            # 只做了只读的路径解析，绝没杀进程/删文件
+            self.assertEqual(["resolve"], [call[0] for call in self.calls])
+            self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
+            self.assertIn("停下来", logger.call_args_list[-1].args[1])
 
-    def test_gives_up_when_the_automation_will_not_stop(self):
-        web_ui.CTRL.automation_thread = object()      # 永远不会被清掉
-        with (
-            patch.object(web_ui, "api_stop"),
-            patch.object(web_ui, "AUTOMATION_STOP_TIMEOUT", 0.0),
-        ):
-            logger = self._run(self._fake_hs_restart())
+    def test_aborts_before_destructive_steps_when_resolve_or_kill_fails(self):
+        with self.subTest(case="bad_log_folder"):
+            module = self._fake_hs_restart(
+                resolve=lambda log_root: {
+                    "ok": False, "log_root": None, "exe": None,
+                    "exe_found": False, "error": "日志目录不存在：C:/nope"})
+            logger = self._run(module)
 
-        # 只做了只读的路径解析，绝没杀进程/删文件
-        self.assertEqual(["resolve"], [call[0] for call in self.calls])
-        self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
-        self.assertIn("停下来", logger.call_args_list[-1].args[1])
+            self.assertEqual([], self.calls)
+            self.assertEqual("ERROR", logger.call_args_list[0].args[0])
+            self.assertIn("日志目录不存在", logger.call_args_list[0].args[1])
 
-    def test_refuses_a_bad_log_folder(self):
-        module = self._fake_hs_restart(
-            resolve=lambda log_root: {"ok": False, "log_root": None, "exe": None,
-                                      "exe_found": False,
-                                      "error": "日志目录不存在：C:/nope"})
+        with self.subTest(case="game_will_not_die"):
+            self.calls.clear()
 
-        logger = self._run(module)
+            def failing_kill():
+                self.calls.append(("kill",))
+                return {"ok": False, "killed": True, "running": True,
+                        "error": "Hearthstone.exe 在 20s 内没有退出"}
 
-        self.assertEqual([], self.calls)
-        self.assertEqual("ERROR", logger.call_args_list[0].args[0])
-        self.assertIn("日志目录不存在", logger.call_args_list[0].args[1])
+            logger = self._run(self._fake_hs_restart(kill=failing_kill))
 
-    def test_stops_before_wiping_when_the_game_will_not_die(self):
-        def failing_kill():
-            self.calls.append(("kill",))
-            return {"ok": False, "killed": True, "running": True,
-                    "error": "Hearthstone.exe 在 20s 内没有退出"}
+            self.assertEqual(["resolve", "fsm_init", "kill"],
+                             [call[0] for call in self.calls])
+            self.assertNotIn("clear", [call[0] for call in self.calls])
+            self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
 
-        module = self._fake_hs_restart(kill=failing_kill)
+        with self.subTest(case="kill_unconfirmed_keeps_going"):
+            # 回归：杀进程没确认就中止的话，炉石会停在“被关掉且没人重启”的状态。
+            self.calls.clear()
 
-        logger = self._run(module)
+            def unsure_kill():
+                self.calls.append(("kill",))
+                return {"ok": False, "killed": False, "running": None,
+                        "error": "读不到进程列表，无法确认炉石是否已退出"}
 
-        self.assertEqual(["resolve", "fsm_init", "kill"],
-                         [call[0] for call in self.calls])
-        self.assertNotIn("clear", [call[0] for call in self.calls])
-        self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
+            logger = self._run(self._fake_hs_restart(kill=unsure_kill))
 
-    def test_reports_a_failed_relaunch(self):
-        def failing_launch(exe, **kwargs):
-            self.calls.append(("launch", exe))
-            return {"ok": False, "started": None, "running": False,
-                    "error": "战网「开始游戏」：进程起来后马上又退出了"}
+            self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch",
+                              "wait_main_menu"],
+                             [call[0] for call in self.calls])
+            self.assertTrue(any("继续尝试把炉石拉起来" in msg
+                                for msg in self._messages(logger)))
 
-        module = self._fake_hs_restart(launch=failing_launch)
+    def test_reports_a_failed_relaunch_or_a_missing_main_menu(self):
+        with self.subTest(case="relaunch_failed"):
+            def failing_launch(exe, **kwargs):
+                self.calls.append(("launch", exe))
+                return {"ok": False, "started": None, "running": False,
+                        "error": "战网「开始游戏」：进程起来后马上又退出了"}
 
-        logger = self._run(module)
+            logger = self._run(self._fake_hs_restart(launch=failing_launch))
 
-        self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
-        self.assertIn("没能自动启动", logger.call_args_list[-1].args[1])
-        self.assertTrue(any("clear" == call[0] for call in self.calls))
+            self.assertEqual("ERROR", logger.call_args_list[-1].args[0])
+            self.assertIn("没能自动启动", logger.call_args_list[-1].args[1])
+            self.assertTrue(any("clear" == call[0] for call in self.calls))
 
-    def test_keeps_going_when_the_kill_cannot_be_confirmed(self):
-        """回归：杀进程没确认就中止的话，炉石会停在“被关掉且没人重启”的状态。"""
-        def unsure_kill():
-            self.calls.append(("kill",))
-            return {"ok": False, "killed": False, "running": None,
-                    "error": "读不到进程列表，无法确认炉石是否已退出"}
+        with self.subTest(case="main_menu_timeout"):
+            # 炉石进程起来了但一直没到主界面：不能谎报重启成功。
+            self.calls.clear()
+            logger = self._run(
+                self._fake_hs_restart(),
+                menu_result={"ok": False, "state": "unknown",
+                             "message": "等待主界面（传统对战）超时（最近一次匹配分 0.29）"})
 
-        module = self._fake_hs_restart(kill=unsure_kill)
-
-        logger = self._run(module)
-
-        self.assertEqual(["resolve", "fsm_init", "kill", "clear", "launch",
-                          "wait_main_menu"],
-                         [call[0] for call in self.calls])
-        self.assertTrue(any("继续尝试把炉石拉起来" in msg
-                            for msg in self._messages(logger)))
+            self.assertEqual("wait_main_menu", self.calls[-1][0])
+            self.assertEqual("WARN", logger.call_args_list[-1].args[0])
+            self.assertIn("没到主界面", logger.call_args_list[-1].args[1])
+            # 状态要对得上：没成功就不能是 running
+            self.assertFalse(web_ui._restart_snapshot()["running"])
+            self.assertFalse(web_ui._restart_snapshot()["ok"])
 
 
 if __name__ == "__main__":

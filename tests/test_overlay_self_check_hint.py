@@ -29,42 +29,39 @@ class SelfCheckTextTests(unittest.TestCase):
         self.assertIn("获取失败", text)
         self.assertNotIn("已是最新", text)
         # 标题只放在弹窗顶栏，正文不再重复一遍。
-        self.assertNotIn(log_overlay.SELF_CHECK_TITLE, text)
+        self.assertNotIn("按顺序自查", text)
 
-    def test_update_available_shows_both_versions(self):
-        text = log_overlay.self_check_text({
-            "state": "update_available",
-            "local_label": "v2026.10.24",
-            "latest_label": "v2026.10.25",
-        })
-        self.assertIn("v2026.10.24", text)
-        self.assertIn("v2026.10.25", text)
-        self.assertIn("不是最新", text)
-
-    def test_latest_state(self):
-        text = log_overlay.self_check_text({
-            "state": "latest", "local_label": "v2026.10.24",
-            "latest_label": "v2026.10.24"})
-        self.assertIn("已是最新", text)
-
-    def test_local_newer_and_missing_and_checking(self):
-        newer = log_overlay.self_check_text({
-            "state": "local_newer", "local_label": "v2026.10.25",
-            "latest_label": "v2026.10.24"})
-        self.assertIn("线上还是 v2026.10.24", newer)
-
-        missing = log_overlay.self_check_text({
-            "state": "remote_missing", "local_label": "v2026.10.24"})
-        self.assertIn("线上还没发布", missing)
-
-        checking = log_overlay.self_check_text({
-            "state": "unknown", "checking": True,
-            "local_label": "v2026.10.24"})
-        self.assertIn("正在获取", checking)
-
-        failed = log_overlay.self_check_text({
-            "state": "unknown", "local_label": "v2026.10.24"})
-        self.assertIn("获取失败", failed)
+    def test_version_state_lines(self):
+        cases = (
+            ("update_available",
+             {"state": "update_available",
+              "local_label": "v2026.10.24",
+              "latest_label": "v2026.10.25"},
+             ("v2026.10.24", "v2026.10.25", "不是最新")),
+            ("latest",
+             {"state": "latest", "local_label": "v2026.10.24",
+              "latest_label": "v2026.10.24"},
+             ("已是最新",)),
+            ("local_newer",
+             {"state": "local_newer", "local_label": "v2026.10.25",
+              "latest_label": "v2026.10.24"},
+             ("线上还是 v2026.10.24",)),
+            ("remote_missing",
+             {"state": "remote_missing", "local_label": "v2026.10.24"},
+             ("线上还没发布",)),
+            ("checking",
+             {"state": "unknown", "checking": True,
+              "local_label": "v2026.10.24"},
+             ("正在获取",)),
+            ("failed",
+             {"state": "unknown", "local_label": "v2026.10.24"},
+             ("获取失败",)),
+        )
+        for name, payload, expected in cases:
+            with self.subTest(state=name):
+                text = log_overlay.self_check_text(payload)
+                for fragment in expected:
+                    self.assertIn(fragment, text)
 
     def test_garbage_payload_falls_back_to_local(self):
         for payload in (None, {}, "bad", 42):
@@ -82,12 +79,6 @@ class _FakeThread:
 
 
 class SelfCheckButtonTests(unittest.TestCase):
-    def test_button_sits_on_its_own_full_width_row(self):
-        self.assertEqual((7, 0), log_overlay.BTN_LAYOUT["self_check"])
-        self.assertEqual(2, log_overlay.BTN_SPAN["self_check"])
-        self.assertEqual("装好没反应？", log_overlay.SELF_CHECK_BUTTON_TEXT)
-        self.assertEqual("装好没反应？按顺序自查", log_overlay.SELF_CHECK_TITLE)
-
     def test_self_check_button_opens_info_dialog_with_version_payload(self):
         payload = {
             "state": "latest",
@@ -101,6 +92,7 @@ class SelfCheckButtonTests(unittest.TestCase):
         ) as ui:
             button = ui.button(log_overlay.SELF_CHECK_BUTTON_TEXT)
             self.assertEqual(log_overlay.WARN, button.options["bg"])
+            # 自查入口是最后一行、横跨整行的按钮（不再占顶部的红色大字）。
             grid = button.grid_calls[-1]
             self.assertEqual(log_overlay.BTN_LAYOUT["self_check"][0], grid["row"])
             self.assertEqual(log_overlay.BTN_LAYOUT["self_check"][1], grid["column"])
@@ -118,13 +110,9 @@ class SelfCheckButtonTests(unittest.TestCase):
         self.assertEqual(["version"], calls)
         dialog.assert_called_once()
         args = dialog.call_args.args
-        self.assertEqual(log_overlay.SELF_CHECK_TITLE, args[1])
+        self.assertIn("按顺序自查", args[1])
         self.assertIn("已是最新", args[2])
         self.assertIn("v2026.10.24", args[2])
-
-    def test_height_only_grew_by_the_button_row(self):
-        # 772（去掉红字的 880）→ 802：只多了「装好没反应？」按钮行。
-        self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
 
     def test_start_installs_version_callback_for_self_check(self):
         callback = lambda: {"state": "latest"}

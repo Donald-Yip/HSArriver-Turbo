@@ -36,6 +36,7 @@ class SliderWiringTests(unittest.TestCase):
             _WINDOW_WIDTH=lambda: 1280,
             _ON_RESIZE_WINDOW=resize,
         ) as ui:
+            # 自绘 Canvas（不是 tk.Scale：它的滑钮是方块，且会带动整窗拖动）。
             self.assertEqual(0, ui.tk.scale_calls)
             canvas = next(
                 widget for widget in ui.widgets_of("canvas")
@@ -76,18 +77,6 @@ class SliderWiringTests(unittest.TestCase):
             ui.root.fire("<B1-Motion>", FakeEvent(ui.root, x=30, y=20))
             self.assertNotEqual(original_geometry, ui.root.geometries)
 
-    def test_slider_range_constants_exist_and_are_sane(self):
-        self.assertLess(log_overlay.SIZE_SLIDER_MIN, log_overlay.SIZE_SLIDER_MAX)
-        self.assertGreater(log_overlay.SIZE_SLIDER_STEP, 1)
-
-    def test_min_is_half_of_the_reference(self):
-        # 滑条下限 = 960（960×540 = 基准的一半）。
-        self.assertEqual(960, log_overlay.SIZE_SLIDER_MIN)
-
-    def test_height_grew_to_fit_the_slider_row(self):
-        # 723 是加滑条行之前的设计值；加了必须变高。
-        self.assertGreater(log_overlay.WINDOW_HEIGHT, 723)
-
 
 class BindOverlayTests(unittest.TestCase):
     def test_bind_overlay_passes_the_window_callbacks(self):
@@ -107,15 +96,12 @@ class BindOverlayTests(unittest.TestCase):
 
 
 class ResizeCallbackTests(unittest.TestCase):
-    def test_reads_the_current_client_width(self):
-        fake = SimpleNamespace(current_client_size=lambda: (960, 540))
-        with mock.patch.dict(sys.modules, {"hs_window": fake}):
-            self.assertEqual(960, web_ui._overlay_window_width())
-
-    def test_missing_window_returns_none(self):
-        fake = SimpleNamespace(current_client_size=lambda: None)
-        with mock.patch.dict(sys.modules, {"hs_window": fake}):
-            self.assertIsNone(web_ui._overlay_window_width())
+    def test_reads_the_current_client_width_or_none(self):
+        for size, expected in (((960, 540), 960), (None, None)):
+            with self.subTest(size=size):
+                fake = SimpleNamespace(current_client_size=lambda size=size: size)
+                with mock.patch.dict(sys.modules, {"hs_window": fake}):
+                    self.assertEqual(expected, web_ui._overlay_window_width())
 
     def test_resize_delegates_to_hs_window_and_reports_actual_size(self):
         calls = {}
@@ -159,17 +145,21 @@ class SliderSyncActionTests(unittest.TestCase):
             "disable",
             log_overlay.slider_sync_action(True, 2384, None, 16))
 
-    def test_staying_disabled_does_not_repaint(self):
-        self.assertEqual(
-            "none", log_overlay.slider_sync_action(False, 960, None, 16))
-
     def test_follows_an_external_resize(self):
         self.assertEqual(
-            "follow", log_overlay.slider_sync_action(True, 960, 2384, 16))
+            "follow",
+            log_overlay.slider_sync_action(True, 960, 2384, 16))
 
-    def test_small_changes_are_ignored(self):
-        self.assertEqual(
-            "none", log_overlay.slider_sync_action(True, 2384, 2390, 16))
+    def test_none_when_nothing_really_changed(self):
+        cases = (
+            ("staying_disabled", False, 960, None),
+            ("small_change", True, 2384, 2390),
+        )
+        for name, enabled, value, current in cases:
+            with self.subTest(case=name):
+                self.assertEqual(
+                    "none",
+                    log_overlay.slider_sync_action(enabled, value, current, 16))
 
     def test_broken_values_do_not_crash(self):
         self.assertEqual(

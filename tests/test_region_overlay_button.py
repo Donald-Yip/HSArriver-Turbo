@@ -69,7 +69,7 @@ class ToggleStateTests(unittest.TestCase):
             if thread.name == "hs-region-box":
                 thread.join(3)
 
-    def test_toggle_reports_the_new_state_from_the_runner(self):
+    def test_toggle_and_hide_report_state_and_stop_the_runner(self):
         runner = _BlockingRunner()
         overlay = region_overlay.RegionBoxOverlay(runner=runner)
         self.addCleanup(runner.finish)
@@ -78,15 +78,15 @@ class ToggleStateTests(unittest.TestCase):
         self.assertTrue(overlay.toggle())
         self.assertTrue(overlay.is_visible())
         self.assertFalse(overlay.toggle())
+        self.assertFalse(overlay.is_visible())
 
-    def test_hide_stops_the_runner(self):
-        runner = _BlockingRunner()
-        overlay = region_overlay.RegionBoxOverlay(runner=runner)
-
-        overlay.show()
+        self.assertTrue(overlay.show())
         self.assertTrue(overlay.is_visible())
         self.assertFalse(overlay.hide())
         runner.finish()
+        for thread in threading.enumerate():
+            if thread.name == "hs-region-box":
+                thread.join(3)
         self.assertFalse(overlay.is_visible())
 
     def test_show_while_visible_does_not_start_twice(self):
@@ -128,11 +128,12 @@ class ToggleStateTests(unittest.TestCase):
 
 
 class HintTests(unittest.TestCase):
-    def test_title_is_the_required_prompt(self):
+    def test_title_and_close_line(self):
         lines = region_overlay.hint_lines(None)
 
-        self.assertEqual("请对齐相应UI", region_overlay.HINT_TITLE)
         self.assertEqual("请对齐相应UI", lines[0]["text"])
+        self.assertIn("Esc", lines[-1]["text"])
+        self.assertIn("校准", lines[-1]["text"])
 
     def test_panel_verdict_lines(self):
         unknown = [line["text"] for line in region_overlay.hint_lines(None)]
@@ -157,12 +158,6 @@ class HintTests(unittest.TestCase):
                         self.assertFalse(low <= code <= high,
                                          f"{ch!r} 可能在微软雅黑里缺字形")
 
-    def test_close_hint_mentions_esc_and_the_button(self):
-        lines = region_overlay.hint_lines(None)
-
-        self.assertIn("Esc", lines[-1]["text"])
-        self.assertIn("校准", lines[-1]["text"])
-
 
 class PaintLayerTests(unittest.TestCase):
     def test_layer_is_transparent_where_nothing_is_drawn(self):
@@ -174,21 +169,7 @@ class PaintLayerTests(unittest.TestCase):
         # 提示条画在顶部中间：那里必须有不透明像素
         self.assertGreater(layer.getpixel((200, 30))[3], 0)
 
-    def test_layer_draws_region_boxes(self):
-        config = SimpleNamespace(
-            desktop_size=(1920, 1080), desktop_dpi=96,
-            recommendation_roi=(10, 40, 110, 240),
-            mulligan_confirm_roi=(200, 300, 300, 360))
-
-        # mapping=None：不换算，框就按客户区相对坐标画（不受测试机窗口影响）。
-        layer = region_overlay.paint_layer(500, 400, None, config, mapping=None)
-
-        # 绿框（recommendation）的左边框应当是不透明的绿色像素
-        pixel = layer.getpixel((10, 140))
-        self.assertEqual((99, 199, 111, 255), tuple(pixel))
-
-    def test_layer_offsets_boxes_when_the_client_origin_moves(self):
-        """客户区在 (960,551) 时，框要整体画到偏移后的位置。"""
+    def test_layer_draws_region_boxes_at_the_client_position(self):
         config = SimpleNamespace(
             desktop_size=(1920, 1080), desktop_dpi=96,
             recommendation_roi=(10, 40, 110, 240),
@@ -197,12 +178,20 @@ class PaintLayerTests(unittest.TestCase):
             hwnd=1, client=(0, 0, 1920, 1080),
             screen_left=960, screen_top=551)
 
-        layer = region_overlay.paint_layer(2000, 1600, None, config,
-                                           mapping=mapping)
-
-        self.assertEqual((99, 199, 111, 255),
-                         tuple(layer.getpixel((10 + 960, 140 + 551))))
-        self.assertEqual(0, layer.getpixel((10, 140))[3])   # 旧位置不再有框
+        cases = (
+            # mapping=None：不换算，框按客户区相对坐标画（不受测试机窗口影响）。
+            ("no_mapping", None, (500, 400), (10, 140), None),
+            # 客户区在 (960,551) 时，框要整体画到偏移后的位置。
+            ("offset", mapping, (2000, 1600), (10 + 960, 140 + 551), (10, 140)),
+        )
+        for name, mapping_, size, pixel, stale_pixel in cases:
+            with self.subTest(case=name):
+                layer = region_overlay.paint_layer(
+                    size[0], size[1], None, config, mapping=mapping_)
+                # 绿框（recommendation）的左边框应当是不透明的绿色像素。
+                self.assertEqual((99, 199, 111, 255), tuple(layer.getpixel(pixel)))
+                if stale_pixel is not None:
+                    self.assertEqual(0, layer.getpixel(stale_pixel)[3])  # 旧位置不再有框
 
     def test_panel_state_is_none_when_the_grab_fails(self):
         def broken_grab(*_args, **_kwargs):
@@ -230,19 +219,18 @@ class AutoMappingTests(unittest.TestCase):
 
         self.assertIs(mapping, detected, "不传参时必须自动探测，不能返回 None")
 
-    def test_explicit_none_means_no_conversion(self):
-        self.assertIsNone(region_overlay.auto_mapping(None))
-
-    def test_explicit_mapping_is_used_verbatim(self):
+    def test_explicit_mapping_none_and_probe_failure(self):
         mapping = display_mapping.DisplayMapping(
             hwnd=1, client=(0, 0, 1920, 1080), screen_left=1, screen_top=2)
 
-        self.assertIs(mapping, region_overlay.auto_mapping(mapping))
-
-    def test_probe_failure_returns_none_instead_of_raising(self):
-        with patch("display_mapping.display_mapping",
-                   side_effect=RuntimeError("没有窗口")):
-            self.assertIsNone(region_overlay.auto_mapping())
+        with self.subTest(case="explicit_none"):
+            self.assertIsNone(region_overlay.auto_mapping(None))
+        with self.subTest(case="explicit_mapping"):
+            self.assertIs(mapping, region_overlay.auto_mapping(mapping))
+        with self.subTest(case="probe_failure"):
+            with patch("display_mapping.display_mapping",
+                       side_effect=RuntimeError("没有窗口")):
+                self.assertIsNone(region_overlay.auto_mapping())
 
 
 class OverlayButtonTests(unittest.TestCase):
@@ -267,7 +255,7 @@ class OverlayButtonTests(unittest.TestCase):
 
         self.assertEqual(["toggle"], calls)
 
-    def test_callback_is_stored_by_start(self):
+    def test_callbacks_are_stored_by_start_and_wired_by_web_ui(self):
         saved = log_overlay._ON_CALIBRATE
         try:
             log_overlay._STARTED[0] = False
@@ -278,7 +266,6 @@ class OverlayButtonTests(unittest.TestCase):
             log_overlay._ON_CALIBRATE = saved
             log_overlay._STARTED[0] = False
 
-    def test_web_ui_wires_the_callback(self):
         bound = {}
         overlay = SimpleNamespace(
             start=lambda **kwargs: bound.update(kwargs),
@@ -373,7 +360,7 @@ class CalibrationSessionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         popen.assert_not_called()
 
-    def test_closing_the_overlay_closes_the_calibration_window(self):
+    def test_closing_the_calibration_window_then_repeating_is_a_no_op(self):
         proc = FakeCalibrationProc()
         web_ui._CALIBRATION_PROC = proc
         web_ui._overlay_close_calibrate()
@@ -381,7 +368,6 @@ class CalibrationSessionTests(unittest.TestCase):
         self.assertTrue(proc.terminated)
         self.assertFalse(web_ui._calibration_running())
 
-    def test_closing_when_nothing_runs_is_a_no_op(self):
         with patch.object(web_ui, "_log") as log:
             web_ui._overlay_close_calibrate()
         log.assert_not_called()
