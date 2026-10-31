@@ -44,17 +44,15 @@ class TimelineParserTests(unittest.TestCase):
             self._ocr(instruction), turn_number=3, log_revision=7)
 
     def test_undo_literal_parses_to_timeline_undo(self):
-        for text in ("回溯", "打法参考A\n回溯"):
-            with self.subTest(text=text):
-                proposed = self._parse(text)
-                self.assertEqual(ActionKind.TIMELINE_UNDO, proposed.action)
-                self.assertEqual("回溯", proposed.normalized_instruction)
-
-    def test_keep_literal_parses_to_timeline_keep(self):
-        proposed = self._parse("维持")
-
-        self.assertEqual(ActionKind.TIMELINE_KEEP, proposed.action)
-        self.assertEqual("维持", proposed.normalized_instruction)
+        for case, texts, expected, label in (
+                ("undo", ("回溯", "打法参考A\n回溯"),
+                 ActionKind.TIMELINE_UNDO, "回溯"),
+                ("keep", ("维持",), ActionKind.TIMELINE_KEEP, "维持")):
+            with self.subTest(case=case):
+                for text in texts:
+                    proposed = self._parse(text)
+                    self.assertEqual(expected, proposed.action)
+                    self.assertEqual(label, proposed.normalized_instruction)
 
     def test_suffixed_button_labels_parse_to_timeline_action(self):
         # 追加字常是带标题的按钮文案「回溯时间线/维持时间线」，也可能 OCR 把
@@ -73,21 +71,17 @@ class TimelineParserTests(unittest.TestCase):
     def test_timeline_coexists_with_the_pending_play_line(self):
         # 弹框时上一句「打出N号位随从」还挂着、旁边带一行时间线字：
         # 那张卡上一步已打出并消费，这次只点时间线按钮，不再执行打出。
-        for text, expected in (("打出1号位随从\n维持", ActionKind.TIMELINE_KEEP),
-                               ("打出1号位随从\n回溯", ActionKind.TIMELINE_UNDO)):
-            with self.subTest(text=text):
-                proposed = self._parse(text)
-                self.assertEqual(expected, proposed.action)
-
-    def test_timeline_coexists_with_pending_discover_hand_pick(self):
         # 战吼打完、手牌目标选择（如「选择我方2号位卡牌」）也已完成，但该句仍挂
         # 在面板上、旁边再追加「回溯时间线」——此刻点回溯按钮、不再重选。
-        for text, expected in (
-                ("选择我方2号位卡牌\n回溯时间线", ActionKind.TIMELINE_UNDO),
-                ("选择我方2号位卡牌\n维持", ActionKind.TIMELINE_KEEP)):
-            with self.subTest(text=text):
-                proposed = self._parse(text)
-                self.assertEqual(expected, proposed.action)
+        for case, text, expected in (
+                ("play_keep", "打出1号位随从\n维持", ActionKind.TIMELINE_KEEP),
+                ("play_undo", "打出1号位随从\n回溯", ActionKind.TIMELINE_UNDO),
+                ("discover_undo", "选择我方2号位卡牌\n回溯时间线",
+                 ActionKind.TIMELINE_UNDO),
+                ("discover_keep", "选择我方2号位卡牌\n维持",
+                 ActionKind.TIMELINE_KEEP)):
+            with self.subTest(case=case):
+                self.assertEqual(expected, self._parse(text).action)
 
     def test_timeline_word_beats_any_coexisting_content(self):
         # 盒子在特效完成后把时间线字追加在残留推荐旁；弹框模态，点按钮前什么都
@@ -128,22 +122,27 @@ class TimelineAdapterTests(unittest.TestCase):
         return SimpleNamespace(game_num_turns_in_play=3, is_my_turn=True)
 
     def test_undo_maps_to_timeline_action(self):
-        adapted = adapt_action(
-            self._proposed(ActionKind.TIMELINE_UNDO), self._state())
+        def undo():
+            adapted = adapt_action(
+                self._proposed(ActionKind.TIMELINE_UNDO), self._state())
 
-        self.assertIsInstance(adapted.manual_action, TimelineAction)
-        self.assertEqual("undo", adapted.manual_action.choice)
-        self.assertEqual("timeline_clicked", adapted.postcondition)
-        self.assertIsNone(adapted.source_entity_id)
-        self.assertIsNone(adapted.target_entity_id)
+            self.assertIsInstance(adapted.manual_action, TimelineAction)
+            self.assertEqual("undo", adapted.manual_action.choice)
+            self.assertEqual("timeline_clicked", adapted.postcondition)
+            self.assertIsNone(adapted.source_entity_id)
+            self.assertIsNone(adapted.target_entity_id)
 
-    def test_keep_maps_to_timeline_action(self):
-        adapted = adapt_action(
-            self._proposed(ActionKind.TIMELINE_KEEP), self._state())
+        def keep():
+            adapted = adapt_action(
+                self._proposed(ActionKind.TIMELINE_KEEP), self._state())
 
-        self.assertIsInstance(adapted.manual_action, TimelineAction)
-        self.assertEqual("keep", adapted.manual_action.choice)
-        self.assertEqual("timeline_clicked", adapted.postcondition)
+            self.assertIsInstance(adapted.manual_action, TimelineAction)
+            self.assertEqual("keep", adapted.manual_action.choice)
+            self.assertEqual("timeline_clicked", adapted.postcondition)
+
+        for case, check in (("undo", undo), ("keep", keep)):
+            with self.subTest(case=case):
+                check()
 
 
 class RecordingClickModule:
@@ -173,49 +172,36 @@ class TimelineControllerTests(unittest.TestCase):
         return SimpleNamespace(is_my_turn=True, game_num_turns_in_play=3)
 
     def test_undo_click_executes_undo(self):
-        clicks = RecordingClickModule()
-        sleeps = []
+        for case, action, label, event in (
+                ("undo", TimelineAction("undo"), "回溯", ("timeline_undo",)),
+                ("keep", TimelineAction("keep"), "维持", ("timeline_keep",))):
+            with self.subTest(case=case):
+                clicks = RecordingClickModule()
+                sleeps = []
 
-        result = self._controller(clicks, sleeps).execute(
-            TimelineAction("undo"), self._state())
+                result = self._controller(clicks, sleeps).execute(
+                    action, self._state())
 
-        self.assertTrue(result.executed, result.message)
-        self.assertIn("回溯", result.message)
-        self.assertEqual([("timeline_undo",)], clicks.events)
-        self.assertEqual([], sleeps)
-
-    def test_keep_click_executes_keep(self):
-        clicks = RecordingClickModule()
-        sleeps = []
-
-        result = self._controller(clicks, sleeps).execute(
-            TimelineAction("keep"), self._state())
-
-        self.assertTrue(result.executed, result.message)
-        self.assertIn("维持", result.message)
-        self.assertEqual([("timeline_keep",)], clicks.events)
+                self.assertTrue(result.executed, result.message)
+                self.assertIn(label, result.message)
+                self.assertEqual([event], clicks.events)
+                self.assertEqual([], sleeps)
 
     def test_unknown_choice_is_rejected_before_any_click(self):
-        clicks = RecordingClickModule()
-        sleeps = []
+        for case, action, current_state in (
+                ("unknown_choice", TimelineAction("rewind"), self._state()),
+                ("not_my_turn", TimelineAction("undo"),
+                 SimpleNamespace(is_my_turn=False, game_num_turns_in_play=3))):
+            with self.subTest(case=case):
+                clicks = RecordingClickModule()
+                sleeps = []
 
-        result = self._controller(clicks, sleeps).execute(
-            TimelineAction("rewind"), self._state())
+                result = self._controller(clicks, sleeps).execute(
+                    action, current_state)
 
-        self.assertFalse(result.executed)
-        self.assertEqual([], clicks.events)
-        self.assertEqual([], sleeps)
-
-    def test_not_my_turn_is_rejected_before_any_click(self):
-        clicks = RecordingClickModule()
-        sleeps = []
-
-        result = self._controller(clicks, sleeps).execute(
-            TimelineAction("undo"),
-            SimpleNamespace(is_my_turn=False, game_num_turns_in_play=3))
-
-        self.assertFalse(result.executed)
-        self.assertEqual([], clicks.events)
+                self.assertFalse(result.executed)
+                self.assertEqual([], clicks.events)
+                self.assertEqual([], sleeps)
 
 
 class RecordingController:
@@ -300,16 +286,20 @@ class TimelineFlowTests(unittest.TestCase):
         return flow, controller
 
     def test_unchanged_panel_waits_instead_of_retrying(self):
-        flow, controller = self._step("回溯")
-
-        result = flow.run_player_turn_step()
-
         # 点完面板没变、Power.log 也没变：绝不能 RETRY（会二次撤销），
         # 应标记已消费并等待盒子更新下一条推荐。
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-        self.assertIn("waiting_recommendation_update", result.diagnostics)
-        self.assertEqual(
-            [TimelineAction("undo")], controller.actions)
+        for case, instruction, action in (
+                ("undo", "回溯", TimelineAction("undo")),
+                ("keep", "维持", TimelineAction("keep"))):
+            with self.subTest(case=case):
+                flow, controller = self._step(instruction)
+
+                result = flow.run_player_turn_step()
+
+                self.assertEqual(FlowStepStatus.OBSERVE, result.status)
+                self.assertIn("waiting_recommendation_update",
+                              result.diagnostics)
+                self.assertEqual([action], controller.actions)
 
     def test_identical_recommendation_is_not_executed_twice(self):
         flow, controller = self._step("回溯")
@@ -322,43 +312,26 @@ class TimelineFlowTests(unittest.TestCase):
         self.assertEqual(FlowStepStatus.OBSERVE, second.status)
         self.assertEqual([TimelineAction("undo")], controller.actions)
 
-    def test_keep_choice_also_waits_after_single_click(self):
-        flow, controller = self._step("维持")
-
-        result = flow.run_player_turn_step()
-
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-        self.assertIn("waiting_recommendation_update", result.diagnostics)
-        self.assertEqual(
-            [TimelineAction("keep")], controller.actions)
-
     def test_pending_play_line_with_keep_only_clicks_keep_once(self):
         # 面板「打出…还挂着 + 维持」：打出上一步已消费，本次只点一次维持，
         # 不重打、也不因文字再次变化而重复点击。
-        flow, controller = self._step("打出1号位随从\n维持")
-
-        result = flow.run_player_turn_step()
-
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-        self.assertEqual([TimelineAction("keep")], controller.actions)
-
-        second = flow.run_player_turn_step()
-        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
-        self.assertEqual([TimelineAction("keep")], controller.actions)
-
-    def test_pending_discover_line_with_undo_only_clicks_undo_once(self):
         # 战吼手牌目标选完后，「选择我方2号位卡牌」仍挂在面板上并追加
         # 「回溯时间线」：只点一次回溯，不因文字未变而重复撤销。
-        flow, controller = self._step("选择我方2号位卡牌\n回溯时间线")
+        for case, instruction, action in (
+                ("keep", "打出1号位随从\n维持", TimelineAction("keep")),
+                ("undo", "选择我方2号位卡牌\n回溯时间线",
+                 TimelineAction("undo"))):
+            with self.subTest(case=case):
+                flow, controller = self._step(instruction)
 
-        result = flow.run_player_turn_step()
+                result = flow.run_player_turn_step()
 
-        self.assertEqual(FlowStepStatus.OBSERVE, result.status)
-        self.assertEqual([TimelineAction("undo")], controller.actions)
+                self.assertEqual(FlowStepStatus.OBSERVE, result.status)
+                self.assertEqual([action], controller.actions)
 
-        second = flow.run_player_turn_step()
-        self.assertEqual(FlowStepStatus.OBSERVE, second.status)
-        self.assertEqual([TimelineAction("undo")], controller.actions)
+                second = flow.run_player_turn_step()
+                self.assertEqual(FlowStepStatus.OBSERVE, second.status)
+                self.assertEqual([action], controller.actions)
 
 
 if __name__ == "__main__":

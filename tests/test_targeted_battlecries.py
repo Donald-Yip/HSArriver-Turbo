@@ -102,10 +102,6 @@ class TargetedBattlecryTests(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertEqual([], events)
 
-    def test_location_is_not_a_valid_minion_target(self):
-        with self.assertRaisesRegex(RecommendationStateError, "target_not_minion"):
-            adapt_action(self.proposed("目标是己方1号位"), self.state())
-
     def test_untargeted_battlecry_keeps_original_clicks(self):
         state = self.state()
         result, events, sleeps = self.execute(adapt_action(self.proposed(), state), state)

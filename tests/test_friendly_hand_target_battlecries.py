@@ -81,18 +81,13 @@ class HandTargetCardDataTests(unittest.TestCase):
             | {HAND_TARGET_LOCATION_CARD_ID}
             | set(HAND_TARGET_SPECIFIED_CARDS),
             set(ids))
-
-    def test_specified_hand_card_patterns_are_covered(self):
-        """「检视/从 N 张手牌中选一张」「使…你手牌中一张…」也要按手牌目标处理。"""
+        # 「检视/从 N 张手牌中选一张」「使…你手牌中一张…」也要按手牌目标处理。
         for card_id in HAND_TARGET_SPECIFIED_CARDS:
             with self.subTest(card_id=card_id):
                 self.assertTrue(is_friendly_hand_target_card(card_id))
-
-    def test_legacy_cards_are_always_kept(self):
+        # 卡面读不到时原来能用的两张也不能被漏掉。
         self.assertLessEqual(LEGACY_HAND_TARGET_CARD_IDS,
                              friendly_hand_target_card_ids())
-
-    def test_lookup_is_cached(self):
         self.assertIs(friendly_hand_target_card_ids(),
                       friendly_hand_target_card_ids())
 
@@ -146,16 +141,15 @@ class HandTargetRuleTests(unittest.TestCase):
         for card_id, kind in cases:
             with self.subTest(card_id=card_id):
                 self.assertEqual(kind, hand_target_rule(card_id)["kind"])
-
-    def test_cardtype_requirements(self):
-        cases = (
+        # 目标牌的类型要求：只收手牌里符合类型的牌。
+        cardtype_cases = (
             ("CATA_563", {"SPELL"}),     # 选择手牌中的一张法术牌
             ("CATA_477", {"MINION"}),    # 地标：手牌中的一张随从牌
             ("BE_036", set()),           # 只是一张牌：不限制
             ("CATA_490", set()),
         )
-        for card_id, expected in cases:
-            with self.subTest(card_id=card_id):
+        for card_id, expected in cardtype_cases:
+            with self.subTest(card_id=card_id, aspect="cardtypes"):
                 self.assertEqual(
                     expected, set(hand_target_allowed_cardtypes(card_id)))
 
@@ -199,52 +193,52 @@ class HandTargetTypeMismatchTests(unittest.TestCase):
         from src.game_state.recommendation_adapter import adapt_action
         return adapt_action(self._proposed(state, target), state)
 
-    def test_matching_type_is_accepted(self):
-        state = self._state("CATA_563", "SPELL", "SPELL")
+    def test_hand_target_cardtype_gate(self):
+        cases = (
+            ("matching_type", "CATA_563", ("SPELL", "SPELL"), None),
+            ("wrong_type", "CATA_563", ("SPELL", "MINION"),
+             "hand_target_cardtype_mismatch"),
+            # 魔眼秘术师（CATA_490）是「选择一张牌」，不限制类型。
+            ("unconstrained", "CATA_490", ("MINION", "MINION"), None),
+        )
+        for label, source_card_id, cardtypes, error in cases:
+            with self.subTest(case=label):
+                state = self._state(source_card_id, *cardtypes)
+                target = SlotRef("board_slot", "friendly", 2)
 
-        adapted = self._adapt(state, SlotRef("board_slot", "friendly", 2))
+                if error is not None:
+                    with self.assertRaisesRegex(
+                            RecommendationStateError, error):
+                        self._adapt(state, target)
+                    continue
 
-        self.assertEqual("hand", adapted.manual_action.target.kind)
-        self.assertEqual(1, adapted.manual_action.target.index)
+                adapted = self._adapt(state, target)
 
-    def test_wrong_type_is_refused(self):
-        state = self._state("CATA_563", "SPELL", "MINION")
-
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "hand_target_cardtype_mismatch"):
-            self._adapt(state, SlotRef("board_slot", "friendly", 2))
-
-    def test_unconstrained_card_accepts_any_type(self):
-        # 魔眼秘术师（CATA_490）是「选择一张牌」，不限制类型
-        state = self._state("CATA_490", "MINION", "MINION")
-
-        adapted = self._adapt(state, SlotRef("board_slot", "friendly", 2))
-
-        self.assertEqual("hand", adapted.manual_action.target.kind)
-        self.assertEqual(1, adapted.manual_action.target.index)
+                self.assertEqual("hand", adapted.manual_action.target.kind)
+                self.assertEqual(1, adapted.manual_action.target.index)
 
 
 class FollowUpHandTargetLogTests(unittest.TestCase):
     """收尾日志要写清「选手中第 N 张（卡名）」，便于和日志复盘对照。"""
 
     def test_executor_renumbers_after_playing_the_card(self):
-        clicks = RecordingClickModule()
-        executor = self._executor(clicks)
+        cases = (
+            # 打出去的是 1 号位（selected_index=0），面板给的号位是 3 → 牌面上第 2 张
+            (0, 3, ("choose_card", 1, 4), "选手中第 3 号位（选中卡）"),
+            # 打出去的是 4 号位（selected_index=3），目标号位 3 在它前面 → 位置不变
+            (4, 3, ("choose_card", 2, 4), None),
+        )
+        for selected_index, target_index, click, message in cases:
+            with self.subTest(selected_index=selected_index):
+                clicks = RecordingClickModule()
+                executor = self._executor(clicks)
 
-        # 打出去的是 1 号位（selected_index=0），面板给的号位是 3 → 牌面上第 2 张
-        result = self._run_play(executor, target_index=3, selected_index=0)
+                result = self._run_play(executor, target_index=target_index,
+                                        selected_index=selected_index)
 
-        self.assertIn(("choose_card", 1, 4), clicks.events)
-        self.assertIn("选手中第 3 号位（选中卡）", result.message)
-
-    def test_source_after_target_keeps_the_index(self):
-        clicks = RecordingClickModule()
-        executor = self._executor(clicks)
-
-        # 打出去的是 4 号位（selected_index=3），目标号位 3 在它前面 → 位置不变
-        self._run_play(executor, target_index=3, selected_index=4)
-
-        self.assertIn(("choose_card", 2, 4), clicks.events)
+                self.assertIn(click, clicks.events)
+                if message is not None:
+                    self.assertIn(message, result.message)
 
     @staticmethod
     def _executor(clicks):
@@ -380,110 +374,100 @@ class FriendlyHandTargetBattlecryTests(unittest.TestCase):
                 self.assertEqual([0.9], sleeps)
 
     def test_cata_563_rejects_out_of_range_hand_target(self):
-        state = SimpleNamespace(
-            game_num_turns_in_play=3,
-            my_hand_cards=[
-                SimpleNamespace(
-                    card_id="CATA_563", cardtype="MINION",
-                    entity_id="entity-1"),
-                SimpleNamespace(
-                    card_id="SPELL_1", cardtype="SPELL",
-                    entity_id="entity-2"),
-            ],
-            my_minions=[],
-            my_locations=[],
+        cases = (
+            ("out_of_range",
+             (("CATA_563", "MINION", "entity-1"),
+              ("SPELL_1", "SPELL", "entity-2")), 1, 99,
+             "hand_target_out_of_range"),
+            ("source_slot",
+             (("SPELL_1", "SPELL", "entity-1"),
+              ("CATA_563", "MINION", "entity-2")), 2, 2,
+             "hand_target_is_source"),
         )
+        for label, cards, source_slot, target_slot, code in cases:
+            with self.subTest(case=label):
+                state = SimpleNamespace(
+                    game_num_turns_in_play=3,
+                    my_hand_cards=[
+                        SimpleNamespace(card_id=card_id, cardtype=cardtype,
+                                        entity_id=entity_id)
+                        for card_id, cardtype, entity_id in cards],
+                    my_minions=[],
+                    my_locations=[],
+                )
 
-        with self.assertRaisesRegex(
-                RecommendationStateError, "hand_target_out_of_range"):
-            adapt_action(
-                self._proposed(source_slot=1, target_slot=99), state)
-
-    def test_cata_563_rejects_its_own_hand_slot_as_target(self):
-        state = SimpleNamespace(
-            game_num_turns_in_play=3,
-            my_hand_cards=[
-                SimpleNamespace(
-                    card_id="SPELL_1", cardtype="SPELL",
-                    entity_id="entity-1"),
-                SimpleNamespace(
-                    card_id="CATA_563", cardtype="MINION",
-                    entity_id="entity-2"),
-            ],
-            my_minions=[],
-            my_locations=[],
-        )
-
-        with self.assertRaisesRegex(
-                RecommendationStateError, "hand_target_is_source"):
-            adapt_action(
-                self._proposed(source_slot=2, target_slot=2), state)
+                with self.assertRaisesRegex(
+                        RecommendationStateError, code):
+                    adapt_action(
+                        self._proposed(source_slot=source_slot,
+                                       target_slot=target_slot), state)
 
     def test_cata_563_rejects_replaced_hand_target_before_clicking(self):
-        cards = [
-            SimpleNamespace(
+        with self.subTest(case="replaced_after_adaptation"):
+            cards = [
+                SimpleNamespace(
+                    card_id="CATA_563", cardtype="MINION",
+                    entity_id="entity-1", name="雷鸣流云"),
+                SimpleNamespace(
+                    card_id="SPELL_1", cardtype="SPELL",
+                    entity_id="entity-2", name="法术一"),
+            ]
+            state = SimpleNamespace(
+                game_num_turns_in_play=3,
+                is_my_turn=True,
+                my_hand_cards=cards,
+                my_minions=[],
+                my_locations=[],
+                my_board_slot_num=0,
+                oppo_minions=[],
+                oppo_board_slot_num=0,
+            )
+            adapted = adapt_action(
+                self._proposed(source_slot=1, target_slot=2), state)
+            state.my_hand_cards[1] = SimpleNamespace(
+                card_id="SPELL_2", cardtype="SPELL",
+                entity_id="replacement", name="替换法术")
+            clicks = RecordingClickModule()
+            sleeps = []
+            controller = self._controller(clicks, sleeps)
+
+            result = controller.execute(adapted.manual_action, state)
+
+            self.assertFalse(result.executed)
+            self.assertEqual([], clicks.events)
+            self.assertEqual([], sleeps)
+
+        with self.subTest(case="source_card_as_target"):
+            source = SimpleNamespace(
                 card_id="CATA_563", cardtype="MINION",
-                entity_id="entity-1", name="雷鸣流云"),
-            SimpleNamespace(
-                card_id="SPELL_1", cardtype="SPELL",
-                entity_id="entity-2", name="法术一"),
-        ]
-        state = SimpleNamespace(
-            game_num_turns_in_play=3,
-            is_my_turn=True,
-            my_hand_cards=cards,
-            my_minions=[],
-            my_locations=[],
-            my_board_slot_num=0,
-            oppo_minions=[],
-            oppo_board_slot_num=0,
-        )
-        adapted = adapt_action(
-            self._proposed(source_slot=1, target_slot=2), state)
-        state.my_hand_cards[1] = SimpleNamespace(
-            card_id="SPELL_2", cardtype="SPELL",
-            entity_id="replacement", name="替换法术")
-        clicks = RecordingClickModule()
-        sleeps = []
-        controller = self._controller(clicks, sleeps)
+                entity_id="entity-1", name="雷鸣流云")
+            state = SimpleNamespace(
+                game_num_turns_in_play=3,
+                is_my_turn=True,
+                my_hand_cards=[source],
+                my_minions=[],
+                my_locations=[],
+                my_board_slot_num=0,
+                oppo_minions=[],
+                oppo_board_slot_num=0,
+            )
+            action = PlayCardAction(
+                hand_index=0,
+                card_id="CATA_563",
+                cardtype="MINION",
+                gap_index=0,
+                target=Target("friendly", "hand", 0, "entity-1"),
+                hand_entity_id="entity-1",
+            )
+            clicks = RecordingClickModule()
+            sleeps = []
+            controller = self._controller(clicks, sleeps)
 
-        result = controller.execute(adapted.manual_action, state)
+            result = controller.execute(action, state)
 
-        self.assertFalse(result.executed)
-        self.assertEqual([], clicks.events)
-        self.assertEqual([], sleeps)
-
-    def test_cata_563_executor_rejects_source_card_as_hand_target(self):
-        source = SimpleNamespace(
-            card_id="CATA_563", cardtype="MINION",
-            entity_id="entity-1", name="雷鸣流云")
-        state = SimpleNamespace(
-            game_num_turns_in_play=3,
-            is_my_turn=True,
-            my_hand_cards=[source],
-            my_minions=[],
-            my_locations=[],
-            my_board_slot_num=0,
-            oppo_minions=[],
-            oppo_board_slot_num=0,
-        )
-        action = PlayCardAction(
-            hand_index=0,
-            card_id="CATA_563",
-            cardtype="MINION",
-            gap_index=0,
-            target=Target("friendly", "hand", 0, "entity-1"),
-            hand_entity_id="entity-1",
-        )
-        clicks = RecordingClickModule()
-        sleeps = []
-        controller = self._controller(clicks, sleeps)
-
-        result = controller.execute(action, state)
-
-        self.assertFalse(result.executed)
-        self.assertEqual([], clicks.events)
-        self.assertEqual([], sleeps)
+            self.assertFalse(result.executed)
+            self.assertEqual([], clicks.events)
+            self.assertEqual([], sleeps)
 
     def test_target_before_source_keeps_its_hand_index(self):
         state = SimpleNamespace(

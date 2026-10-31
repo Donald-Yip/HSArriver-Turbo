@@ -49,8 +49,7 @@ class HandOrBoardCardDataTests(unittest.TestCase):
         self.assertTrue(is_hand_or_board_target_card(HAND_OR_BOARD_CARD))
         # 两可的卡不在「只能选手牌」那一类里，否则号位会被当成手牌位置。
         self.assertFalse(is_friendly_hand_target_card(HAND_OR_BOARD_CARD))
-
-    def test_execution_gate_accepts_both_kinds(self):
+        # 执行闸门同时接受两类卡，但不会把普通随从放进来。
         self.assertTrue(allows_hand_target(HAND_OR_BOARD_CARD))
         self.assertTrue(allows_hand_target("CATA_490"))
         self.assertFalse(allows_hand_target("OTHER_MINION"))
@@ -82,31 +81,32 @@ class TargetNameParsingTests(unittest.TestCase):
             ocr, turn_number=turn_number, log_revision=7)
 
     def test_name_after_the_target_line_is_captured(self):
-        proposed = self._parse([
-            "对手记牌器", "打法参考A", "打出1号位随从", "残恶梦魇",
-            "目标是己方3号位", "错误产物", "放置于我方1号位"])
+        cases = (
+            ("captured", [
+                "对手记牌器", "打法参考A", "打出1号位随从", "残恶梦魇",
+                "目标是己方3号位", "错误产物", "放置于我方1号位"],
+             "错误产物", ("board_slot", "friendly", 3), True),
+            ("no_name_line", [
+                "打法参考A", "打出1号位随从", "残恶梦魇", "目标是己方3号位",
+                "放置于我方1号位"],
+             None, ("board_slot", "friendly", 3), False),
+            ("hero_target_line", [
+                "打法参考A", "打出1号位法术", "火球术", "目标是敌方1号位随从",
+                "军情七处特工"],
+             None, ("board_slot", "enemy", 1), False),
+        )
+        for label, lines, target_name, target, name_in_instruction in cases:
+            with self.subTest(case=label):
+                proposed = self._parse(lines)
 
-        self.assertEqual("错误产物", proposed.target_name)
-        self.assertEqual(("board_slot", "friendly", 3),
-                         (proposed.target.kind, proposed.target.owner,
-                          proposed.target.index))
-        # 卡名行不进规范化文本（所以只能单独留一份）。
-        self.assertNotIn("错误产物", proposed.normalized_instruction)
-
-    def test_no_name_line_leaves_target_name_empty(self):
-        proposed = self._parse([
-            "打法参考A", "打出1号位随从", "残恶梦魇", "目标是己方3号位",
-            "放置于我方1号位"])
-
-        self.assertIsNone(proposed.target_name)
-
-    def test_hero_target_line_does_not_borrow_the_next_line_for_minions(self):
-        # 目标名只在随从牌的目标行后面取；法术/英雄目标不用它。
-        proposed = self._parse([
-            "打法参考A", "打出1号位法术", "火球术", "目标是敌方1号位随从",
-            "军情七处特工"])
-
-        self.assertIsNone(proposed.target_name)
+                self.assertEqual(target_name, proposed.target_name)
+                self.assertEqual(target, (proposed.target.kind,
+                                          proposed.target.owner,
+                                          proposed.target.index))
+                if name_in_instruction:
+                    # 卡名行不进规范化文本（所以只能单独留一份）。
+                    self.assertNotIn("错误产物",
+                                     proposed.normalized_instruction)
 
 
 class HandOrBoardAdaptationTests(unittest.TestCase):
@@ -145,23 +145,24 @@ class HandOrBoardAdaptationTests(unittest.TestCase):
         return RecommendationParser().parse(
             ocr, turn_number=3, log_revision=7)
 
-    def test_target_name_in_hand_resolves_to_the_hand_card(self):
-        state = self._state(
-            ["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "军情七处特工"])
-        adapted = adapt_action(self._proposed("错误产物"), state)
+    def test_target_name_resolves_to_the_hand_or_board_card(self):
+        cases = (
+            ("hand", ["残恶梦魇", "法力燃烧", "错误产物"],
+             ["甲虫", "军情七处特工"], "hand", 2, "hand-错误产物"),
+            ("board", ["残恶梦魇", "法力燃烧", "暗影步"],
+             ["甲虫", "军情七处特工", "错误产物"], "minion", None, "board-3"),
+        )
+        for side, hand_names, board_names, kind, index, entity_id in cases:
+            with self.subTest(side=side):
+                adapted = adapt_action(
+                    self._proposed("错误产物"),
+                    self._state(hand_names, board_names))
 
-        self.assertEqual("hand", adapted.manual_action.target.kind)
-        self.assertEqual(2, adapted.manual_action.target.index)
-        self.assertEqual("hand-错误产物",
-                         adapted.manual_action.target.entity_id)
-
-    def test_target_name_on_the_board_resolves_to_the_board_minion(self):
-        state = self._state(
-            ["残恶梦魇", "法力燃烧", "暗影步"], ["甲虫", "军情七处特工", "错误产物"])
-        adapted = adapt_action(self._proposed("错误产物"), state)
-
-        self.assertEqual("minion", adapted.manual_action.target.kind)
-        self.assertEqual("board-3", adapted.manual_action.target.entity_id)
+                self.assertEqual(kind, adapted.manual_action.target.kind)
+                if index is not None:
+                    self.assertEqual(index, adapted.manual_action.target.index)
+                self.assertEqual(entity_id,
+                                 adapted.manual_action.target.entity_id)
 
     def test_without_a_name_only_the_side_that_fits_wins(self):
         # 手牌只剩 2 张，3号位不可能是手牌 → 场面。
@@ -209,24 +210,24 @@ class HandOrBoardAdaptationTests(unittest.TestCase):
 
     def test_same_name_on_both_sides_falls_back_to_the_board(self):
         # 真出现这种（名字两边都有、号位两边都成立）就按改动之前的行为打场面，
-        # 不猜手牌也不卡住回合。
-        state = self._state(
-            ["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "军情七处特工", "错误产物"])
+        # 不猜手牌也不卡住回合；名字没读到但两边号位都成立时同样退回场面。
+        cases = (
+            ("same_name",
+             ["残恶梦魇", "法力燃烧", "错误产物"],
+             ["甲虫", "军情七处特工", "错误产物"]),
+            ("both_sides_fit",
+             ["残恶梦魇", "法力燃烧", "错误产物"],
+             ["甲虫", "乙虫", "军情七处特工"]),
+        )
+        for label, hand_names, board_names in cases:
+            with self.subTest(case=label):
+                adapted = adapt_action(self._proposed(None),
+                                       self._state(hand_names, board_names))
 
-        adapted = adapt_action(self._proposed(None), state)
-
-        self.assertEqual("minion", adapted.manual_action.target.kind)
-        self.assertEqual("board-3", adapted.manual_action.target.entity_id)
-
-    def test_both_sides_fit_without_a_name_falls_back_to_the_board(self):
-        # 手牌 3 号位是随从、场面 3 号位也是随从，名字又没读到 → 场面。
-        state = self._state(
-            ["残恶梦魇", "法力燃烧", "错误产物"], ["甲虫", "乙虫", "军情七处特工"])
-
-        adapted = adapt_action(self._proposed(None), state)
-
-        self.assertEqual("minion", adapted.manual_action.target.kind)
-        self.assertEqual("board-3", adapted.manual_action.target.entity_id)
+                self.assertEqual("minion",
+                                 adapted.manual_action.target.kind)
+                self.assertEqual("board-3",
+                                 adapted.manual_action.target.entity_id)
 
     def test_no_candidate_at_all_is_refused(self):
         state = self._state(["残恶梦魇", "法力燃烧"], ["甲虫"])

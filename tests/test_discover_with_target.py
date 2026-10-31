@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from log_op import parse_line
 from log_state import LogState, update_state
 from manual_controller import (
-    ClickExecutor, DiscoverChoiceAction, ManualController,
+    ClickExecutor, ManualController,
 )
 from src.game_state.recommendation_adapter import (
     RecommendationStateError, adapt_action,
@@ -150,6 +150,7 @@ class DiscoverWithTargetTests(unittest.TestCase):
         action = adapt_action(self.proposed(index=2), state).manual_action
         self.assertEqual(1, action.choice_index)          # 0 基：第 2 项
         self.assertEqual(4, action.choice_count)
+        self.assertEqual("101", action.choice_entity_id)
         self.assertEqual("enemy", action.target.side)
         self.assertEqual("minion", action.target.kind)
         self.assertEqual(0, action.target.index)          # 对方 1 号位
@@ -161,59 +162,84 @@ class DiscoverWithTargetTests(unittest.TestCase):
 
     def test_damaged_minion_buff_from_real_panel_shape(self):
         """凶险梦魇（EDR_570）：真实日志形态「选择卡牌 / 动荡能量」。"""
-        log = LogState()
-        log.my_player_id = "1"
-        self.power_option(log, "EDR_570", "凶险梦魇",
-                          (("噩梦爆发", "EDR_570A"), ("动荡能量", "EDR_570B")))
-        state = self.state(log)
-        state.my_hand_cards = [SimpleNamespace(entity_id="152",
-                                               card_id="EDR_570",
-                                               cardtype="SPELL", name="凶险梦魇")]
-        state.my_minions = [self.minion("301", 1), self.minion("302", 2)]
-        proposed = RecommendationParser().parse(SimpleNamespace(
-            frame_id="frame", confidence=.99, normalized_text=(
-                "打法参考A\n打出1号位法术\n目标是己方2号位\n"
-                "选择卡牌\n动荡能量")), turn_number=3, log_revision=7)
-        action = adapt_action(proposed, state).manual_action
-        self.assertEqual(1, action.choose_one.choice_index)
-        self.assertEqual(1, action.target.index)
-        events, _, _ = self.execute(action, state)
-        self.assertEqual(
-            [("cancel",), ("hand", 0, 1), ("middle",),
-             ("choice", 1, 2), ("mine", 1, 2), ("cancel",)], events)
+        def buff_friendly_minion():
+            log = LogState()
+            log.my_player_id = "1"
+            self.power_option(log, "EDR_570", "凶险梦魇",
+                              (("噩梦爆发", "EDR_570A"),
+                               ("动荡能量", "EDR_570B")))
+            state = self.state(log)
+            state.my_hand_cards = [SimpleNamespace(entity_id="152",
+                                                   card_id="EDR_570",
+                                                   cardtype="SPELL",
+                                                   name="凶险梦魇")]
+            state.my_minions = [self.minion("301", 1), self.minion("302", 2)]
+            proposed = RecommendationParser().parse(SimpleNamespace(
+                frame_id="frame", confidence=.99, normalized_text=(
+                    "打法参考A\n打出1号位法术\n目标是己方2号位\n"
+                    "选择卡牌\n动荡能量")), turn_number=3, log_revision=7)
+            action = adapt_action(proposed, state).manual_action
+            self.assertEqual(1, action.choose_one.choice_index)
+            self.assertEqual(1, action.target.index)
+            events, _, _ = self.execute(action, state)
+            self.assertEqual(
+                [("cancel",), ("hand", 0, 1), ("middle",),
+                 ("choice", 1, 2), ("mine", 1, 2), ("cancel",)], events)
 
-    def test_anger_damage_option_targets_enemy_minion(self):
-        """愤怒（EX1_154）：盒子点名要目标的那个选项。"""
-        log = LogState()
-        log.my_player_id = "1"
-        self.power_option(log, "EX1_154", "愤怒",
-                          (("阳炎之怒", "EX1_154a"), ("自然之怒", "EX1_154b")))
-        state = self.state(log, oppo=1)
-        state.my_hand_cards = [SimpleNamespace(entity_id="152",
-                                               card_id="EX1_154",
-                                               cardtype="SPELL", name="愤怒")]
-        state.my_minions = []
-        proposed = RecommendationParser().parse(SimpleNamespace(
-            frame_id="frame", confidence=.99, normalized_text=(
-                "打法参考A\n打出1号位法术\n目标是对方1号位\n"
-                "选择卡牌\n阳炎之怒")), turn_number=3, log_revision=7)
-        action = adapt_action(proposed, state).manual_action
-        self.assertEqual(0, action.choose_one.choice_index)
-        events, _, _ = self.execute(action, state)
-        self.assertEqual(
-            [("cancel",), ("hand", 0, 1), ("middle",),
-             ("choice", 0, 2), ("oppo", 0, 1), ("cancel",)], events)
+        def damage_enemy_minion():
+            """愤怒（EX1_154）：盒子点名要目标的那个选项。"""
+            log = LogState()
+            log.my_player_id = "1"
+            self.power_option(log, "EX1_154", "愤怒",
+                              (("阳炎之怒", "EX1_154a"),
+                               ("自然之怒", "EX1_154b")))
+            state = self.state(log, oppo=1)
+            state.my_hand_cards = [SimpleNamespace(entity_id="152",
+                                                   card_id="EX1_154",
+                                                   cardtype="SPELL",
+                                                   name="愤怒")]
+            state.my_minions = []
+            proposed = RecommendationParser().parse(SimpleNamespace(
+                frame_id="frame", confidence=.99, normalized_text=(
+                    "打法参考A\n打出1号位法术\n目标是对方1号位\n"
+                    "选择卡牌\n阳炎之怒")), turn_number=3, log_revision=7)
+            action = adapt_action(proposed, state).manual_action
+            self.assertEqual(0, action.choose_one.choice_index)
+            events, _, _ = self.execute(action, state)
+            self.assertEqual(
+                [("cancel",), ("hand", 0, 1), ("middle",),
+                 ("choice", 0, 2), ("oppo", 0, 1), ("cancel",)], events)
+
+        for case, check in (("buff_friendly", buff_friendly_minion),
+                            ("damage_enemy", damage_enemy_minion)):
+            with self.subTest(case=case):
+                check()
 
     # ---------------------------------------------------------------- 边界
     def test_discover_without_target_keeps_old_behaviour(self):
-        log = self.choice(3)
-        state = self.state(log)
-        action = adapt_action(self.proposed(index=2, target=None),
-                              state).manual_action
-        self.assertIsNone(action.target)
-        events, sleeps, _ = self.execute(action, state)
-        self.assertEqual([("choice", 1, 3)], events)   # 与改动前一致
-        self.assertEqual([], sleeps)
+        def three_choices_without_target():
+            log = self.choice(3)
+            state = self.state(log)
+            action = adapt_action(self.proposed(index=2, target=None),
+                                  state).manual_action
+            self.assertIsNone(action.target)
+            events, sleeps, _ = self.execute(action, state)
+            self.assertEqual([("choice", 1, 3)], events)   # 与改动前一致
+            self.assertEqual([], sleeps)
+
+        def panel_without_target_line():
+            """盒子只写「选择我方2号位卡牌」时，即便游戏里那个选项还要目标，
+            也不许脚本自己去点——点了会点偏，行为必须与改动前一致。"""
+            state = self.state(self.choice())
+            action = adapt_action(self.proposed(index=2, target=None),
+                                  state).manual_action
+            events, _, _ = self.execute(action, state)
+            self.assertEqual([("choice", 1, 4)], events)
+
+        for case, check in (("three_choices", three_choices_without_target),
+                            ("panel_has_no_target", panel_without_target_line)):
+            with self.subTest(case=case):
+                check()
 
     def test_discover_target_out_of_range_is_rejected(self):
         state = self.state(self.choice(), oppo=1)
@@ -238,22 +264,6 @@ class DiscoverWithTargetTests(unittest.TestCase):
         self.assertEqual([], events)
         self.assertIn("选项", result.message)
 
-    def test_general_choice_binds_entity_id_from_log(self):
-        state = self.state(self.choice())
-        action = adapt_action(self.proposed(index=2), state).manual_action
-        self.assertEqual("101", action.choice_entity_id)
-        events, _, _ = self.execute(action, state)
-        self.assertEqual([("choice", 1, 4), ("oppo", 0, 2), ("cancel",)], events)
-
-    def test_target_is_not_clicked_when_the_panel_has_none(self):
-        """盒子只写「选择我方2号位卡牌」时，即便游戏里那个选项还要目标，
-        也不许脚本自己去点——点了会点偏，行为必须与改动前一致。"""
-        state = self.state(self.choice())
-        action = adapt_action(self.proposed(index=2, target=None),
-                              state).manual_action
-        events, _, _ = self.execute(action, state)
-        self.assertEqual([("choice", 1, 4)], events)
-
     def test_timeline_choice_still_works(self):
         log = LogState()
         log.my_player_id = "1"
@@ -273,15 +283,6 @@ class DiscoverWithTargetTests(unittest.TestCase):
         action = adapt_action(proposed, state).manual_action
         self.assertEqual("TIME_000tb", action.timeline_card_id)
         self.assertIsNone(action.target)
-
-
-class DiscoverTargetModelTests(unittest.TestCase):
-    def test_action_defaults_keep_old_construction_working(self):
-        action = DiscoverChoiceAction(1, 3)
-        self.assertIsNone(action.target)
-        self.assertIsNone(action.choice_entity_id)
-        self.assertIsNone(action.choice_parent_entity_id)
-        self.assertIsNone(action.timeline_card_id)
 
 
 if __name__ == "__main__":

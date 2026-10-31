@@ -1,5 +1,5 @@
 import unittest
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -45,84 +45,147 @@ class ChooseOneTests(unittest.TestCase):
         return RecommendationParser().parse(SimpleNamespace(frame_id='frame',
             normalized_text=text, confidence=.99), 3, 7)
 
-    def test_named_hero_power_selects_right_option_before_target(self):
-        state = self.state(self.options())
-        adapted = adapt_action(self.proposed(target='目标是己方英雄'), state)
-        events = []
-        executor = ClickExecutor(click_module=clicks, action_context=nullcontext,
-                                 sleep_func=lambda _: None)
-        with patch.object(clicks, 'cancel_click', side_effect=lambda: events.append('cancel')), \
-             patch.object(clicks, 'click_skill', side_effect=lambda: events.append('power')), \
-             patch.object(clicks, 'choose_discover_card', side_effect=lambda i, n: events.append((i, n))), \
-             patch.object(clicks, 'choose_my_hero', side_effect=lambda: events.append('target')):
-            result = ManualController(executor=executor, output_func=lambda _: None).execute(adapted.manual_action, state)
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual(['cancel', 'power', (1, 2), 'target', 'cancel'], events)
+    def test_choose_one_option_is_clicked_before_the_card_target(self):
+        def hero_power(events):
+            state = self.state(self.options())
+            adapted = adapt_action(self.proposed(target='目标是己方英雄'), state)
+            return state, adapted, {
+                'cancel_click': lambda: events.append('cancel'),
+                'click_skill': lambda: events.append('power'),
+                'choose_discover_card': lambda i, n: events.append((i, n)),
+                'choose_my_hero': lambda: events.append('target'),
+            }
 
-    def test_named_spell_selects_option_before_spell_target(self):
-        log = self.options('EX1_154')
-        state = self.state(log, 'EX1_154')
-        action = adapt_action(self.proposed('打出1号位法术', name='自然之怒', target='目标是对方英雄'), state)
-        events = []
-        executor = ClickExecutor(click_module=clicks, action_context=nullcontext, sleep_func=lambda _: None)
-        with patch.object(clicks, 'cancel_click', side_effect=lambda: events.append('cancel')), \
-             patch.object(clicks, 'choose_card', side_effect=lambda *a: events.append('hand')), \
-             patch.object(clicks, 'click_middle', side_effect=lambda: events.append('play')), \
-             patch.object(clicks, 'choose_discover_card', side_effect=lambda i, n: events.append((i, n))), \
-             patch.object(clicks, 'choose_oppo_hero', side_effect=lambda: events.append('target')):
-            result = ManualController(executor=executor, output_func=lambda _: None).execute(action.manual_action, state)
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual(['cancel', 'hand', 'play', (1, 2), 'target', 'cancel'], events)
+        def spell(events):
+            state = self.state(self.options('EX1_154'), 'EX1_154')
+            adapted = adapt_action(self.proposed(
+                '打出1号位法术', name='自然之怒', target='目标是对方英雄'), state)
+            return state, adapted, {
+                'cancel_click': lambda: events.append('cancel'),
+                'choose_card': lambda *_: events.append('hand'),
+                'click_middle': lambda: events.append('play'),
+                'choose_discover_card': lambda i, n: events.append((i, n)),
+                'choose_oppo_hero': lambda: events.append('target'),
+            }
 
-    def test_choose_one_minion_keeps_placement_and_selects_form(self):
-        state = self.state(self.options('EX1_165'), 'EX1_165')
-        state.my_hand_cards[0].cardtype = 'MINION'
-        action = adapt_action(self.proposed('打出1号位随从', name='熊形态'), state)
-        events = []
-        executor = ClickExecutor(click_module=clicks, action_context=nullcontext, sleep_func=lambda _: None)
-        with patch.object(clicks, 'cancel_click', side_effect=lambda: events.append('cancel')), \
-             patch.object(clicks, 'choose_card', side_effect=lambda *a: events.append('hand')), \
-             patch.object(clicks, 'put_minion', side_effect=lambda i, n: events.append(('place', i, n))), \
-             patch.object(clicks, 'choose_discover_card', side_effect=lambda i, n: events.append(('choice', i, n))):
-            result = ManualController(executor=executor, output_func=lambda _: None).execute(action.manual_action, state)
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual(['cancel', 'hand', ('place', 0, 0), ('choice', 1, 2), 'cancel'], events)
+        def minion(events):
+            state = self.state(self.options('EX1_165'), 'EX1_165')
+            state.my_hand_cards[0].cardtype = 'MINION'
+            adapted = adapt_action(self.proposed(
+                '打出1号位随从', name='熊形态'), state)
+            return state, adapted, {
+                'cancel_click': lambda: events.append('cancel'),
+                'choose_card': lambda *_: events.append('hand'),
+                'put_minion': lambda i, n: events.append(('place', i, n)),
+                'choose_discover_card':
+                    lambda i, n: events.append(('choice', i, n)),
+            }
+
+        for case, scenario, expected in (
+                ('hero_power', hero_power,
+                 ['cancel', 'power', (1, 2), 'target', 'cancel']),
+                ('spell', spell,
+                 ['cancel', 'hand', 'play', (1, 2), 'target', 'cancel']),
+                ('minion', minion,
+                 ['cancel', 'hand', ('place', 0, 0), ('choice', 1, 2),
+                  'cancel'])):
+            with self.subTest(case=case):
+                events = []
+                state, adapted, patches = scenario(events)
+                executor = ClickExecutor(
+                    click_module=clicks, action_context=nullcontext,
+                    sleep_func=lambda _: None)
+                with ExitStack() as stack:
+                    for attribute, side_effect in patches.items():
+                        stack.enter_context(patch.object(
+                            clicks, attribute, side_effect=side_effect))
+                    result = ManualController(
+                        executor=executor, output_func=lambda _: None,
+                    ).execute(adapted.manual_action, state)
+                self.assertTrue(result.executed, result.message)
+                self.assertEqual(expected, events)
 
     def test_disabled_choice_keeps_its_layout_slot_but_cannot_be_selected(self):
-        log = self.options()
-        self.feed(log, '    subOption 0 entity=[entityName=山谷植根 id=153 zone=SETASIDE zonePos=0 cardId=AV_205pb player=1] error=REQ_ENOUGH_MANA errorParam=')
-        manual = adapt_action(self.proposed(), self.state(log)).manual_action
-        # 号位按可用布局算（1 号位仍对应 2 号选项），并绑上选项/父实体 id 供执行前复核。
-        self.assertEqual(DiscoverChoiceAction(1, 2, choice_entity_id='154',
-                                             choice_card_id='AV_205a',
-                                             choice_parent_entity_id='152'),
-                         manual.choose_one)
-        with self.assertRaisesRegex(RecommendationStateError, 'choose_one_option_unavailable'):
-            adapt_action(self.proposed(name='山谷植根'), self.state(log))
+        def disabled_layout_slot():
+            log = self.options()
+            self.feed(log, '    subOption 0 entity=[entityName=山谷植根 id=153 zone=SETASIDE zonePos=0 cardId=AV_205pb player=1] error=REQ_ENOUGH_MANA errorParam=')
+            manual = adapt_action(self.proposed(), self.state(log)).manual_action
+            # 号位按可用布局算（1 号位仍对应 2 号选项），并绑上选项/父实体 id 供执行前复核。
+            self.assertEqual(DiscoverChoiceAction(1, 2, choice_entity_id='154',
+                                                 choice_card_id='AV_205a',
+                                                 choice_parent_entity_id='152'),
+                             manual.choose_one)
+            with self.assertRaisesRegex(RecommendationStateError,
+                                        'choose_one_option_unavailable'):
+                adapt_action(self.proposed(name='山谷植根'), self.state(log))
 
-    def test_non_choose_one_keeps_original_hero_power_action(self):
-        state = self.state(self.options('CS2_017'), 'CS2_017')
-        adapted = adapt_action(self.proposed(), state)
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
+        def named_option_unavailable():
+            log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
+                                 ('动荡能量', 'EDR_570B', 'REQ_ENOUGH_MANA')))
+            with self.assertRaisesRegex(RecommendationStateError,
+                                        'choose_one_option_unavailable'):
+                adapt_action(self.trouble_proposed('动荡能量'),
+                             self.trouble_state(log))
+
+        for case, check in (('disabled_layout_slot', disabled_layout_slot),
+                            ('named_option_unavailable', named_option_unavailable)):
+            with self.subTest(case=case):
+                check()
+
+    def test_choose_one_is_not_attached_when_not_needed(self):
+        """非抉择技能牌照旧；只有一个选项时游戏自动结算，多点一下反而会误选。"""
+        non_choose_one = adapt_action(
+            self.proposed(), self.state(self.options('CS2_017'), 'CS2_017'))
+        single_option = adapt_action(
+            self.trouble_proposed('噩梦爆发'),
+            self.trouble_state(self.troubles(
+                (('噩梦爆发', 'EDR_570A', 'NONE'),))))
+        for case, adapted in (('non_choose_one_hero_power', non_choose_one),
+                              ('single_option', single_option)):
+            with self.subTest(case=case):
+                self.assertIsNone(
+                    getattr(adapted.manual_action, 'choose_one', None))
 
     def test_unknown_or_ambiguous_name_is_rejected_before_clicking(self):
         """判不出唯一选项时零点击拒绝，不能先出牌再停在半途。"""
-        log = self.options()
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    'choose_one_name_not_unique'):
-            adapt_action(self.proposed(name='错误名称'), self.state(log))
-        self.feed(log, '    subOption 2 entity=[entityName=冰雪绽放 id=155 zone=SETASIDE zonePos=0 cardId=AV_205a player=1] error=NONE errorParam=')
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    'choose_one_name_not_unique'):
-            adapt_action(self.proposed(), self.state(log))
+        duplicate = self.options()
+        self.feed(duplicate, '    subOption 2 entity=[entityName=冰雪绽放 id=155 zone=SETASIDE zonePos=0 cardId=AV_205a player=1] error=NONE errorParam=')
+        near_names = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
+                                    ('噩梦暴发', 'EDR_570B', 'NONE')))
+        cases = (
+            ('unknown_name', self.proposed(name='错误名称'),
+             self.state(self.options())),
+            ('duplicate_name', self.proposed(), self.state(duplicate)),
+            ('near_names', self.trouble_proposed('动荡能量'),
+             self.trouble_state(near_names)),
+        )
+        for case, proposed, current_state in cases:
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(RecommendationStateError,
+                                            'choose_one_name_not_unique'):
+                    adapt_action(proposed, current_state)
 
     def test_missing_or_enemy_power_options_do_not_block_metadata_resolution(self):
-        log = self.options()
-        self.feed(log, 'id=24')
-        adapted = adapt_action(self.proposed(), self.state(log))
-        self.assertEqual('AV_205a', adapted.manual_action.choose_one.choice_card_id)
-        adapted = adapt_action(self.proposed(), self.state(self.options(player='2')))
-        self.assertEqual('AV_205a', adapted.manual_action.choose_one.choice_card_id)
+        missing = self.options()
+        self.feed(missing, 'id=24')
+        empty = self.trouble_state(LogState())
+        empty.power_options = {}
+        cases = (
+            ('missing_power_options', self.proposed(), self.state(missing),
+             'AV_205a'),
+            ('enemy_power_options', self.proposed(),
+             self.state(self.options(player='2')), 'AV_205a'),
+            ('empty_power_options', self.trouble_proposed('动荡能量'), empty,
+             'EDR_570B'),
+        )
+        for case, proposed, current_state, card_id in cases:
+            with self.subTest(case=case):
+                choice = adapt_action(
+                    proposed, current_state).manual_action.choose_one
+                self.assertEqual(card_id, choice.choice_card_id)
+                if case == 'empty_power_options':
+                    self.assertEqual(1, choice.choice_index)
+                    self.assertIsNone(choice.choice_entity_id)
 
     # ------------------------------------------------ 选项定位的四档（线上死循环修复）
     def troubles(self, choices, source='EDR_570', name='凶险梦魇'):
@@ -172,17 +235,6 @@ class ChooseOneTests(unittest.TestCase):
                                self.trouble_state(log))
         self.assertEqual(1, adapted.manual_action.choose_one.choice_index)
 
-    def test_options_can_be_resolved_before_power_log_is_ready(self):
-        state = self.trouble_state(LogState())
-        state.power_options = {}
-
-        adapted = adapt_action(self.trouble_proposed('动荡能量'), state)
-
-        self.assertEqual(1, adapted.manual_action.choose_one.choice_index)
-        self.assertEqual('EDR_570B',
-                         adapted.manual_action.choose_one.choice_card_id)
-        self.assertIsNone(adapted.manual_action.choose_one.choice_entity_id)
-
     def test_delayed_option_is_awaited_before_the_choice_click(self):
         state = self.trouble_state(LogState())
         state.power_options = {}
@@ -224,24 +276,6 @@ class ChooseOneTests(unittest.TestCase):
             ('choice', 1, 2), 'cancel',
         ], events)
 
-    def test_ambiguous_near_names_never_guess(self):
-        """两个名字都只差一个字：判不唯一就零点击拒绝。"""
-        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
-                             ('噩梦暴发', 'EDR_570B', 'NONE')))
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    'choose_one_name_not_unique'):
-            adapt_action(self.trouble_proposed('动荡能量'),
-                         self.trouble_state(log))
-
-    def test_named_option_that_is_unavailable_is_refused(self):
-        """盒子点名的选项当前不可选：拒绝重试，绝不静默改成另一个选项。"""
-        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),
-                             ('动荡能量', 'EDR_570B', 'REQ_ENOUGH_MANA')))
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    'choose_one_option_unavailable'):
-            adapt_action(self.trouble_proposed('动荡能量'),
-                         self.trouble_state(log))
-
     def test_panel_card_name_falls_back_to_box_index(self):
         """盒子写母卡名（凶险梦魇）时，允许用盒子号位兜底：
         有目标行 → 选要目标的那个选项；没有目标行 → 选不要目标的那个。"""
@@ -264,13 +298,6 @@ class ChooseOneTests(unittest.TestCase):
                                     'choose_one_name_not_unique'):
             adapt_action(self.trouble_proposed('培育'),
                          self.trouble_state(log, source='AV_205p', name='培育'))
-
-    def test_single_option_choose_one_is_not_clicked(self):
-        """只有一个选项时游戏自动结算，多点一下反而会误选。"""
-        log = self.troubles((('噩梦爆发', 'EDR_570A', 'NONE'),))
-        adapted = adapt_action(self.trouble_proposed('噩梦爆发'),
-                               self.trouble_state(log))
-        self.assertIsNone(getattr(adapted.manual_action, 'choose_one', None))
 
     def test_numbered_discover_still_uses_original_layout(self):
         state = self.state(self.options())

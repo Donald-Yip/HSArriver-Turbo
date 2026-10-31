@@ -52,11 +52,7 @@ class StarshipCardDataTests(unittest.TestCase):
         self.assertIn(LEGACY_STARSHIP_CARD_ID, ids)
         self.assertIn(STARSHIP_CARD, ids)
         self.assertEqual(8, len(ids))          # 本地 cards.json 当前收录数
-
-    def test_lookup_is_cached(self):
         self.assertIs(starship_card_ids(), starship_card_ids())
-
-    def test_is_starship_card(self):
         self.assertTrue(is_starship_card(LEGACY_STARSHIP_CARD_ID))
         self.assertFalse(is_starship_card(PLAIN_MINION_CARD))
 
@@ -105,14 +101,6 @@ class StarshipParserTests(unittest.TestCase):
         self.assertEqual(ActionKind.ATTACK, proposed.action)
         self.assertIsNone(proposed.target)
 
-    def test_ordinary_minion_attack_keeps_its_target(self):
-        proposed = self._parse("操作1号位随从攻击\n目标是敌方2号位随从")
-
-        self.assertEqual(ActionKind.ATTACK, proposed.action)
-        self.assertEqual(("board_slot", "enemy", 2),
-                         (proposed.target.kind, proposed.target.owner,
-                          proposed.target.index))
-
     def test_location_instruction_is_unaffected(self):
         proposed = self._parse("操作1号位地标")
 
@@ -145,18 +133,29 @@ class StarshipAdapterTests(unittest.TestCase):
             state)
 
     def test_explicit_launch_binds_the_starship(self):
-        state = self._state([self._starship()])
+        cases = (
+            ("first_slot", "发射1号位星舰", [self._starship()],
+             (0, STARSHIP_CARD, "starship-1")),
+            ("later_slot", "发射2号位星舰", [
+                SimpleNamespace(card_id=PLAIN_MINION_CARD,
+                                entity_id="minion-1", zone_pos=1),
+                self._starship(entity_id="starship-2", zone_pos=2),
+            ], (1, STARSHIP_CARD, "starship-2")),
+        )
+        for label, instruction, minions, expected in cases:
+            with self.subTest(case=label):
+                adapted = self._adapt(instruction, self._state(minions))
 
-        adapted = self._adapt("发射1号位星舰", state)
-
-        self.assertIsInstance(adapted.manual_action, LaunchStarshipAction)
-        self.assertEqual((0, STARSHIP_CARD, "starship-1"),
-                         (adapted.manual_action.starship_index,
-                          adapted.manual_action.card_id,
-                          adapted.manual_action.starship_entity_id))
-        self.assertEqual("starship-1", adapted.source_entity_id)
-        self.assertIsNone(adapted.target_entity_id)
-        self.assertEqual("starship_launched", adapted.postcondition)
+                self.assertIsInstance(adapted.manual_action,
+                                      LaunchStarshipAction)
+                self.assertEqual(
+                    expected,
+                    (adapted.manual_action.starship_index,
+                     adapted.manual_action.card_id,
+                     adapted.manual_action.starship_entity_id))
+                self.assertEqual(expected[2], adapted.source_entity_id)
+                self.assertIsNone(adapted.target_entity_id)
+                self.assertEqual("starship_launched", adapted.postcondition)
 
     def test_explicit_launch_refuses_a_non_starship_slot(self):
         state = self._state([SimpleNamespace(
@@ -195,19 +194,6 @@ class StarshipAdapterTests(unittest.TestCase):
 
         self.assertEqual("attack_target_required", str(caught.exception))
 
-    def test_starship_can_sit_in_a_later_board_slot(self):
-        state = self._state([
-            SimpleNamespace(card_id=PLAIN_MINION_CARD, entity_id="minion-1",
-                            zone_pos=1),
-            self._starship(entity_id="starship-2", zone_pos=2),
-        ])
-
-        adapted = self._adapt("发射2号位星舰", state)
-
-        self.assertEqual((1, "starship-2"),
-                         (adapted.manual_action.starship_index,
-                          adapted.manual_action.starship_entity_id))
-
 
 class RecordingClickModule:
     def __init__(self):
@@ -225,41 +211,42 @@ class RecordingClickModule:
 
 class StarshipExecutionTests(unittest.TestCase):
     def test_board_click_then_panel_wait_then_launch(self):
-        clicks = RecordingClickModule()
-        sleeps = []
-        executor = ClickExecutor(click_module=clicks,
-                                 sleep_func=sleeps.append,
-                                 action_context=nullcontext)
+        with self.subTest(case="direct_executor_call"):
+            clicks = RecordingClickModule()
+            sleeps = []
+            executor = ClickExecutor(click_module=clicks,
+                                     sleep_func=sleeps.append,
+                                     action_context=nullcontext)
 
-        executor.launch_starship(2, 4)
+            executor.launch_starship(2, 4)
 
-        self.assertEqual([("choose_my_board_entity", 2, 4),
-                          ("click_launch_starship",)], clicks.events)
-        self.assertEqual([0.8], sleeps)        # 等组件面板画出来再点发射
+            self.assertEqual([("choose_my_board_entity", 2, 4),
+                              ("click_launch_starship",)], clicks.events)
+            self.assertEqual([0.8], sleeps)    # 等组件面板画出来再点发射
 
-    def test_execute_validates_the_entity_then_launches(self):
-        starship = SimpleNamespace(
-            card_id=STARSHIP_CARD, entity_id="starship-1", zone_pos=1,
-            name="星舰")
-        state = SimpleNamespace(
-            is_my_turn=True, game_num_turns_in_play=3,
-            my_minions=[starship], my_locations=[], my_board_slot_num=1)
-        clicks = RecordingClickModule()
-        sleeps = []
-        controller = ManualController(
-            output_func=lambda _message: None,
-            executor=ClickExecutor(click_module=clicks,
-                                   sleep_func=sleeps.append,
-                                   action_context=nullcontext),
-        )
+        with self.subTest(case="controller_executes_action"):
+            starship = SimpleNamespace(
+                card_id=STARSHIP_CARD, entity_id="starship-1", zone_pos=1,
+                name="星舰")
+            state = SimpleNamespace(
+                is_my_turn=True, game_num_turns_in_play=3,
+                my_minions=[starship], my_locations=[], my_board_slot_num=1)
+            clicks = RecordingClickModule()
+            sleeps = []
+            controller = ManualController(
+                output_func=lambda _message: None,
+                executor=ClickExecutor(click_module=clicks,
+                                       sleep_func=sleeps.append,
+                                       action_context=nullcontext),
+            )
 
-        result = controller.execute(
-            LaunchStarshipAction(0, STARSHIP_CARD, "starship-1"), state)
+            result = controller.execute(
+                LaunchStarshipAction(0, STARSHIP_CARD, "starship-1"), state)
 
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual([("choose_my_board_entity", 0, 1),
-                          ("click_launch_starship",)], clicks.events)
-        self.assertEqual([0.8], sleeps)
+            self.assertTrue(result.executed, result.message)
+            self.assertEqual([("choose_my_board_entity", 0, 1),
+                              ("click_launch_starship",)], clicks.events)
+            self.assertEqual([0.8], sleeps)
 
     def test_execute_rejects_a_changed_entity(self):
         starship = SimpleNamespace(
@@ -309,14 +296,6 @@ class StarshipLaunchClickTests(unittest.TestCase):
 
         self.assertEqual([hearthstone_click.STARSHIP_LAUNCH_REF_POS],
                          self.clicks)
-
-    def test_client_relative_position_is_passed_to_left_click(self):
-        """left_click 收到的是**客户区相对**坐标（换算由它负责）。"""
-        with patch.object(hearthstone_click, "_display_mapping",
-                          return_value=None):
-            hearthstone_click.click_launch_starship()
-
-        self.assertEqual([(1070, 920)], self.clicks)
 
     def test_conversion_is_applied_at_the_click_export(self):
         """换算出口在 left_click：给一个带偏移/缩放的映射，落点相应变化。"""

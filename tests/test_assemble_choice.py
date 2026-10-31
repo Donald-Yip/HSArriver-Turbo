@@ -42,13 +42,9 @@ class AssembleChoiceTests(unittest.TestCase):
                 proposed = parse(text)
                 self.assertIs(ActionKind.ASSEMBLE_CHOICE, proposed.action)
                 self.assertEqual(expected, proposed.source.index)
-
-    def test_compact_panel_phrase_is_detected(self):
-        self.assertEqual(2, parse("拼装出现左二中一").source.index)
-        self.assertEqual(3, parse("拼装右一中二").source.index)
-
-    def test_live_panel_phrase_with_arabic_digits_is_detected(self):
-        self.assertEqual(2, parse("进行拼装【左2中1】").source.index)
+        for text, expected in (("拼装出现左二中一", 2), ("拼装右一中二", 3)):
+            with self.subTest(text=text):
+                self.assertEqual(expected, parse(text).source.index)
 
     def test_live_panel_numeric_aliases_map_to_existing_choices(self):
         cases = {

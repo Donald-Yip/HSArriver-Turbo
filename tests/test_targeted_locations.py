@@ -118,20 +118,23 @@ class TargetedLocationTests(unittest.TestCase):
             ("cancel_click",),
         ], clicks.events)
 
-    def test_locations_support_all_board_and_hero_target_sides(self):
+    def test_board_and_hero_targets_are_bound_and_clicked(self):
         cases = (
-            ("目标是己方1号位", "friendly", "minion",
-             "friendly-minion"),
-            ("目标是敌方1号位随从", "enemy", "minion",
-             "enemy-minion"),
-            ("目标是我方英雄", "friendly", "hero", "friendly-hero"),
-            ("目标是对方英雄", "enemy", "hero", "enemy-hero"),
+            ("目标是己方1号位", "friendly", "minion", "friendly-minion",
+             ("choose_my_minion", 0, 2)),
+            ("目标是敌方1号位随从", "enemy", "minion", "enemy-minion",
+             ("choose_opponent_minion", 0, 1)),
+            ("目标是我方英雄", "friendly", "hero", "friendly-hero",
+             ("choose_my_hero",)),
+            ("目标是对方英雄", "enemy", "hero", "enemy-hero",
+             ("choose_oppo_hero",)),
         )
-        for target_line, side, kind, entity_id in cases:
+        for target_line, side, kind, entity_id, target_click in cases:
             with self.subTest(target_line=target_line):
+                state = self._state()
                 try:
                     adapted = adapt_action(
-                        self._proposed(target_line), self._state())
+                        self._proposed(target_line), state)
                 except Exception as exc:
                     self.fail(
                         f"location target should be supported: {exc}")
@@ -141,18 +144,6 @@ class TargetedLocationTests(unittest.TestCase):
                 self.assertEqual(
                     entity_id, adapted.manual_action.target.entity_id)
                 self.assertEqual(entity_id, adapted.target_entity_id)
-
-    def test_enemy_minion_and_hero_targets_click_expected_entity(self):
-        cases = (
-            ("目标是敌方1号位随从",
-             ("choose_opponent_minion", 0, 1)),
-            ("目标是我方英雄", ("choose_my_hero",)),
-            ("目标是对方英雄", ("choose_oppo_hero",)),
-        )
-        for target_line, target_click in cases:
-            with self.subTest(target_line=target_line):
-                state = self._state()
-                adapted = adapt_action(self._proposed(target_line), state)
                 clicks = RecordingClickModule()
                 sleeps = []
 

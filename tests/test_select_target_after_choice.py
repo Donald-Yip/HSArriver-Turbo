@@ -118,30 +118,29 @@ def execute(action, current_state):
 
 class ParserTests(unittest.TestCase):
     def test_real_panel_text_is_a_select_target_action(self):
-        text = "选择对方2号位卡牌\n腐蚀者扎卡兹"
+        # 卡名行不进规范化文本，只能单独留一份。
+        real_panel = "选择对方2号位卡牌\n腐蚀者扎卡兹"
         self.assertEqual("选择对方2号位卡牌",
                          RecommendationParser().normalize_action_text(
-                             PROMPT.format(text)))
+                             PROMPT.format(real_panel)))
 
-        proposed = parse(text)
+        cases = (
+            ("real_panel", real_panel, "enemy", "board_slot", 2,
+             "腐蚀者扎卡兹"),
+            ("hero", "选择对方英雄", "enemy", "hero", None, None),
+            ("friendly", "选择我方2号位随从\n己方二号", "friendly",
+             "board_slot", 2, "己方二号"),
+        )
+        for label, text, owner, kind, index, target_name in cases:
+            with self.subTest(form=label):
+                proposed = parse(text)
 
-        self.assertEqual(ActionKind.SELECT_TARGET, proposed.action)
-        self.assertIsNone(proposed.source)
-        self.assertEqual("enemy", proposed.target.owner)
-        self.assertEqual("board_slot", proposed.target.kind)
-        self.assertEqual(2, proposed.target.index)
-        self.assertEqual("腐蚀者扎卡兹", proposed.target_name)
-
-    def test_hero_and_friendly_minion_forms(self):
-        hero = parse("选择对方英雄")
-        self.assertEqual(ActionKind.SELECT_TARGET, hero.action)
-        self.assertEqual("hero", hero.target.kind)
-
-        friendly = parse("选择我方2号位随从\n己方二号")
-        self.assertEqual(ActionKind.SELECT_TARGET, friendly.action)
-        self.assertEqual("friendly", friendly.target.owner)
-        self.assertEqual(2, friendly.target.index)
-        self.assertEqual("己方二号", friendly.target_name)
+                self.assertEqual(ActionKind.SELECT_TARGET, proposed.action)
+                self.assertIsNone(proposed.source)
+                self.assertEqual(owner, proposed.target.owner)
+                self.assertEqual(kind, proposed.target.kind)
+                self.assertEqual(index, proposed.target.index)
+                self.assertEqual(target_name, proposed.target_name)
 
     def test_choice_line_and_target_line_together_keep_one_action(self):
         proposed = parse("选择我方3号位卡牌\n选择对方2号位卡牌")
@@ -195,20 +194,21 @@ class AdapterAndClickTests(unittest.TestCase):
             adapt_action(parse("选择对方5号位卡牌"),
                          state(oppo_minions=[minion("200", 1)]))
 
-    def test_enemy_hero_target_is_clicked(self):
-        adapted = adapt_action(parse("选择对方英雄"), state())
-        events, _, result = execute(adapted.manual_action, state())
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual([("oppo_hero",)], events)
-
-    def test_friendly_minion_target_is_clicked(self):
-        adapted = adapt_action(parse("选择我方2号位随从\n己方二号"), state())
-        target = adapted.manual_action.target
-        self.assertEqual(("friendly", "minion", 1),
-                         (target.side, target.kind, target.index))
-        events, _, result = execute(adapted.manual_action, state())
-        self.assertTrue(result.executed, result.message)
-        self.assertEqual([("mine", 1, 2)], events)
+    def test_hero_and_friendly_minion_targets_are_clicked(self):
+        cases = (
+            ("选择对方英雄", ("enemy", "hero", None), [("oppo_hero",)]),
+            ("选择我方2号位随从\n己方二号", ("friendly", "minion", 1),
+             [("mine", 1, 2)]),
+        )
+        for text, expected_target, expected_events in cases:
+            with self.subTest(text=text):
+                adapted = adapt_action(parse(text), state())
+                target = adapted.manual_action.target
+                self.assertEqual(expected_target,
+                                 (target.side, target.kind, target.index))
+                events, _, result = execute(adapted.manual_action, state())
+                self.assertTrue(result.executed, result.message)
+                self.assertEqual(expected_events, events)
 
     def test_choice_open_blocks_friendly_target_click(self):
         current = state(discover_choice_count=3)
@@ -258,24 +258,26 @@ class FriendlyChoiceTargetFallbackTests(unittest.TestCase):
         self.assertTrue(result.executed, result.message)
         self.assertEqual([("hand", 1, 2)], events)
 
-    def test_ambiguous_name_is_rejected_without_clicking(self):
-        current = state(my_hand_cards=[hand_card("100", "手牌A"),
-                                       hand_card("101", "己方二号")])
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "choice_target_ambiguous"):
-            adapt_action(parse("选择我方2号位卡牌\n己方二号"), current)
-
-    def test_missing_name_is_rejected(self):
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "choice_target_unknown"):
-            adapt_action(parse("选择我方2号位卡牌"),
-                         state(discover_choice_pending=False))
-
-    def test_pending_choice_panel_waits_instead_of_clicking(self):
-        with self.assertRaisesRegex(RecommendationStateError,
-                                    "choice_panel_pending"):
-            adapt_action(parse("选择我方2号位卡牌\n己方二号"),
-                         state(discover_choice_pending=True))
+    def test_unresolvable_friendly_target_is_refused(self):
+        cases = (
+            ("ambiguous",
+             "选择我方2号位卡牌\n己方二号",
+             lambda: state(my_hand_cards=[hand_card("100", "手牌A"),
+                                          hand_card("101", "己方二号")]),
+             "choice_target_ambiguous"),
+            ("missing_name",
+             "选择我方2号位卡牌",
+             lambda: state(discover_choice_pending=False),
+             "choice_target_unknown"),
+            ("pending_panel",
+             "选择我方2号位卡牌\n己方二号",
+             lambda: state(discover_choice_pending=True),
+             "choice_panel_pending"),
+        )
+        for label, text, make_state, code in cases:
+            with self.subTest(case=label):
+                with self.assertRaisesRegex(RecommendationStateError, code):
+                    adapt_action(parse(text), make_state())
 
 
 if __name__ == "__main__":
