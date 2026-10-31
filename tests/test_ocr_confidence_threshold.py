@@ -76,20 +76,21 @@ class ClientUpscaleTests(unittest.TestCase):
         frame = SimpleNamespace(frame_id="f", client_size=client_size)
         with self.assertRaises(OcrRejectedError):
             reader.read_frame(frame, lambda _frame: roi)
-        return backend.shapes[0]
+        return backend.shapes[0][:2]
 
-    def test_missing_client_size_keeps_base_scale(self):
-        shape = self._first_shape(None)
-        self.assertEqual(int(round(10 * preprocess._SCALE)), shape[0])
-
-    def test_reference_client_keeps_base_scale(self):
-        shape = self._first_shape((1920, 1080))
-        self.assertEqual(int(round(10 * preprocess._SCALE)), shape[0])
-
-    def test_half_size_client_upscales_by_two(self):
-        shape = self._first_shape((960, 540))
-        self.assertEqual(int(round(10 * preprocess._SCALE * 2.0)), shape[0])
-        self.assertEqual(int(round(20 * preprocess._SCALE * 2.0)), shape[1])
+    def test_client_scale_matrix(self):
+        cases = (
+            ("missing-client-size", None, 1.0),
+            ("reference-client", (1920, 1080), 1.0),
+            ("half-size-client", (960, 540), 2.0),
+        )
+        for name, client_size, factor in cases:
+            with self.subTest(name):
+                expected = (
+                    int(round(10 * preprocess._SCALE * factor)),
+                    int(round(20 * preprocess._SCALE * factor)),
+                )
+                self.assertEqual(expected, self._first_shape(client_size))
 
     def test_upscale_is_capped_by_config(self):
         config = RecommendationConfig()

@@ -14,26 +14,28 @@ class PreprocessScaleTests(unittest.TestCase):
         w = int(round(20 * preprocess._SCALE * factor))
         return (h, w)
 
-    def test_default_scale_unchanged(self):
+    def test_candidate_set_is_versioned(self):
         candidates = dict(preprocess.iter_preprocess_recommendation(self.image))
         self.assertEqual(
             {"scaled_color_v1", "gray_clahe_v1", "light_text_binary_v1"},
             set(candidates),
         )
-        h, w = self._expected(1.0)
-        self.assertEqual((h, w), candidates["scaled_color_v1"].shape[:2])
 
-    def test_extra_scale_enlarges_output(self):
-        candidates = dict(preprocess.iter_preprocess_recommendation(self.image, 2.0))
-        h, w = self._expected(2.0)
-        self.assertEqual((h, w), candidates["scaled_color_v1"].shape[:2])
-        # 二进制候选也跟着同倍放大
-        self.assertEqual((h, w), candidates["light_text_binary_v1"].shape[:2])
-
-    def test_none_scale_is_treated_as_no_extra_upscale(self):
-        candidates = dict(preprocess.preprocess_recommendation(self.image, None))
-        h, w = self._expected(1.0)
-        self.assertEqual((h, w), candidates["scaled_color_v1"].shape[:2])
+    def test_scale_matrix(self):
+        # 额外放大倍数（None = 不额外放大）同时作用于彩色与二进制候选。
+        cases = (
+            ("default-scale", 1.0),
+            ("extra-upscale", 2.0),
+            ("none-means-no-extra-upscale", None),
+        )
+        for name, factor in cases:
+            with self.subTest(name):
+                candidates = dict(
+                    preprocess.preprocess_recommendation(self.image, factor))
+                h, w = self._expected(factor or 1.0)
+                self.assertEqual((h, w), candidates["scaled_color_v1"].shape[:2])
+                self.assertEqual(
+                    (h, w), candidates["light_text_binary_v1"].shape[:2])
 
 
 if __name__ == "__main__":

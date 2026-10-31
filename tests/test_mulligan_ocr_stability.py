@@ -68,24 +68,41 @@ def read_with(backend, config=None, stability_key=None):
 
 
 class JitterToleranceTests(unittest.TestCase):
-    def test_alternating_texts_are_accepted_when_the_last_one_repeats(self):
-        # A / B / A：第三帧的 A 在本次读取里已经出现过 2 次 → 按 A 接受。
+    def test_read_is_stable_across_jitter(self):
+        # 默认按原文判稳：A/B/A 看“本次读取里 A 出现过 2 次且最后一帧是 A”；
+        # 连续相同则第二帧就短路；给了 stability_key 时号位与原文各判各的。
+        keys = iter([("mulligan", (1,)), ("mulligan", (2,)),
+                     ("mulligan", (1,))])
+        cases = (
+            ("alternating-text-accepted",
+             ["替换1号位卡牌", "替换2号位卡牌", "替换1号位卡牌"],
+             lambda: None, "替换1号位卡牌", "frame-2", 3),
+            ("consecutive-identical-short-circuit",
+             ["替换1号位卡牌", "替换1号位卡牌"],
+             lambda: None, "替换1号位卡牌", "frame-1", 2),
+            ("changing-slots-last-one-wins",
+             ["替换1号位卡牌", "替换2号位卡牌", "替换1号位卡牌"],
+             lambda: (lambda _evidence: next(keys)),
+             "替换1号位卡牌", "frame-2", 3),
+        )
+        for name, texts, key_factory, expected_text, expected_frame, calls in cases:
+            with self.subTest(name):
+                backend = ScriptedBackend(texts)
+                evidence = read_with(backend, stability_key=key_factory())
+                self.assertEqual(expected_text, evidence.normalized_text)
+                self.assertEqual(expected_frame, evidence.frame_id)
+                self.assertEqual(calls, len(backend.calls))
+
+    def test_same_key_with_different_texts_is_accepted(self):
+        """文本抖动（多/少一行）但结论（号位集合）不变 → 第二帧就接受。"""
         backend = ScriptedBackend(["替换1号位卡牌",
-                                   "替换2号位卡牌",
-                                   "替换1号位卡牌"])
+                                   "替换1号位卡牌\n替换2号位卡牌"])
+        key = lambda _evidence: ("mulligan", (1, 2))  # noqa: E731
 
-        evidence = read_with(backend)
-
-        self.assertEqual("替换1号位卡牌", evidence.normalized_text)
-        self.assertEqual("frame-2", evidence.frame_id)  # 返回的是最后一帧
-        self.assertEqual(3, len(backend.calls))
-
-    def test_consecutive_identical_frames_short_circuit(self):
-        backend = ScriptedBackend(["替换1号位卡牌", "替换1号位卡牌"])
-
-        read_with(backend)
+        evidence = read_with(backend, stability_key=key)
 
         self.assertEqual(2, len(backend.calls))
+        self.assertEqual("frame-1", evidence.frame_id)
 
     def test_four_distinct_readings_still_reject_with_attempt_details(self):
         backend = ScriptedBackend(["甲", "乙", "丙", "丁"])
@@ -118,36 +135,11 @@ class JitterToleranceTests(unittest.TestCase):
 
         self.assertTrue(all(item is None for item in caught.exception.attempts))
 
-
-class StabilityKeyTests(unittest.TestCase):
-    def test_same_key_with_different_texts_is_accepted(self):
-        """文本抖动（多/少一行）但结论（号位集合）不变 → 第二帧就接受。"""
-        backend = ScriptedBackend(["替换1号位卡牌",
-                                   "替换1号位卡牌\n替换2号位卡牌"])
-        key = lambda _evidence: ("mulligan", (1, 2))  # noqa: E731
-
-        evidence = read_with(backend, stability_key=key)
-
-        self.assertEqual(2, len(backend.calls))
-        self.assertEqual("frame-1", evidence.frame_id)
-
     def test_key_returning_none_is_treated_as_unreadable(self):
         backend = ScriptedBackend(["替换1号位卡牌"])
 
         with self.assertRaises(OcrRejectedError):
             read_with(backend, stability_key=lambda _evidence: None)
-
-    def test_changing_slots_are_not_stable(self):
-        keys = iter([("mulligan", (1,)), ("mulligan", (2,)),
-                     ("mulligan", (1,))])
-        backend = ScriptedBackend(["替换1号位卡牌",
-                                   "替换2号位卡牌",
-                                   "替换1号位卡牌"])
-
-        evidence = read_with(backend, stability_key=lambda _e: next(keys))
-
-        # A / B / A：最后一帧的 A 重复过 → 接受（返回最后一帧的结论）。
-        self.assertEqual("frame-2", evidence.frame_id)
 
 
 class MulliganStabilityKeyTests(unittest.TestCase):
@@ -175,18 +167,19 @@ class MulliganStabilityKeyTests(unittest.TestCase):
 
         self.assertEqual(("mulligan", (2, 3)), key)
 
-    def test_keep_all_maps_to_the_empty_slot_set(self):
-        key = FSM_action._mulligan_stability_key(
-            self.evidence("打法参考A\n保留全部卡牌"))
-
-        self.assertEqual(("mulligan", ()), key)
-
-    def test_unparsable_text_falls_back_to_raw_text(self):
-        """解析不出动作时退回原文，交给上层报 recommendation_is_not_mulligan。"""
-        key = FSM_action._mulligan_stability_key(
-            self.evidence("这不是留牌建议"))
-
-        self.assertEqual(("text", "这不是留牌建议"), key)
+    def test_key_edge_cases_matrix(self):
+        cases = (
+            ("keep-all-maps-to-the-empty-slot-set",
+             "打法参考A\n保留全部卡牌", ("mulligan", ())),
+            # 解析不出动作时退回原文，交给上层报 recommendation_is_not_mulligan。
+            ("unparsable-text-falls-back-to-raw-text",
+             "这不是留牌建议", ("text", "这不是留牌建议")),
+        )
+        for name, text, expected in cases:
+            with self.subTest(name):
+                self.assertEqual(
+                    expected,
+                    FSM_action._mulligan_stability_key(self.evidence(text)))
 
 
 if __name__ == "__main__":

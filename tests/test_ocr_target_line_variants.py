@@ -67,14 +67,27 @@ class OcrTargetVariantParserTests(unittest.TestCase):
         "暮光时空跃迁者",
     ]
 
-    def test_real_feedback_panel_is_parsed(self):
-        proposed = parse(self.PANEL)
+    # 2026-10-27 反馈（旧包）：法术打自己 1 号位；OCR 读成「目标是已方1号位」。
+    FEEDBACK_20261027_PANEL = [
+        "网易炉石传说盒子", "对手记牌器", "推荐打法", "Beta",
+        "打法参考A", "打出1号位法术", "漂浮教程", "目标是已方1号位",
+        "暮光龙卵",
+    ]
 
-        self.assertEqual(ActionKind.PLAY_CARD, proposed.action)
-        self.assertEqual("SPELL", proposed.card_type)
-        self.assertEqual("friendly", proposed.target.owner)
-        self.assertEqual("board_slot", proposed.target.kind)
-        self.assertEqual(2, proposed.target.index)
+    def test_real_feedback_panels_are_parsed(self):
+        cases = (
+            ("2026-10-24-slot-2", self.PANEL, 2, 2),
+            ("2026-10-27-slot-1", self.FEEDBACK_20261027_PANEL, 1, 1),
+        )
+        for name, lines, source_index, target_index in cases:
+            with self.subTest(name):
+                proposed = parse(lines)
+                self.assertEqual(ActionKind.PLAY_CARD, proposed.action)
+                self.assertEqual("SPELL", proposed.card_type)
+                self.assertEqual(source_index, proposed.source.index)
+                self.assertEqual("friendly", proposed.target.owner)
+                self.assertEqual("board_slot", proposed.target.kind)
+                self.assertEqual(target_index, proposed.target.index)
 
     def test_reference_b_section_does_not_confuse_the_target(self):
         # 第 4 个反馈截图同屏还有「打法参考B / 结束回合」，不能把 B 段算进来。
@@ -87,80 +100,59 @@ class OcrTargetVariantParserTests(unittest.TestCase):
         self.assertEqual("friendly", proposed.target.owner)
         self.assertEqual(2, proposed.target.index)
 
-    def test_common_side_variants(self):
-        for side in ("己方", "已方", "巳方", "我方"):
-            with self.subTest(side=side):
+    def test_target_line_variant_matrix(self):
+        cases = (
+            ("friendly-己方", "己方", "friendly", 2),
+            ("friendly-已方", "已方", "friendly", 2),
+            ("friendly-巳方", "巳方", "friendly", 2),
+            ("friendly-我方", "我方", "friendly", 2),
+            ("enemy-故方", "故方", "enemy", 1),
+        )
+        for name, side, owner, index in cases:
+            with self.subTest(name):
                 proposed = parse([
-                    "打法参考A", "打出2号位法术", f"目标是{side}2号位",
+                    "打法参考A", "打出2号位法术", f"目标是{side}{index}号位",
                 ])
-                self.assertEqual("friendly", proposed.target.owner)
-                self.assertEqual(2, proposed.target.index)
+                self.assertEqual(owner, proposed.target.owner)
+                self.assertEqual("board_slot", proposed.target.kind)
+                self.assertEqual(index, proposed.target.index)
 
-    def test_enemy_side_variant_and_modifiers(self):
-        proposed = parse([
-            "打法参考A", "打出2号位法术", "目标是故方1号位卡牌",
-        ])
-        self.assertEqual("enemy", proposed.target.owner)
-        self.assertEqual(1, proposed.target.index)
-
+        # 修饰词（「…号位的随从」）不影响号位解析。
         proposed = parse([
             "打法参考A", "打出2号位法术", "目标是已方2号位的随从",
         ])
         self.assertEqual("friendly", proposed.target.owner)
         self.assertEqual(2, proposed.target.index)
 
-    def test_hero_variants(self):
-        for line, owner in (("目标是已方英雄", "friendly"),
-                            ("目标是巳方英雄", "friendly"),
-                            ("目标是故方英雄", "enemy")):
-            with self.subTest(line=line):
-                self.assertEqual(owner, parse([
-                    "打法参考A", "打出2号位法术", line]).target.owner)
+    def test_hero_variant_matrix(self):
+        cases = (
+            ("friendly-已方", "目标是已方英雄", "friendly"),
+            ("friendly-巳方", "目标是巳方英雄", "friendly"),
+            ("enemy-故方", "目标是故方英雄", "enemy"),
+        )
+        for name, line, owner in cases:
+            with self.subTest(name):
+                target = parse(["打法参考A", "打出2号位法术", line]).target
+                self.assertEqual(owner, target.owner)
+                self.assertEqual("hero", target.kind)
+                self.assertIsNone(target.index)
 
     def test_unknown_target_shape_is_still_rejected(self):
         # 没有号位的目标行仍然认不出，保持原来的拒绝行为，不瞎猜随从。
-        with self.assertRaisesRegex(RecommendationParseError,
-                                    "unsupported_spell_target"):
-            parse(["打法参考A", "打出2号位法术", "目标是我方随从"])
-
-        with self.assertRaisesRegex(RecommendationParseError,
-                                    "unsupported_spell_target"):
-            parse(["打法参考A", "打出2号位法术", "目标是已方随从"])
+        for line in ("目标是我方随从", "目标是已方随从"):
+            with self.subTest(line=line):
+                with self.assertRaisesRegex(
+                        RecommendationParseError, "unsupported_spell_target"):
+                    parse(["打法参考A", "打出2号位法术", line])
 
 
 class OcrTargetVariantAdapterTests(unittest.TestCase):
-    def test_friendly_target_is_bound_to_the_minion(self):
-        proposed = parse(OcrTargetVariantParserTests.PANEL)
-        adapted = adapt_action(proposed, state())
-        action = adapted.manual_action
-        self.assertEqual(1, action.hand_index)
-        self.assertEqual("friendly", action.target.side)
-        self.assertEqual("minion", action.target.kind)
-        self.assertEqual(1, action.target.index)      # 场面 2 号位 → 集合下标 1
-        self.assertEqual("301", action.target.entity_id)
-
-
-class RealFeedback20261027Tests(unittest.TestCase):
-    """2026-10-27 反馈（反馈方跑的是 v2026.10.18 旧包）：法术打自己 1 号位。
-
-    面板原文（反馈截图）：打法参考A / 打出1号位法术 / 漂浮教程 /
-    目标是己方1号位 / 暮光龙卵。用工程自带的 PaddleOCR 复跑同机截图，
-    这一行会被读成「目标是**已**方1号位」；旧包的正则只认「己方|我方」，
-    于是「有目标行但匹配不到」→ `unsupported_spell_target` 连试 82 次、
-    43 秒（2026-10-24 修过同源的「目标是已方2号位」）。
-    这里按 OCR 真实读法锁住：能解析、能绑到手牌 1 与场面 1 号位随从。
-    """
-
-    PANEL = [
-        "网易炉石传说盒子", "对手记牌器", "推荐打法", "Beta",
-        "打法参考A", "打出1号位法术", "漂浮教程", "目标是已方1号位",
-        "暮光龙卵",
-    ]
-    SPELL_CARD_ID = "BE_094"      # 漂浮教程
-    TARGET_CARD_ID = "CATA_210"   # 暮光龙卵
+    # 2026-10-27 反馈：手牌 1（0 基）是「漂浮教程」，场面 1 号位是「暮光龙卵」。
+    SPELL_CARD_ID = "BE_094"
+    TARGET_CARD_ID = "CATA_210"
 
     @classmethod
-    def _state(cls):
+    def _feedback_state(cls):
         return SimpleNamespace(
             game_num_turns_in_play=10,
             is_my_turn=True,
@@ -185,26 +177,22 @@ class RealFeedback20261027Tests(unittest.TestCase):
             oppo_hero=SimpleNamespace(entity_id="enemy-hero"),
         )
 
-    def test_misread_target_line_is_still_parsed(self):
-        proposed = parse(self.PANEL)
-
-        self.assertEqual(ActionKind.PLAY_CARD, proposed.action)
-        self.assertEqual("SPELL", proposed.card_type)
-        self.assertEqual(1, proposed.source.index)
-        self.assertEqual("friendly", proposed.target.owner)
-        self.assertEqual("board_slot", proposed.target.kind)
-        self.assertEqual(1, proposed.target.index)
-
-    def test_adapter_binds_hand_card_and_friendly_minion(self):
-        adapted = adapt_action(parse(self.PANEL), self._state())
-        action = adapted.manual_action
-
-        self.assertEqual(0, action.hand_index)
-        self.assertEqual(self.SPELL_CARD_ID, action.card_id)
-        self.assertEqual("friendly", action.target.side)
-        self.assertEqual("minion", action.target.kind)
-        self.assertEqual(0, action.target.index)
-        self.assertEqual("300", action.target.entity_id)
+    def test_friendly_target_is_bound_to_hand_and_minion(self):
+        cases = (
+            ("2026-10-24", OcrTargetVariantParserTests.PANEL, state,
+             "SPELL_1", 1, 1, "301"),
+            ("2026-10-27", OcrTargetVariantParserTests.FEEDBACK_20261027_PANEL,
+             self._feedback_state, self.SPELL_CARD_ID, 0, 0, "300"),
+        )
+        for name, panel, state_factory, card_id, hand_index, target_index, entity_id in cases:
+            with self.subTest(name):
+                action = adapt_action(parse(panel), state_factory()).manual_action
+                self.assertEqual(hand_index, action.hand_index)
+                self.assertEqual(card_id, action.card_id)
+                self.assertEqual("friendly", action.target.side)
+                self.assertEqual("minion", action.target.kind)
+                self.assertEqual(target_index, action.target.index)
+                self.assertEqual(entity_id, action.target.entity_id)
 
 
 if __name__ == "__main__":
