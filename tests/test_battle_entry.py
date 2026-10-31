@@ -5,7 +5,7 @@
 不碰真实屏幕、不碰鼠标、不读真机配置 —— 判定用的那几个实测数字（1.0000 / 0.3105 /
 0.461 / 0.0000）都钉在断言里。
 
-**只有 6 条**（每条对应一个"会让脚本点错东西"的具体失效模式）：
+按 6 类"会让脚本点错东西"的失效模式组织：
 ① 只认文字 + 空白画面绝不含糊；② 框错地方只会找不到、不会认错；
 ③ 框偏 ±40px 仍能认（这才叫可校准）；④ 9 个卡组点的几何；
 ⑤ 单格保护（不像卡组就一格都不点）；⑥ 流程安全（超时只点中心、不盲点）。
@@ -159,6 +159,13 @@ class TextOnlyRecognitionTests(unittest.TestCase):
         self.assertGreaterEqual(deck["start"]["score"], 0.99)
         self.assertEqual(9, deck["deck"]["slots_found"])
 
+        # 没选中卡组时「开始」不出现，也必须认出选卡组界面（用户反馈的死循环）：
+        # 旧逻辑只认「开始」，这种画面会被判成 unknown → 反复点画面中心直到超时。
+        no_start = be.identify(deck_select_frame(config, with_start=False), config)
+        self.assertEqual("deck_select", no_start["state"])
+        self.assertGreaterEqual(no_start["deck_title"]["score"], 0.99)
+        self.assertLess(no_start["start"]["score"], be.NCC_MIN)  # 确实没有「开始」
+
         # catch_screen 给的是 BGRA 四通道：必须和 BGR 走同一条判定路径
         bgra = cv2.cvtColor(main_menu_frame(config), cv2.COLOR_BGR2BGRA)
         self.assertEqual("main_menu", be.identify(bgra, config)["state"])
@@ -171,20 +178,6 @@ class TextOnlyRecognitionTests(unittest.TestCase):
             self.assertEqual(0.0, blank["traditional"]["score"])
             self.assertEqual(0.0, blank["deck_title"]["score"])
             self.assertEqual(0.0, blank["start"]["score"])
-
-    def test_deck_select_is_recognized_without_the_start_button(self):
-        """没选中卡组时「开始」不出现，也必须认出选卡组界面（用户反馈的死循环）。
-
-        旧逻辑只认「开始」，这种画面会被判成 unknown → 反复点画面中心直到超时。
-        改用「选择套牌」标题后，标题在就认得出。
-        """
-        config = make_config()
-        frame = deck_select_frame(config, with_start=False)
-
-        ui = be.identify(frame, config)
-        self.assertEqual("deck_select", ui["state"])
-        self.assertGreaterEqual(ui["deck_title"]["score"], 0.99)
-        self.assertLess(ui["start"]["score"], be.NCC_MIN)  # 确实没有「开始」
 
     def test_learn_refuses_a_frame_that_is_not_drawn_and_keeps_the_template(self):
         """画面还没画出来（白屏）时不能重裁模板，更不能覆盖掉能用的那个。
@@ -208,27 +201,13 @@ class TextOnlyRecognitionTests(unittest.TestCase):
         self.assertEqual(before, path.read_bytes(), "绝不该覆盖掉能用的模板")
 
 
-# ================================================================ ② 框错地方
-class WrongPlaceTests(unittest.TestCase):
-    def test_text_outside_the_window_is_not_main_menu(self):
-        """模板是"身份"：不在框 ±40px 里就是**找不到**（不点），不会认错东西。
-
-        模拟"框被拖到了旁边的「酒馆战棋」上"：把「传统对战」的文字放在酒馆战棋
-        那一行（下方 77px，正好在 ±40 窗口之外）。
-        """
-        config = make_config()
-        left, top, _right, _bottom = be.traditional_box(config)
-        frame = paste(blank_frame(), template_gray("traditional"), left, top + 77)
-
-        ui = be.identify(frame, config)
-        self.assertEqual("unknown", ui["state"])
-        self.assertLess(ui["traditional"]["score"], be.NCC_MIN)
-
-
-# ================================================================ ③ 校准容差
+# ================================================================ ②③ 框偏/框错
 class CalibrationToleranceTests(unittest.TestCase):
-    def test_box_can_be_off_by_up_to_the_search_radius(self):
-        """框拖得不那么准也能认（±40px 窗口）—— 这是"可校准"的实际含义。"""
+    def test_box_can_be_misplaced_but_never_misidentifies(self):
+        """框拖得不那么准也能认（±40px 窗口）—— 这是"可校准"的实际含义。
+
+        但模板是"身份"：不在框 ±40px 里就是**找不到**（不点），不会认错东西。
+        """
         frame = main_menu_frame(make_config())
         base = be.MAIN_MENU_BATTLE_DEFAULT
         for shift in ((0, 0), (20, 0), (0, 20), (40, 0), (0, 40)):
@@ -253,6 +232,17 @@ class CalibrationToleranceTests(unittest.TestCase):
             main_menu_battle_roi=(base[0] + 400, base[1], base[2] + 400, base[3])
         )
         self.assertEqual("unknown", be.identify(frame, far)["state"])
+
+        # 框被拖到旁边的「酒馆战棋」上（下方 77px，正好在 ±40 窗口之外）：
+        # 找不到，不会把别的文字认成主界面。
+        config = make_config()
+        left, top, _right, _bottom = be.traditional_box(config)
+        wrong = paste(
+            blank_frame(), template_gray("traditional"), left, top + 77
+        )
+        ui = be.identify(wrong, config)
+        self.assertEqual("unknown", ui["state"])
+        self.assertLess(ui["traditional"]["score"], be.NCC_MIN)
 
 
 # ================================================================ ④ 卡组几何
@@ -334,8 +324,8 @@ class DeckSlotGuardTests(unittest.TestCase):
         self.assertTrue(hit["ok"])
         self.assertEqual([(727, 750)], clicker.clicks)
 
-    def test_configured_deck_retries_while_the_plates_are_not_drawn(self):
-        """去掉「进界面先等 2 秒」后：名牌还没画出来要短重试，而不是直接不选。"""
+    def test_configured_deck_retries_then_succeeds_or_gives_up(self):
+        """名牌还没画出来要短重试；一直画不出来就按原逻辑跳过，一次都不点。"""
         config = make_config()
         clicker, clock = Recorder(), FakeClock()
         result = be.select_deck_if_configured(
@@ -345,13 +335,10 @@ class DeckSlotGuardTests(unittest.TestCase):
             sleep=clock.sleep,
             config=config,
         )
-
         self.assertTrue(result["ok"])
         self.assertEqual(0.3, clock.slept)
         self.assertEqual([(727, 750)], clicker.clicks)
 
-    def test_configured_deck_gives_up_after_the_short_retries(self):
-        """一直画不出来：重试 3 次后按原逻辑跳过，一次都不点。"""
         clicker, clock = Recorder(), FakeClock()
         result = be.select_deck_if_configured(
             settings={"deck_index": 8},
@@ -360,7 +347,6 @@ class DeckSlotGuardTests(unittest.TestCase):
             sleep=clock.sleep,
             config=make_config(),
         )
-
         self.assertFalse(result["ok"])
         self.assertTrue(result["skipped"])
         self.assertEqual([], clicker.clicks)
@@ -368,33 +354,6 @@ class DeckSlotGuardTests(unittest.TestCase):
 
 
 # ================================================================ ⑥ 流程不乱点
-class ForegroundDuringWaitTests(unittest.TestCase):
-    def test_wait_for_main_menu_reapplies_foreground(self):
-        """等待主界面时反复置前，避免游戏停在底层导致后续点击点不着。"""
-        config = make_config()
-        calls = []
-        clock = FakeClock()
-
-        result = be.wait_for_main_menu(
-            timeout=3.0,
-            interval=0.5,
-            capture=sequence_capture([
-                blank_frame(),
-                blank_frame(),
-                main_menu_frame(config),
-            ]),
-            click_at_fn=Recorder(),
-            sleep=clock.sleep,
-            clock=clock,
-            should_abort=lambda: False,
-            foreground=lambda: calls.append(1),
-            config=config,
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertGreaterEqual(len(calls), 1)
-
-
 class FlowSafetyTests(unittest.TestCase):
     def test_timeout_clicks_only_the_safe_center_point(self):
         """认不出界面时只能点"安全中心点"，超时就退出 —— 绝不盲点「传统对战」。"""
@@ -479,10 +438,14 @@ class FlowSafetyTests(unittest.TestCase):
         self.assertEqual("aborted", aborted["stage"])
         self.assertEqual([], clicker.clicks, "收到停止请求后一次都不该点")
 
-    def test_polling_is_fast_but_center_clicks_stay_slow(self):
-        """0.5s 轮询：界面画出来 1 秒内就走；但点中心仍只每 3 秒最多一下。"""
+    def test_wait_polls_fast_reapplies_foreground_and_keeps_click_cadence(self):
+        """0.5s 轮询：界面画出来 1 秒内就走；等待时反复置前（避免点到浮窗）。
+
+        但点中心仍只每 3 秒最多一下 —— 成功与超时路径都一样，绝不连点。
+        """
         config = make_config()
         clicker, clock = Recorder(), FakeClock()
+        foreground_calls = []
         result = be.wait_for_main_menu(
             timeout=10.0,
             interval=0.5,
@@ -492,6 +455,8 @@ class FlowSafetyTests(unittest.TestCase):
             click_at_fn=clicker,
             sleep=clock.sleep,
             clock=clock,
+            should_abort=lambda: False,
+            foreground=lambda: foreground_calls.append(1),
             config=config,
         )
 
@@ -499,9 +464,9 @@ class FlowSafetyTests(unittest.TestCase):
         self.assertEqual(1.0, clock.slept, "不能再等满一个 3 秒轮询")
         # t=0 空白 → 点一次中心；t=0.5 还没到 3 秒 → 不点
         self.assertEqual([be.CENTER_DISMISS_POINT], clicker.clicks)
+        self.assertGreaterEqual(len(foreground_calls), 1)
 
-    def test_timeout_keeps_the_three_second_click_cadence(self):
-        """0.5s 轮询下超时路径也不连点：2 秒里只点 1 下中心。"""
+        # 超时路径：0.5s 轮询下 2 秒里也只点 1 下中心。
         clicker, clock = Recorder(), FakeClock()
         result = be.wait_for_main_menu(
             timeout=2.0,
@@ -520,7 +485,7 @@ class FlowSafetyTests(unittest.TestCase):
 
 
 class ToReferenceInterpolationTests(unittest.TestCase):
-    def test_upscale_uses_a_smooth_filter_not_nearest(self):
+    def test_upscale_is_smooth_and_reference_sized_frames_are_unchanged(self):
         """客户区小于基准时 to_reference 是**放大**：INTER_AREA 放大≈最近邻（块状），
         必须换成 INTER_CUBIC，否则小窗口下模板匹配分数明显掉。"""
         checker = np.zeros((2, 2, 3), dtype=np.uint8)
@@ -539,7 +504,7 @@ class ToReferenceInterpolationTests(unittest.TestCase):
         self.assertGreater(center, 0)
         self.assertLess(center, 255)
 
-    def test_reference_sized_frame_is_returned_unchanged(self):
+        # 已经是基准尺寸 → 原样返回（不做多余的重采样）
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
         self.assertIs(frame, be.to_reference(frame))
 

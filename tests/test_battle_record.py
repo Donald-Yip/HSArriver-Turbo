@@ -36,17 +36,16 @@ def sample_records():
 
 
 class ClassifyTests(unittest.TestCase):
-    def test_turn_header(self):
-        info = br.classify("[SYS] 回合 7 延时结束，开始本轮推荐读取。", "SYS")
-        self.assertEqual("turn", info["kind"])
-        self.assertEqual(7, info["turn"])
+    def test_turn_and_phase_headers(self):
+        turn = br.classify("[SYS] 回合 7 延时结束，开始本轮推荐读取。", "SYS")
+        self.assertEqual("turn", turn["kind"])
+        self.assertEqual(7, turn["turn"])
 
-    def test_phase_header(self):
-        info = br.classify("-----匹配阶段-----", "SYS")
-        self.assertEqual("phase", info["kind"])
-        self.assertEqual("匹配", info["phase"])
+        phase = br.classify("-----匹配阶段-----", "SYS")
+        self.assertEqual("phase", phase["kind"])
+        self.assertEqual("匹配", phase["phase"])
 
-    def test_recommendation_and_raw(self):
+    def test_recommendation_instruction_and_raw_text(self):
         self.assertEqual(
             "打出1号位随从", br.classify("[推荐] 打出1号位随从")["instruction"]
         )
@@ -54,15 +53,15 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual("recommendation_raw", info["kind"])
         self.assertEqual("PlayerTurnChoice: 出1号随从", info["text"])
 
-    def test_execution(self):
+    def test_execution_and_plain_line(self):
         self.assertEqual("execution", br.classify("[执行] 开始点击。")["kind"])
+        self.assertEqual("info", br.classify("随便一行")["kind"])
 
-    def test_retry_reason(self):
+    def test_retry_error_and_warn(self):
         info = br.classify("当前推荐暂不可执行，继续重试：recommendation_changed")
         self.assertEqual("retry", info["kind"])
         self.assertEqual("recommendation_changed", info["reason"])
 
-    def test_error_and_warn(self):
         self.assertEqual("error", br.classify("[ERROR] boom", "ERROR")["kind"])
         self.assertEqual("error", br.classify("⚠️ 炉石已退出", "WARN")["kind"])
         self.assertEqual("warn", br.classify("[WARN] 注意", "WARN")["kind"])
@@ -70,16 +69,22 @@ class ClassifyTests(unittest.TestCase):
             "info",
             br.classify("环境自检 ❌ 管理员权限：当前不是管理员", "WARN")["kind"])
 
-    def test_plain_line_is_info(self):
-        self.assertEqual("info", br.classify("随便一行")["kind"])
-
 
 class BuildBlocksTests(unittest.TestCase):
     def setUp(self):
         self.blocks = br.build_blocks(sample_records())
 
-    def test_two_turns(self):
+    def test_two_turns_and_pre_game_phase(self):
         self.assertEqual([2, 3], [b["turn"] for b in self.blocks])
+
+        recs = [
+            _rec(BASE, "SYS", "-----匹配阶段-----"),
+            _rec(BASE + 1, "SYS", "[SYS] 已点「传统对战」"),
+        ]
+        blocks = br.build_blocks(recs)
+        self.assertEqual(1, len(blocks))
+        self.assertIsNone(blocks[0]["turn"])
+        self.assertEqual("匹配", blocks[0]["phase"])
 
     def test_same_instruction_merges_into_one_step(self):
         turn2 = self.blocks[0]
@@ -88,11 +93,12 @@ class BuildBlocksTests(unittest.TestCase):
         self.assertEqual("打出1号位随从", step["instruction"])
         self.assertEqual(["PlayerTurnChoice: 出1号随从"], step["raw"])
 
-    def test_retry_count_and_reasons(self):
+    def test_retry_counts_dedup_and_executed_status(self):
         step = self.blocks[0]["steps"][0]
         self.assertEqual(2, step["retries"])
         self.assertEqual({"recommendation_changed": 2}, dict(step["retry_reasons"]))
         self.assertEqual("executed", step["status"])
+        self.assertEqual(1, len([e for e in step["events"] if "重试" in e]))
 
     def test_error_status_beats_execution(self):
         step = self.blocks[1]["steps"][0]
@@ -112,26 +118,12 @@ class BuildBlocksTests(unittest.TestCase):
         )
         self.assertEqual(1, self.blocks[1]["summary"]["errors"])
 
-    def test_retry_events_dedup(self):
-        step = self.blocks[0]["steps"][0]
-        self.assertEqual(1, len([e for e in step["events"] if "重试" in e]))
-
-    def test_phase_labels_pre_game_block(self):
-        recs = [
-            _rec(BASE, "SYS", "-----匹配阶段-----"),
-            _rec(BASE + 1, "SYS", "[SYS] 已点「传统对战」"),
-        ]
-        blocks = br.build_blocks(recs)
-        self.assertEqual(1, len(blocks))
-        self.assertIsNone(blocks[0]["turn"])
-        self.assertEqual("匹配", blocks[0]["phase"])
-
 
 class RenderTests(unittest.TestCase):
     def setUp(self):
         self.blocks = br.build_blocks(sample_records())
 
-    def test_jsonl_is_one_meta_plus_one_block_per_line(self):
+    def test_jsonl_and_text_renderers_expose_the_same_block(self):
         text = br.render_jsonl(self.blocks, session="s1", app="app")
         lines = [ln for ln in text.splitlines() if ln.strip()]
         self.assertEqual(3, len(lines))
@@ -146,16 +138,19 @@ class RenderTests(unittest.TestCase):
             first["steps"][0]["retry_reasons"],
         )
 
-    def test_text_contains_step_separator_and_fields(self):
-        text = br.render_text(
+        rendered = br.render_text(
             self.blocks, {"date": "2026-10-18 12:00:00", "session": "s1"}
         )
-        self.assertIn("回合 2", text)
-        self.assertIn("--- 步骤 1/1", text)
-        self.assertIn("推荐    打出1号位随从", text)
-        self.assertIn("重试    2 次", text)
-        self.assertIn("状态    已执行", text)
-        self.assertIn("报错", text)
+        for expected in (
+            "回合 2",
+            "--- 步骤 1/1",
+            "推荐    打出1号位随从",
+            "重试    2 次",
+            "状态    已执行",
+            "报错",
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(expected, rendered)
 
     def test_partial_flag_in_block_to_obj(self):
         obj = br.block_to_obj(self.blocks[0], partial=True)

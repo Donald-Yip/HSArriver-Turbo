@@ -40,8 +40,10 @@ class ResolvePathsTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_derives_the_exe_from_the_logs_folder(self):
+    def test_derives_the_exe_and_launcher_from_the_logs_folder(self):
         (self.install / hs_restart.EXE_NAME).write_text("", encoding="utf-8")
+        launcher = (self.tmp / "Battle.net" / hs_restart.BATTLENET_EXE_NAME)
+        launcher.write_text("", encoding="utf-8")
 
         info = hs_restart.resolve_paths(self.logs)
 
@@ -52,14 +54,6 @@ class ResolvePathsTests(unittest.TestCase):
         self.assertEqual((self.install / hs_restart.EXE_NAME).resolve(),
                          info["exe"])
         self.assertTrue(info["exe_found"])
-
-    def test_derives_the_battlenet_launcher_from_the_sibling_folder(self):
-        launcher = (self.tmp / "Battle.net" / hs_restart.BATTLENET_EXE_NAME)
-        launcher.write_text("", encoding="utf-8")
-
-        info = hs_restart.resolve_paths(self.logs)
-
-        self.assertTrue(info["ok"])
         self.assertEqual(launcher.resolve(), info["battlenet_exe"])
         self.assertTrue(info["battlenet_found"])
 
@@ -69,18 +63,15 @@ class ResolvePathsTests(unittest.TestCase):
         self.assertTrue(info["ok"])
         self.assertFalse(info["exe_found"])
 
-    def test_empty_or_missing_folder_is_refused(self):
+    def test_empty_missing_or_drive_root_folder_is_refused(self):
         for value in ("", "   ", self.tmp / "nope"):
             with self.subTest(value=value):
                 info = hs_restart.resolve_paths(value)
                 self.assertFalse(info["ok"])
                 self.assertTrue(info["error"])
 
-    def test_drive_root_is_refused(self):
         drive_root = Path(os.environ.get("SystemDrive", "C:") + "\\")
-
         info = hs_restart.resolve_paths(drive_root)
-
         self.assertFalse(info["ok"])
         self.assertIn("盘符根", info["error"])
 
@@ -101,7 +92,7 @@ class ClearLogsTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_removes_everything_except_the_keep_list(self):
+    def test_removes_everything_except_the_keep_list_and_refuses_a_bad_root(self):
         result = hs_restart.clear_logs(self.logs)
 
         self.assertTrue(result["ok"])
@@ -109,6 +100,12 @@ class ClearLogsTests(unittest.TestCase):
         self.assertEqual(["Log.config"], result["skipped"])
         self.assertEqual(["Log.config"], sorted(p.name for p in self.logs.iterdir()))
         self.assertTrue((self.tmp / "sibling.txt").is_file())
+
+        # 根目录不存在（配置写坏）：直接拒绝，绝不对别处动手。
+        bad = hs_restart.clear_logs(self.tmp / "nope")
+        self.assertFalse(bad["ok"])
+        self.assertEqual(0, bad["removed"])
+        self.assertTrue(bad["errors"])
 
     def test_reports_entries_it_could_not_remove(self):
         with patch.object(hs_restart.shutil, "rmtree",
@@ -121,13 +118,6 @@ class ClearLogsTests(unittest.TestCase):
         # 删不掉的那个 session 目录还在，另一个文件已经删掉了
         self.assertTrue((self.logs / "Log.config").is_file())
         self.assertFalse((self.logs / "Power.log").exists())
-
-    def test_refuses_a_bad_root(self):
-        result = hs_restart.clear_logs(self.tmp / "nope")
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(0, result["removed"])
-        self.assertTrue(result["errors"])
 
 
 class _Probe:
@@ -228,7 +218,7 @@ class LaunchHearthstoneTests(unittest.TestCase):
         params.update(kwargs)
         return hs_restart.launch_hearthstone(**params)
 
-    def test_prefers_battlenet_and_waits_for_the_game_window(self):
+    def test_prefers_battlenet_and_the_game_window_is_the_success_judgement(self):
         result = self._launch(process_running=_Probe(True),
                               window_ready=lambda: True, timeout=5.0)
 
@@ -237,6 +227,11 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertEqual(["launcher"], self.launcher_calls)
         self.assertEqual([], self.opened)          # 根本没去碰 exe
         self.assertIn("战网", result["message"])
+
+        # 进程一直没检测到、但游戏窗口出现了（例如用户已手动打开）也算成功。
+        result = self._launch(process_running=_Probe(False),
+                              window_ready=lambda: True, timeout=1.0)
+        self.assertTrue(result["ok"])
 
     def test_starts_battlenet_first_when_it_is_not_running(self):
         """回归：战网没开时直启 Hearthstone.exe 会秒退（重启一半又关了）。"""
@@ -280,14 +275,7 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertEqual("exe", result["started"])
         self.assertEqual([str(self._exe())], self.opened)
 
-    def test_the_game_window_is_the_success_judgement(self):
-        """进程一直没检测到、但游戏窗口出现了（例如用户已手动打开）也算成功。"""
-        result = self._launch(process_running=_Probe(False),
-                              window_ready=lambda: True, timeout=1.0)
-
-        self.assertTrue(result["ok"])
-
-    def test_fast_exit_is_detected_instead_of_reporting_success(self):
+    def test_fast_exit_or_missing_window_probe_is_detected(self):
         """回归：原来一看进程在就报“已启动”，实际它秒退 —— 用户看到“重启一半又关了”。"""
         def missing_battlenet():
             return False
@@ -301,7 +289,7 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertIn("又退出", result["error"])
         self.assertTrue(any("没起来" in line for line in self.lines))
 
-    def test_without_a_window_probe_the_process_must_stay_alive(self):
+        # 没有窗口探针时，进程必须一直活着才算成功。
         ok = self._launch(process_running=_Probe(True), window_ready=None,
                           timeout=1.0, settle=0.05)
         died = self._launch(process_running=_Probe(True, False),
@@ -311,7 +299,7 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertFalse(died["ok"])
         self.assertIn("退出", died["error"])
 
-    def test_reports_every_attempt_when_nothing_starts(self):
+    def test_refusal_paths_report_every_attempt(self):
         def missing_battlenet():
             return False
 
@@ -324,13 +312,13 @@ class LaunchHearthstoneTests(unittest.TestCase):
         self.assertIn("战网", result["error"])
         self.assertIn("直接启动", result["error"])
 
-    def test_without_exe_and_launcher_it_refuses(self):
-        result = hs_restart.launch_hearthstone(
+        # 既没有 exe 也没有 launcher：明确拒绝，不能假装启动。
+        refused = hs_restart.launch_hearthstone(
             None, opener=self.opener, process_running=_Probe(True),
             sleeper=lambda _s: None)
 
-        self.assertFalse(result["ok"])
-        self.assertIn(hs_restart.EXE_NAME, result["error"])
+        self.assertFalse(refused["ok"])
+        self.assertIn(hs_restart.EXE_NAME, refused["error"])
 
     def test_nowait_only_fires_the_launch(self):
         result = self._launch(wait=False)
@@ -380,7 +368,7 @@ class OverlayDelayDisplayTests(unittest.TestCase):
         hs_restart.launch_hearthstone(**params)
         return lines
 
-    def test_five_second_delay_before_clicking_play(self):
+    def test_five_second_delay_line_drives_the_overlay_countdown(self):
         slept = []
 
         lines = self._launch_lines(slept=slept)
@@ -394,9 +382,7 @@ class OverlayDelayDisplayTests(unittest.TestCase):
                         lines.index(next(line for line in lines
                                          if line.startswith("正在通过"))))
 
-    def test_lines_drive_the_overlay_delay_bar(self):
-        lines = self._launch_lines()
-
+        # 浮窗进度条靠解析这些日志行驱动：5s 延时 + 15s 重试都要能解析出来。
         bars = []
         for line in lines:
             match = log_overlay._delay_start_re.search(line)
@@ -408,11 +394,9 @@ class OverlayDelayDisplayTests(unittest.TestCase):
                             for total, desc in bars),
                         f"没播报重试倒计时：{bars}")
 
-    def test_that_line_really_sets_the_overlay_countdown(self):
-        lines = self._launch_lines()
+        # 而且这一行真的会把浮窗倒计时设成 5 秒。
         line = next(line for line in lines
                     if line.startswith("延时 ") and "点战网「开始游戏」" in line)
-
         saved = log_overlay._DELAY
         try:
             log_overlay._DELAY = None
@@ -423,7 +407,7 @@ class OverlayDelayDisplayTests(unittest.TestCase):
         finally:
             log_overlay._DELAY = saved
 
-    def test_retry_countdown_is_announced_with_the_attempt_number(self):
+    def test_retry_and_wait_lines_are_announced(self):
         lines = self._launch_lines(retry_after=0.1, timeout=1.0,
                                    before_click_delay=0.0)
 
@@ -431,9 +415,7 @@ class OverlayDelayDisplayTests(unittest.TestCase):
         self.assertTrue(retry_lines)
         self.assertIn("第 1 次", retry_lines[0])
 
-    def test_wait_line_tells_how_long_and_how_often(self):
         lines = self._launch_lines(timeout=45.0, retry_after=15.0)
-
         wait = next(line for line in lines if line.startswith("等待炉石"))
         self.assertIn("45", wait)
         self.assertIn("15", wait)

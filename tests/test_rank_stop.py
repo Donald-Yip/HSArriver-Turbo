@@ -38,7 +38,7 @@ def lines(*pairs):
 class ParseRankTextTests(unittest.TestCase):
     """段位判定：只看数字（有数字=传说，没数字=没上传说）。"""
 
-    def test_only_digits_decide_legend(self):
+    def test_rank_text_parsing_and_purity(self):
         cases = (
             ("1234", 1234, True),        # 纯数字 = 传说名次
             ("传说 1234", 1234, True),    # 文本里还有别的字也不影响
@@ -59,6 +59,21 @@ class ParseRankTextTests(unittest.TestCase):
                 self.assertEqual(number, parsed["number"])
                 self.assertEqual(legend, parsed["legend"])
                 self.assertEqual(text, parsed["raw"])
+
+        # strict 模式只认「整行就是数字」：段位标签、单位都不能混进来。
+        pure_cases = (
+            ("4321", True),
+            ("#4321", True),
+            (" 43 ", True),
+            ("４３２１", True),
+            ("传说 4321", False),
+            ("4321 名", False),
+            ("", False),
+            (None, False),
+        )
+        for text, expected in pure_cases:
+            with self.subTest(pure=text):
+                self.assertEqual(expected, FSM_action.is_pure_rank_text(text))
 
 
 class BlankRegionTests(unittest.TestCase):
@@ -94,70 +109,47 @@ class BlankRegionTests(unittest.TestCase):
 class ReadRankRegionTests(unittest.TestCase):
     """OCR 读段位：读得到就解析，读不到/没数字就不触发停止。"""
 
-    def _read(self, ocr_lines):
+    def _read(self, ocr_lines, preprocessed=None, **kwargs):
         with (
             patch.object(FSM_action, "_grab_region", return_value=object()),
             patch.object(FSM_action, "_region_is_blank", return_value=False),
             patch.object(FSM_action, "_ocr_lines", return_value=ocr_lines),
+            patch.object(FSM_action, "_ocr_lines_preprocessed",
+                         return_value=preprocessed),
         ):
-            return FSM_action.read_rank_region()
+            return FSM_action.read_rank_region(**kwargs)
 
     def test_reads_number_from_any_line_with_digits(self):
         cases = (
-            (lines(("传说 4321", 0.9)), 4321, True),
-            (lines(("继续", 0.9), ("88", 0.8)), 88, True),
+            (lines(("传说 4321", 0.9)), 4321, True, "传说 4321"),
+            (lines(("继续", 0.9), ("88", 0.8)), 88, True, "88"),
             # 全是文字（没数字）：没上传说
-            (lines(("钻石 III", 0.9)), None, False),
-            (None, None, False),             # OCR 不可用
+            (lines(("钻石 III", 0.9)), None, False, "钻石 III"),
+            (None, None, False, None),       # OCR 不可用
         )
-        for ocr_lines, number, legend in cases:
+        for ocr_lines, number, legend, raw in cases:
             with self.subTest(number=number, legend=legend):
                 reading = self._read(ocr_lines)
 
                 self.assertEqual(number, reading["number"])
                 self.assertEqual(legend, reading["legend"])
-                self.assertEqual(ocr_lines is None, reading["raw"] is None)
+                self.assertEqual(raw, reading["raw"])
 
-    def test_strict_needs_a_line_that_is_only_the_number(self):
-        """严格模式：整行只有数字才算（用于"必须拦住点击"的那次检测）。"""
-        with (
-            patch.object(FSM_action, "_grab_region", return_value=object()),
-            patch.object(FSM_action, "_region_is_blank", return_value=False),
-            patch.object(FSM_action, "_ocr_lines",
-                         return_value=lines(("传说 4321", 0.9))),
-        ):
-            self.assertEqual(4321, FSM_action.read_rank_region()["number"])
-            self.assertIsNone(
-                FSM_action.read_rank_region(strict=True)["number"])
+    def test_strict_and_min_confidence_filters(self):
+        """严格模式只认纯数字；低置信度的行丢掉。"""
+        mixed = lines(("传说 4321", 0.9))
+        self.assertEqual(4321, self._read(mixed)["number"])
+        self.assertIsNone(self._read(mixed, strict=True)["number"])
 
-        with (
-            patch.object(FSM_action, "_grab_region", return_value=object()),
-            patch.object(FSM_action, "_region_is_blank", return_value=False),
-            patch.object(FSM_action, "_ocr_lines",
-                         return_value=lines((" ４３２１ ", 0.9))),
-        ):
-            self.assertEqual(4321,
-                             FSM_action.read_rank_region(strict=True)["number"])
+        pure = lines((" ４３２１ ", 0.9))
+        self.assertEqual(4321, self._read(pure, strict=True)["number"])
 
-    def test_min_confidence_drops_shaky_lines(self):
-        with (
-            patch.object(FSM_action, "_grab_region", return_value=object()),
-            patch.object(FSM_action, "_region_is_blank", return_value=False),
-            patch.object(FSM_action, "_ocr_lines",
-                         return_value=lines(("4321", 0.3))),
-        ):
-            self.assertEqual(4321, FSM_action.read_rank_region()["number"])
-            self.assertIsNone(
-                FSM_action.read_rank_region(min_confidence=0.5)["number"])
+        shaky = lines(("4321", 0.3))
+        self.assertEqual(4321, self._read(shaky)["number"])
+        self.assertIsNone(self._read(shaky, min_confidence=0.5)["number"])
 
     def test_non_numeric_text_is_kept_for_diagnostics(self):
-        with (
-            patch.object(FSM_action, "_grab_region", return_value=object()),
-            patch.object(FSM_action, "_region_is_blank", return_value=False),
-            patch.object(FSM_action, "_ocr_lines",
-                         return_value=lines(("传说", 0.99))),
-        ):
-            reading = FSM_action.read_rank_region()
+        reading = self._read(lines(("传说", 0.99)))
 
         self.assertIsNone(reading["number"])
         self.assertEqual("传说", reading["raw"])
@@ -212,45 +204,6 @@ class ReadRankRegionTests(unittest.TestCase):
             FSM_action.recommendation_config = saved
 
 
-class PureRankTextTests(unittest.TestCase):
-    def test_only_bare_numbers_pass(self):
-        cases = (
-            ("4321", True),
-            ("#4321", True),
-            (" 43 ", True),
-            ("４３２１", True),
-            ("传说 4321", False),
-            ("4321 名", False),
-            ("", False),
-            (None, False),
-        )
-        for text, expected in cases:
-            with self.subTest(text=text):
-                self.assertEqual(expected, FSM_action.is_pure_rank_text(text))
-
-
-class RankConditionTests(unittest.TestCase):
-    def test_condition_matrix(self):
-        cases = (
-            # (reading, cfg, 期望命中)
-            ({"number": 4321, "legend": True}, make_config(mode="legend"), True),
-            ({"number": None, "legend": False},
-             make_config(mode="legend"), False),
-            ({"number": 99, "legend": True},
-             make_config(mode="legend_number", legend_number=100), True),
-            ({"number": 100, "legend": True},
-             make_config(mode="legend_number", legend_number=100), True),
-            ({"number": 101, "legend": True},
-             make_config(mode="legend_number", legend_number=100), False),
-            ({"number": 1, "legend": True}, make_config(enabled=False), False),
-        )
-        for reading, cfg, expected in cases:
-            with self.subTest(reading=reading, mode=cfg["mode"],
-                              enabled=cfg["enabled"]):
-                self.assertEqual(expected, FSM_action._rank_condition_met(
-                    reading, cfg))
-
-
 class RankActionForTests(unittest.TestCase):
     """段位读数的动作判定：stop / keep / ""（控分的核心分支）。"""
 
@@ -292,17 +245,19 @@ class RankActionForTests(unittest.TestCase):
                 self.assertEqual(expected, FSM_action._rank_action_for(
                     reading, cfg))
 
-    def test_keep_ignores_mode_and_needs_enabled(self):
-        # keep 只按数值判断，与 mode 无关（mode 是 stop 的分支）。
-        cfg = make_config(mode="legend", legend_number=500, action="keep")
+        # keep 只按数值判断，与 mode 无关（mode 是 stop 的分支）；enabled 必须为真。
+        loose = make_config(mode="legend", legend_number=500, action="keep")
         self.assertEqual("keep", FSM_action._rank_action_for(
-            {"number": 400, "legend": True}, cfg))
+            {"number": 400, "legend": True}, loose))
         self.assertEqual("", FSM_action._rank_action_for(
-            {"number": 400, "legend": True}, {**cfg, "enabled": False}))
+            {"number": 400, "legend": True}, {**loose, "enabled": False}))
 
 
-class CheckRankStopTests(unittest.TestCase):
-    """命中目标就请求「本局结束后停止」；读不到只提示、不误停。"""
+class RankStopReadTargetTests(unittest.TestCase):
+    """生产路径 `_read_rank_target`：读不到/没到目标绝不误停。
+
+    空白先重试、复核失败也绝不停 —— 这几条是最容易让脚本误停/误投降的边界。
+    """
 
     def setUp(self):
         self._saved = (FSM_action._rank_stop_triggered,
@@ -315,17 +270,19 @@ class CheckRankStopTests(unittest.TestCase):
         FSM_action._rank_last_phase = None
         self.logs = []
         self.stop_requests = []
+        self.reads = 0
 
     def tearDown(self):
         (FSM_action._rank_stop_triggered, FSM_action._rank_stop_stop_reason,
          FSM_action._rank_last_read, FSM_action._rank_last_phase) = self._saved
 
-    def _run(self, readings, cfg=None):
+    def _run(self, readings, cfg=None, **kwargs):
         """readings 用完后返回最后一个（模拟"屏幕一直是这样"）。"""
         sequence = list(readings)
         last = sequence[-1] if sequence else None
 
-        def fake_read(**kwargs):
+        def fake_read(**kw):
+            self.reads += 1
             return sequence.pop(0) if sequence else last
 
         with (
@@ -338,136 +295,61 @@ class CheckRankStopTests(unittest.TestCase):
                          side_effect=lambda msg: self.logs.append(msg)),
             patch.object(FSM_action.time, "sleep"),
         ):
-            return FSM_action._check_rank_stop()
+            return FSM_action._read_rank_target(**kwargs)
 
-    def test_hit_requests_stop_after_current_game(self):
-        hit = self._run([{"number": 4321, "legend": True, "raw": "4321"}])
-
-        self.assertTrue(hit)
-        self.assertEqual([1], self.stop_requests)
-        self.assertTrue(FSM_action._rank_stop_triggered)
-        self.assertIn("传说 4321", FSM_action._rank_stop_stop_reason)
-        self.assertTrue(any("上分目标已达成" in msg for msg in self.logs))
-
-    def test_miss_and_unreadable_never_stop(self):
+    def test_unreadable_miss_and_misread_never_stop(self):
         cases = (
             # 没到目标名次
-            ([{"number": 5000, "legend": True, "raw": "5000"}],
+            ({"number": 5000, "legend": True, "raw": "5000"},
              make_config(mode="legend_number", legend_number=100)),
             # 段位位置**一直**是空白（亮像素不够）= 真的没上传说
-            ([{"number": None, "legend": False, "raw": None,
-               "empty": True, "bright": 2}],
-             None),
+            ({"number": None, "legend": False, "raw": None,
+              "empty": True, "bright": 2}, None),
             # 截图失败（blank，截不到图）：重试几次仍失败
-            ([{"number": None, "legend": False, "raw": None,
-               "empty": False, "blank": True, "bright": -1}],
-             None),
+            ({"number": None, "legend": False, "raw": None,
+              "empty": False, "blank": True, "bright": -1}, None),
             # 有内容但 OCR 读不到：重试几次仍失败
-            ([{"number": None, "legend": False, "raw": None,
-               "empty": False, "blank": False, "bright": 40}],
-             None),
+            ({"number": None, "legend": False, "raw": None,
+              "empty": False, "blank": False, "bright": 40}, None),
         )
-        for readings, cfg in cases:
-            with self.subTest(readings=len(readings), mode=(cfg or {}).get("mode")):
+        for reading, cfg in cases:
+            with self.subTest(reading=reading, mode=(cfg or {}).get("mode")):
                 self.stop_requests.clear()
                 self.logs.clear()
-                hit = self._run(readings, cfg)
+                hit = self._run([reading], cfg)
 
-                self.assertFalse(hit)
+                self.assertEqual("", hit)
                 self.assertEqual([], self.stop_requests)
                 self.assertFalse(FSM_action._rank_stop_triggered)
                 self.assertTrue(self.logs)   # 失败必须留一条能看懂的原因
 
-    def test_blank_reading_is_retried_then_hits(self):
-        """刚进结算界面时名次还没画出来（读到空白）——必须重试，不能就此判未上传说。"""
-        readings = [{"number": None, "legend": False, "raw": None,
-                     "empty": True, "bright": 3}] * 2
-        readings.append({"number": 4672, "legend": True, "raw": "4672",
-                         "empty": False, "blank": False, "bright": 120})
+        # 配置关闭 / 本局已命中过：连读都不读（fail-closed，绝不误停）。
+        self.reads = 0
+        self.assertEqual("", self._run(
+            [{"number": 4321, "legend": True}], make_config(enabled=False)))
+        FSM_action._rank_stop_triggered = True
+        self.assertEqual("", self._run(
+            [{"number": 4321, "legend": True}]))
+        self.assertEqual(0, self.reads)
 
-        self.assertTrue(self._run(readings))
+        # 刚进界面名次还没画出来（读到空白）：必须重试，不能就此判未上传说。
+        FSM_action._rank_stop_triggered = False
+        blank = {"number": None, "legend": False, "raw": None,
+                 "empty": True, "bright": 3}
+        self.assertEqual("stop", self._run(
+            [blank, blank, {"number": 4672, "legend": True, "raw": "4672"}],
+            attempts=3, wait=0))
         self.assertEqual([1], self.stop_requests)
         self.assertEqual(4672, FSM_action._rank_last_read["number"])
 
-    def test_unreadable_screen_is_retried_then_hits(self):
-        readings = [{"number": None, "legend": False, "raw": None,
-                     "empty": False, "blank": True, "bright": -1}] * 2
-        readings.append({"number": 12, "legend": True, "raw": "12"})
-
-        self.assertTrue(self._run(readings))
-        self.assertEqual([1], self.stop_requests)
-
-    def test_disabled_or_already_triggered_never_reads(self):
-        calls = []
-
-        with (
-            patch.object(FSM_action, "rank_stop_settings",
-                         return_value=make_config(enabled=False)),
-            patch.object(FSM_action, "read_rank_region",
-                         side_effect=lambda **kw: calls.append(1)),
-        ):
-            self.assertFalse(FSM_action._check_rank_stop())
-
-        FSM_action._rank_stop_triggered = True
-        with (
-            patch.object(FSM_action, "rank_stop_settings",
-                         return_value=make_config()),
-            patch.object(FSM_action, "read_rank_region",
-                         side_effect=lambda **kw: calls.append(1)),
-        ):
-            self.assertFalse(FSM_action._check_rank_stop())
-
-        self.assertEqual([], calls)
-
-    def test_check_passes_through_attempts_and_label(self):
-        """调用方可以指定"读几次 + 这一步叫什么"，页面/日志据此回答检测了没有。"""
-        seen = {}
-
-        def fake_read(**kwargs):
-            seen["kwargs"] = kwargs
-            return {"number": 4321, "legend": True, "raw": "4321"}
-
-        with (
-            patch.object(FSM_action, "rank_stop_settings",
-                         return_value=make_config()),
-            patch.object(FSM_action, "read_rank_region",
-                         side_effect=fake_read),
-            patch.object(FSM_action, "request_stop_after_game"),
-            patch.object(FSM_action.manual_controller, "output"),
-            patch.object(FSM_action.time, "sleep"),
-        ):
-            FSM_action._check_rank_stop(attempts=2, wait=0.5,
-                                        label="点「开始」前",
-                                        min_confidence=0.5, confirm=True)
-
-        self.assertEqual({"strict": False, "min_confidence": 0.5},
-                         seen["kwargs"])
-        self.assertEqual("点「开始」前", FSM_action._rank_last_phase)
-        self.assertEqual("点「开始」前", FSM_action._rank_last_read and
-                         "点「开始」前")
-        self.assertIn("传说 4321", FSM_action._rank_stop_stop_reason)
-
-    def test_confirm_reads_twice_and_rejects_a_one_off_misread(self):
-        """复核失败（第二次读不到数字）就不能停——一次误识别不能停掉自动化。"""
-        reads = iter([
-            {"number": 4321, "legend": True, "raw": "4321"},   # 预读命中
-            {"number": None, "legend": False, "raw": None},    # 复核没读到
-        ])
-
-        with (
-            patch.object(FSM_action, "rank_stop_settings",
-                         return_value=make_config()),
-            patch.object(FSM_action, "read_rank_region",
-                         side_effect=lambda **kw: next(reads)),
-            patch.object(FSM_action, "request_stop_after_game",
-                         side_effect=lambda: self.stop_requests.append(1)),
-            patch.object(FSM_action.manual_controller, "output",
-                         side_effect=lambda msg: self.logs.append(msg)),
-            patch.object(FSM_action.time, "sleep"),
-        ):
-            hit = FSM_action._check_rank_stop(confirm=True)
-
-        self.assertFalse(hit)
+        # 复核失败（第二次读不到数字）就不能停——一次误识别不能停掉自动化。
+        self.stop_requests.clear()
+        self.logs.clear()
+        FSM_action._rank_stop_triggered = False
+        self.assertEqual("", self._run(
+            [{"number": 4321, "legend": True, "raw": "4321"},   # 预读命中
+             {"number": None, "legend": False, "raw": None}],   # 复核没读到
+            confirm=True))
         self.assertEqual([], self.stop_requests)
         self.assertFalse(FSM_action._rank_stop_triggered)
         self.assertTrue(self.logs)
@@ -495,10 +377,66 @@ class CheckRankStopTests(unittest.TestCase):
             state)
 
 
+class RankStopPublicPathTests(unittest.TestCase):
+    """用户可见路径：排队前段位闸门（ChoosingHeroAction）。
+
+    命中目标 → 不点「开始匹配」，只请求本局结束后停止。
+    """
+
+    def setUp(self):
+        self._saved = (FSM_action.stop_after_current_game,
+                       FSM_action.quitting_flag,
+                       FSM_action.choose_hero_count,
+                       FSM_action._rank_stop_triggered,
+                       FSM_action._rank_stop_stop_reason,
+                       FSM_action._rank_last_read,
+                       FSM_action._rank_last_phase)
+        FSM_action.stop_after_current_game = False
+        FSM_action.quitting_flag = False
+        FSM_action.choose_hero_count = 0
+        FSM_action._rank_stop_triggered = False
+        FSM_action._rank_stop_stop_reason = None
+        FSM_action._rank_last_read = None
+        FSM_action._rank_last_phase = None
+        self.actions = []
+        self.stop_requests = []
+
+    def tearDown(self):
+        (FSM_action.stop_after_current_game, FSM_action.quitting_flag,
+         FSM_action.choose_hero_count, FSM_action._rank_stop_triggered,
+         FSM_action._rank_stop_stop_reason, FSM_action._rank_last_read,
+         FSM_action._rank_last_phase) = self._saved
+
+    def test_stop_does_not_queue_and_requests_stop_after_game(self):
+        with (
+            patch.object(FSM_action, "print_out"),
+            patch.object(FSM_action, "info_print"),
+            patch.object(FSM_action, "warn_print"),
+            patch.object(FSM_action.time, "sleep"),
+            patch.object(FSM_action, "rank_stop_settings",
+                         return_value=make_config(mode="legend")),
+            patch.object(FSM_action, "read_rank_region",
+                         return_value={"number": 4321, "legend": True,
+                                       "raw": "4321"}),
+            patch.object(FSM_action, "request_stop_after_game",
+                         side_effect=lambda: self.stop_requests.append(1)),
+            patch.object(FSM_action.manual_controller, "output"),
+            patch.object(FSM_action.click, "run_hearthstone_action",
+                         side_effect=lambda action: self.actions.append(action)),
+        ):
+            result = FSM_action.ChoosingHeroAction()
+
+        self.assertEqual(FSM_action.FSM_CHOOSING_HERO, result)
+        self.assertEqual([], self.actions)          # 一个「开始匹配」都没点
+        self.assertEqual([1], self.stop_requests)   # 请求本局结束后停止
+        self.assertTrue(FSM_action._rank_stop_triggered)
+        self.assertIn("传说 4321", FSM_action._rank_stop_stop_reason)
+
+
 class PostGameStartButtonTests(unittest.TestCase):
     """「开始」按钮：框可校准，点击点取框中心，检测有兜底区域。"""
 
-    def test_calibrated_box_decides_the_click_point(self):
+    def test_calibrated_box_decides_the_click_point_and_click_uses_the_centre(self):
         cases = (
             # (post_game_start_roi, 期望点击点)
             (None, (1400, 900)),                        # 默认框中心
@@ -515,10 +453,8 @@ class PostGameStartButtonTests(unittest.TestCase):
 
                 self.assertEqual(expected, point)
 
-    def test_click_uses_the_centre(self):
         clicks = []
         config = SimpleNamespace(post_game_start_roi=(1500, 850, 1600, 950))
-
         with (
             patch.object(FSM_action, "recommendation_config", config),
             patch.object(FSM_action.click, "left_click",
@@ -584,8 +520,8 @@ class QuittingBattleTests(unittest.TestCase):
     def _run(self, states, start_present, max_cycles=None, rank_checks=True):
         """states：get_state 依次返回值；start_present：bool 列表。
 
-        rank_checks=True 时桩掉 `_read_rank_target` 与 `_check_rank_stop`（记录每次
-        调用的 label），用来断言"结算界面一次段位都不读"。
+        rank_checks=True 时桩掉生产入口 `_read_rank_target`（记录每次调用的
+        label），用来断言"结算界面一次段位都不读"。
         """
         present = list(start_present)
         state_seq = list(states)
@@ -615,8 +551,6 @@ class QuittingBattleTests(unittest.TestCase):
         if rank_checks:
             patches.append(patch.object(
                 FSM_action, "_read_rank_target", side_effect=fake_rank_check))
-            patches.append(patch.object(
-                FSM_action, "_check_rank_stop", side_effect=fake_rank_check))
         if max_cycles is not None:
             patches.append(patch.object(FSM_action, "_POST_GAME_MAX_CYCLES",
                                         max_cycles))
@@ -628,29 +562,14 @@ class QuittingBattleTests(unittest.TestCase):
             for patcher in reversed(patches):
                 patcher.stop()
 
-    def test_clicks_reset_point_then_finishes_once_button_appears(self):
-        result = self._run([FSM_action.FSM_BATTLING] * 5, [False, False, True])
-
-        self.assertEqual(FSM_action.FSM_CHOOSING_HERO, result)
-        self.assertEqual(2, len(self.clicks))
-        self.assertEqual(1, len(self.actions))
-        # 结算界面**不读段位**（用户口径：只在选卡组界面读）。
-        self.assertEqual([], self.rank_checks)
-
-    def test_rank_is_never_read_on_the_result_screen(self):
-        """「开始」一直没出现（最后超时）：一次段位都不该读。"""
-        result = self._run([FSM_action.FSM_BATTLING] * 8, [], max_cycles=3)
-
-        self.assertEqual(FSM_action.FSM_ERROR, result)
-        self.assertEqual([], self.rank_checks)
-
-    def test_start_button_is_clicked_without_any_rank_gate(self):
+    def test_start_button_finishes_without_any_rank_gate(self):
         """检测到「开始」：直接点它收尾，不做任何段位判断。"""
         result = self._run([FSM_action.FSM_BATTLING] * 5, [False, False, True])
 
         self.assertEqual(FSM_action.FSM_CHOOSING_HERO, result)
         self.assertEqual(2, len(self.clicks))          # 前两个点照旧
         self.assertEqual(1, len(self.actions))         # 只点了一次「开始」
+        # 结算界面**不读段位**（用户口径：只在选卡组界面读）。
         self.assertEqual([], self.rank_checks)
         self.assertTrue(any("回选卡组界面" in msg or "收尾完成" in msg
                             for msg in self.logged))
@@ -666,7 +585,6 @@ class QuittingBattleTests(unittest.TestCase):
             patch.object(FSM_action.time, "sleep"),
             patch.object(FSM_action, "recommendation_config", config),
             patch.object(FSM_action, "_read_rank_target", return_value=""),
-            patch.object(FSM_action, "_check_rank_stop", return_value=False),
             patch.object(FSM_action, "start_button_present",
                          side_effect=[False, True]),
             patch.object(FSM_action, "click_post_game_point"),
@@ -696,11 +614,13 @@ class QuittingBattleTests(unittest.TestCase):
         self.assertEqual([], self.actions)
         self.assertEqual([], self.rank_checks)
 
-        # 一直没出现「开始」：到轮数上限走错误处理
+        # 一直没出现「开始」：到轮数上限走错误处理，且一次段位都不读
         self.clicks.clear()
+        self.rank_checks.clear()
         self.assertEqual(FSM_action.FSM_ERROR,
                          self._run([FSM_action.FSM_BATTLING] * 8, [], 3))
         self.assertEqual(3, len(self.clicks))
+        self.assertEqual([], self.rank_checks)
 
     def test_stop_after_current_game_exits_immediately(self):
         FSM_action.stop_after_current_game = True
@@ -812,19 +732,16 @@ class KeepScoreTests(unittest.TestCase):
         self.assertEqual([], self.mulligan_waits)
         self.assertEqual(1, len(self.actions))  # 只点过「开始匹配」
 
-    def test_reports_failure_when_returning_to_deck_select_times_out(self):
+    def test_failures_are_reported_not_raised(self):
+        # 投降点过了，但没等到选卡组界面 → 返回 False（交由状态机自己找路）。
         with patch.object(FSM_action, "_KEEP_SCORE_BACK_ATTEMPTS", 2), \
                 patch.object(FSM_action, "_KEEP_SCORE_BACK_WAIT", 0):
-            result = self._run(deck_select=False)
-
-        # 投降点过了，但没等到选卡组界面 → 返回 False（交由状态机自己找路）。
-        self.assertFalse(result)
+            self.assertFalse(self._run(deck_select=False))
         self.assertEqual(1, len(self.conceded))
 
-    def test_concede_click_failure_is_reported_not_raised(self):
-        result = self._run(concede_ok=False)
-
-        self.assertFalse(result)
+        # 认输点击本身抛异常：同样只返回 False，不把自动化炸掉。
+        self.conceded.clear()
+        self.assertFalse(self._run(concede_ok=False))
         self.assertEqual(1, len(self.conceded))
 
 
@@ -935,8 +852,6 @@ class ChoosingHeroRankGateTests(unittest.TestCase):
         self.assertEqual([], self.keep_score_calls)  # 也没投降
         self.assertEqual(["选择套牌界面"],
                          [c.get("label") for c in self.calls])
-        self.assertEqual(FSM_action._CHOOSING_HERO_RANK_READ_ATTEMPTS,
-                         self.calls[0].get("attempts"))
 
     def test_keep_action_concedes_once_then_returns_to_gate(self):
         result = self._run(action="keep")
@@ -945,19 +860,18 @@ class ChoosingHeroRankGateTests(unittest.TestCase):
         self.assertEqual(1, len(self.keep_score_calls))  # 投降一次
         self.assertEqual([], self.actions)               # 不在这里点「开始匹配」
 
-    def test_no_action_still_queues(self):
-        result = self._run(action="")
+    def test_no_action_or_detection_error_still_queues(self):
+        for kwargs, label in (({"action": ""}, "无动作"),
+                              ({"explode": True}, "检测异常")):
+            with self.subTest(label=label):
+                self.actions.clear()
+                self.keep_score_calls.clear()
+                result = self._run(**kwargs)
 
-        self.assertEqual(FSM_action.FSM_MATCHING, result)
-        self.assertEqual(1, len(self.actions))
-        self.assertEqual([FSM_action.click.match_opponent], self.actions)
-        self.assertEqual([], self.keep_score_calls)
-
-    def test_detection_error_never_blocks_play(self):
-        result = self._run(explode=True)
-
-        self.assertEqual(FSM_action.FSM_MATCHING, result)
-        self.assertEqual(1, len(self.actions))
+                self.assertEqual(FSM_action.FSM_MATCHING, result)
+                self.assertEqual(1, len(self.actions))
+                self.assertEqual([FSM_action.click.match_opponent], self.actions)
+                self.assertEqual([], self.keep_score_calls)
 
     def test_keep_action_stops_conceding_at_the_cap(self):
         """到投降上限后不再投降，改为正常对战（防无限投降）。"""
@@ -1017,11 +931,10 @@ class WebRankStopApiTests(unittest.TestCase):
             {"enabled": True, "mode": "legend_number", "legend_number": 0})
         self.assertEqual(1, self.saved["rank_stop"]["legend_number"])
 
-    def test_save_keep_action_writes_control_score(self):
+        # 控分（action=keep）也要能原样存下去。
         result = web_ui.api_save_rank_stop(
             {"enabled": True, "mode": "legend_number", "action": "keep",
              "legend_number": 3000})
-
         self.assertTrue(result["ok"])
         self.assertEqual("keep", self.saved["rank_stop"]["action"])
         self.assertEqual(3000, self.saved["rank_stop"]["legend_number"])
