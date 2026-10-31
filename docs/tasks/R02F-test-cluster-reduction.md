@@ -43,9 +43,14 @@ surrender coverage is not to be dismantled.
 
 ## Current Increment
 
-All four batches are executed in this task (109 -> 85, 226 -> 166,
-183 -> 129, 96 -> 31). The default headless gate went from 1,850 to
-1,647 runnable tests with 0 failures / 0 errors.
+Both waves are executed. Wave 1: surrender 109 -> 85, display/DPI
+226 -> 166, target-choice 183 -> 129, human-like 96 -> 31. Wave 2:
+OCR 78 -> 53, web 157 -> 108, hsctl 93 -> 62, battle/rank/restart
+111 -> 75, overlay 121 -> 85, infra 345 -> 234, game/log 146 -> 82.
+
+The default headless gate went from 1,850 to 1,451 runnable tests
+(555 removed; the resident R18J work added ~156 new tests in parallel),
+with 0 failures / 0 errors.
 
 ## Non-Goals
 
@@ -67,7 +72,7 @@ $env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
 B1 pre-batch baseline: 1,850 run / 3 known screen-size dependent failures
 (local 1920x1080 DPI assertions, unrelated to the surrender cluster).
 Batch results after B1: 1,826 run / 0 failures / 0 errors.
-Final gate after B2/B3/B4: 1,647 run / 0 failures / 0 errors (86s).
+Final gate after both waves: 1,451 run / 0 failures / 0 errors (86s).
 
 ## Allowed Files
 
@@ -95,6 +100,47 @@ Final gate after B2/B3/B4: 1,647 run / 0 failures / 0 errors (86s).
 - `tests/test_targeted_locations.py`
 - `tests/test_human_like.py`
 - `tests/test_human_like_*.py`
+- `tests/test_hsctl.py`
+- `tests/test_rank_stop.py`
+- `tests/test_battle_*.py`
+- `tests/test_hs_restart.py`
+- `tests/test_web_*.py`
+- `tests/test_overlay_*.py`
+- `tests/test_region_overlay_button.py`
+- `tests/test_ocr_*.py`
+- `tests/test_mulligan_*.py`
+- `tests/test_hand_*.py`
+- `tests/test_hearthstone_liveness.py`
+- `tests/test_board_rewind_positions.py`
+- `tests/test_attack_target_name_fallback.py`
+- `tests/test_secondary_hero_power.py`
+- `tests/test_mode_click.py`
+- `tests/test_player_name_match.py`
+- `tests/test_power_log_hand_entries.py`
+- `tests/test_log_state_entity_names.py`
+- `tests/test_turn_scan_heartbeat.py`
+- `tests/test_recommendation_*.py`
+- `tests/test_start_latency.py`
+- `tests/test_strategy_*.py`
+- `tests/test_env_provision.py`
+- `tests/test_selfcheck*.py`
+- `tests/test_feedback.py`
+- `tests/test_action_feed.py`
+- `tests/test_joint_helpers.py`
+- `tests/test_adapted_description.py`
+- `tests/test_turn_start_readiness.py`
+- `tests/test_draw_extra_delay*.py`
+- `tests/test_cancel_manual_flow.py`
+- `tests/test_memory_watch.py`
+- `tests/test_script_logs.py`
+- `tests/test_window_tracker.py`
+- `tests/test_update_check.py`
+- `tests/test_release_tool.py`
+- `tests/test_ci_gates.py`
+- `tests/test_uv_environment.py`
+- `tests/test_version.py`
+- `tests/test_card_catalog.py`
+- `tests/test_config_strategy.py`
 - `tests/test_overlay_human_like_status.py`
 - `tests/test_strategy_*.py`
 - `tests/test_*strategy*.py`
