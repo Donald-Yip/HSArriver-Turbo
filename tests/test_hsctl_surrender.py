@@ -100,7 +100,7 @@ class ShowTests(unittest.TestCase):
 
 
 class ToggleTests(unittest.TestCase):
-    def test_on_posts_enabled_true(self):
+    def test_on_and_off_post_the_switch(self):
         ctx = FakeCtx(status={"auto_surrender": CFG},
                       post_result={"ok": True, "message": "已开启",
                                    "config": CFG})
@@ -108,11 +108,9 @@ class ToggleTests(unittest.TestCase):
         self.assertEqual(code, hsctl.EXIT_OK)
         self.assertEqual(ctx.posted[0], ("/api/surrender_rules", {"enabled": True}))
         self.assertIn("已开启", out)
-
-    def test_off_posts_enabled_false(self):
-        ctx = FakeCtx(post_result={"ok": True, "message": "已关闭"})
-        _run(hsctl.cmd_surrender, _ns(action="off"), ctx)
-        self.assertEqual(ctx.posted[0][1], {"enabled": False})
+        off = FakeCtx(post_result={"ok": True, "message": "已关闭"})
+        _run(hsctl.cmd_surrender, _ns(action="off"), off)
+        self.assertEqual(off.posted[0][1], {"enabled": False})
 
     def test_on_without_decks_warns(self):
         ctx = FakeCtx(post_result={"ok": True, "message": "已开启",
@@ -128,7 +126,7 @@ class ToggleTests(unittest.TestCase):
 
 
 class SetTests(unittest.TestCase):
-    def test_set_from_inline_rules(self):
+    def test_set_accepts_inline_rules_or_a_single_deck(self):
         ctx = FakeCtx()
         ns = _ns(action="set", rules=json.dumps(CFG))
         code, out = _run(hsctl.cmd_surrender, ns, ctx)
@@ -137,48 +135,42 @@ class SetTests(unittest.TestCase):
         self.assertEqual(body["config"]["decks"][0]["id"], "priest_alizana")
         self.assertNotIn("confirm", body)
         self.assertIn("已保存", out)
+        # 只给一套卡组时自动包成 {enabled, decks:[...]} 再下发。
+        single = FakeCtx()
+        _run(hsctl.cmd_surrender,
+             _ns(action="set", rules=json.dumps(CFG["decks"][0])), single)
+        wrapped = single.posted[0][1]["config"]
+        self.assertTrue(wrapped["enabled"])
+        self.assertEqual(len(wrapped["decks"]), 1)
 
-    def test_set_single_deck_is_wrapped(self):
-        ctx = FakeCtx()
-        ns = _ns(action="set", rules=json.dumps(CFG["decks"][0]))
-        code, _ = _run(hsctl.cmd_surrender, ns, ctx)
-        self.assertEqual(code, hsctl.EXIT_OK)
-        body = ctx.posted[0][1]["config"]
-        self.assertTrue(body["enabled"])
-        self.assertEqual(len(body["decks"]), 1)
-
-    def test_set_needs_confirm_returns_failure(self):
+    def test_confirmation_guard_reports_and_passes_through(self):
         ctx = FakeCtx(post_result={"ok": False, "needs_confirm": True,
                                    "error": "当前这一局会立刻投降",
                                    "hit": {"name": "牧师 · 阿扎莉娜"}})
-        ns = _ns(action="set", rules=json.dumps(CFG))
-        code, out = _run(hsctl.cmd_surrender, ns, ctx)
+        code, out = _run(hsctl.cmd_surrender,
+                         _ns(action="set", rules=json.dumps(CFG)), ctx)
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("--yes", out)
         self.assertIn("牧师 · 阿扎莉娜", out)
+        confirmed = FakeCtx()
+        _run(hsctl.cmd_surrender,
+             _ns(action="set", rules=json.dumps(CFG), yes=True), confirmed)
+        self.assertTrue(confirmed.posted[0][1]["confirm"])
 
-    def test_set_with_yes_passes_confirm(self):
-        ctx = FakeCtx()
-        ns = _ns(action="set", rules=json.dumps(CFG), yes=True)
-        _run(hsctl.cmd_surrender, ns, ctx)
-        self.assertTrue(ctx.posted[0][1]["confirm"])
-
-    def test_set_reports_validation_errors(self):
+    def test_set_reports_server_errors_and_corrections(self):
         ctx = FakeCtx(post_result={"ok": False, "error": "卡名有误，未保存",
                                    "errors": [{"path": "decks[0].when.card[0]",
                                                "message": "找不到卡牌「x」"}]})
-        ns = _ns(action="set", rules=json.dumps(CFG))
-        code, out = _run(hsctl.cmd_surrender, ns, ctx)
+        code, out = _run(hsctl.cmd_surrender,
+                         _ns(action="set", rules=json.dumps(CFG)), ctx)
         self.assertEqual(code, hsctl.EXIT_API)
         self.assertIn("卡名有误", out)
         self.assertIn("decks[0].when.card[0]", out)
-
-    def test_set_reports_corrections(self):
-        ctx = FakeCtx(post_result={"ok": True, "message": "已保存",
-                                   "corrected": [{"from": "阿莉扎娜",
-                                                  "to": "阿扎莉娜"}]})
-        ns = _ns(action="set", rules=json.dumps(CFG))
-        _, out = _run(hsctl.cmd_surrender, ns, ctx)
+        corrected = FakeCtx(post_result={"ok": True, "message": "已保存",
+                                         "corrected": [{"from": "阿莉扎娜",
+                                                        "to": "阿扎莉娜"}]})
+        _, out = _run(hsctl.cmd_surrender,
+                      _ns(action="set", rules=json.dumps(CFG)), corrected)
         self.assertIn("已自动纠正", out)
 
     def test_set_without_payload_is_usage_error(self):

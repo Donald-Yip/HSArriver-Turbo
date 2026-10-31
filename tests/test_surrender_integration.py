@@ -140,11 +140,6 @@ class OpponentTurnTests(_Base):
         self.assertEqual(1, len(self.concedes))
         self.assertIn("牧师 · 阿扎莉娜 + 神秘访客", self.concedes[0])
         self.assertTrue(FSM_action._concede_triggered)
-
-    def test_log_mentions_opponent_and_evidence(self):
-        self._facts(played=[_event("REV_246", "opponent", 3)],
-                    revealed=[_event("JAIL_430", "opponent", 0)])
-        self._step(self._snapshot(is_my_turn=False, turn=3))
         joined = "\n".join(self.logs)
         self.assertIn("识别为对方卡组", joined)
         self.assertIn("对方职业", joined)
@@ -159,34 +154,27 @@ class OpponentTurnTests(_Base):
 
 class DirectionTests(_Base):
     def test_self_cards_never_concede(self):
-        self._facts(played=[_event("REV_246", "self", 3)],
-                    revealed=[_event("JAIL_430", "self", 0)])
-        self._step(self._snapshot(is_my_turn=False, turn=3))
-        self.assertEqual([], self.concedes)
-        self.assertFalse(FSM_action._concede_triggered)
-
-    def test_self_and_opponent_mixed_only_counts_opponent_side(self):
-        # 我方也有一张，但对方没有 → 仍然不触发。
-        self._facts(played=[_event("REV_246", "self", 3)],
-                    revealed=[_event("JAIL_430", "opponent", 0)])
-        self._step(self._snapshot(is_my_turn=False, turn=3))
-        self.assertEqual([], self.concedes)
+        # 只判对方：只有我方持有特征卡不触发；我方+对方混合也不够。
+        for case, played, revealed in (
+            ("self-only", "self", "self"),
+            ("mixed", "self", "opponent"),
+        ):
+            with self.subTest(case=case):
+                self._facts(played=[_event("REV_246", played, 3)],
+                            revealed=[_event("JAIL_430", revealed, 0)])
+                self._step(self._snapshot(is_my_turn=False, turn=3))
+                self.assertEqual([], self.concedes)
+                self.assertFalse(FSM_action._concede_triggered)
 
 
 class GuardTests(_Base):
-    def test_name_mismatch_pauses_rule_surrender(self):
+    def test_name_mismatch_pauses_and_warns_once(self):
         FSM_action._name_match_result = {"matched": False, "config": "A#1",
                                          "players": {"1": "B#2"}}
         self._facts(played=[_event("REV_246", "opponent", 3)],
                     revealed=[_event("JAIL_430", "opponent", 0)])
         self._step(self._snapshot(is_my_turn=False, turn=3))
         self.assertEqual([], self.concedes)
-        self.assertTrue(any("暂停判定" in line for line in self.logs))
-
-    def test_name_mismatch_warns_only_once_per_game(self):
-        FSM_action._name_match_result = {"matched": False, "config": "A#1",
-                                         "players": {"1": "B#2"}}
-        self._step(self._snapshot(is_my_turn=False, turn=3))
         self._step(self._snapshot(is_my_turn=False, turn=3))
         self.assertEqual(1, len([line for line in self.logs
                                  if "暂停判定" in line]))

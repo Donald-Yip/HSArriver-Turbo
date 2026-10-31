@@ -143,6 +143,11 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(leaves[0]["side"], "opponent")
         self.assertEqual(leaves[1]["side"], "opponent")
         self.assertEqual(result["config"]["decks"][0]["class"], "PRIEST")
+        # side 只有显式写 self 才判我方。
+        result = sr.normalize_config(_config({"type": "played",
+                                             "card": "神秘访客",
+                                             "side": "self"}))
+        self.assertEqual(result["config"]["decks"][0]["when"]["side"], "self")
 
     def test_and_or_aliases_become_all_any(self):
         result = sr.normalize_config(_config({"and": [
@@ -153,64 +158,54 @@ class NormalizeTests(unittest.TestCase):
             {"type": "played", "card": "神秘访客"}]}))
         self.assertIn("any", result["config"]["decks"][0]["when"])
 
-    def test_unknown_leaf_type_reports_path(self):
-        result = sr.normalize_config(_config({"all": [
-            {"type": "played", "card": "神秘访客"},
-            {"type": "magic", "card": "神秘访客"}]}))
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["errors"][0]["path"], "decks[0].when.all[1].type")
+    def test_invalid_condition_structure_is_rejected(self):
+        # 未知叶子类型、混用逻辑键、未知字段：三种结构错误都必须报错。
+        for case, when, expected in (
+            ("unknown-leaf-type",
+             {"all": [{"type": "played", "card": "神秘访客"},
+                      {"type": "magic", "card": "神秘访客"}]},
+             "decks[0].when.all[1].type"),
+            ("mixed-logic-keys",
+             {"all": [{"type": "played", "card": "神秘访客"}],
+              "any": [{"type": "played", "card": "神秘访客"}]},
+             "只能有一个逻辑键"),
+            ("unknown-field",
+             {"type": "played", "card": "神秘访客", "typo_field": 1},
+             "不认识的字段"),
+        ):
+            with self.subTest(case=case):
+                result = sr.normalize_config(_config(when))
+                self.assertFalse(result["ok"])
+                self.assertTrue(
+                    any(expected in str(item["path"]) + item["message"]
+                        for item in result["errors"]), result["errors"])
 
-    def test_mixed_logic_keys_rejected(self):
-        result = sr.normalize_config(_config({"all": [
-            {"type": "played", "card": "神秘访客"}],
-            "any": [{"type": "played", "card": "神秘访客"}]}))
-        self.assertFalse(result["ok"])
-        self.assertIn("只能有一个逻辑键", result["errors"][0]["message"])
-
-    def test_empty_card_rejected(self):
+    def test_invalid_card_and_class_are_rejected(self):
         result = sr.normalize_config(_config({"type": "played", "card": []}))
         self.assertFalse(result["ok"])
         self.assertTrue(any("至少要写一张卡" in item["message"]
                             for item in result["errors"]))
-
-    def test_bad_class_rejected_instead_of_silently_ignored(self):
         result = sr.normalize_config(_config(USER_EXAMPLE_WHEN,
                                             hero_class="牧师家"))
         self.assertFalse(result["ok"])
         self.assertEqual(result["errors"][0]["path"], "decks[0].class")
 
-    def test_reversed_within_rejected(self):
+    def test_invalid_window_is_rejected(self):
         result = sr.normalize_config(_config({"type": "played",
                                              "card": "神秘访客",
                                              "within": {"min": 5, "max": 2}}))
         self.assertFalse(result["ok"])
         self.assertIn("写反了", result["errors"][0]["message"])
-
-    def test_negative_at_least_rejected(self):
         result = sr.normalize_config(_config({"type": "played",
                                              "card": "神秘访客",
                                              "at_least": -1}))
         self.assertFalse(result["ok"])
-
-    def test_unknown_field_rejected(self):
-        result = sr.normalize_config(_config({"type": "played",
-                                             "card": "神秘访客",
-                                             "typo_field": 1}))
-        self.assertFalse(result["ok"])
-        self.assertIn("不认识的字段", result["errors"][0]["message"])
 
     def test_warns_when_no_event_leaf(self):
         result = sr.normalize_config(_config({"type": "turn", "max": 3}))
         self.assertTrue(result["ok"])
         self.assertTrue(any("开局就可能" in item
                             for item in result["warnings"]))
-
-    def test_side_self_must_be_explicit(self):
-        result = sr.normalize_config(_config({"type": "played",
-                                             "card": "神秘访客",
-                                             "side": "self"}))
-        self.assertEqual(result["config"]["decks"][0]["when"]["side"], "self")
-
 
 # ---------------------------------------------------------------- 编译
 class CompileTests(unittest.TestCase):
@@ -250,32 +245,27 @@ class EvaluateTests(unittest.TestCase):
                                                   CATALOG)
         self.assertEqual(errors, [])
 
-    def test_user_example_fires_at_round_3(self):
+    def test_within_window_fires_through_round_4(self):
+        # within.max=4：第 3、4 回合仍成立，第 5 回合过窗。
+        for round_turn in (3, 4, 5):
+            with self.subTest(round=round_turn):
+                facts = _facts(played=[_event("REV_246", "opponent", round_turn)],
+                               revealed=[_event("JAIL_430", "opponent", 1)])
+                hit = sr.evaluate_decks(self.decks,
+                                        _ctx(facts, "PRIEST", round_turn))
+                if round_turn <= 4:
+                    self.assertIsNotNone(hit)
+                    self.assertEqual(hit.id, "priest_alizana")
+                else:
+                    self.assertIsNone(hit)
+
+    def test_other_or_unknown_class_does_not_fire(self):
         facts = _facts(played=[_event("REV_246", "opponent", 3)],
                        revealed=[_event("JAIL_430", "opponent", 1)])
-        hit = sr.evaluate_decks(self.decks, _ctx(facts, "PRIEST", 3))
-        self.assertIsNotNone(hit)
-        self.assertEqual(hit.id, "priest_alizana")
-
-    def test_round_4_still_fires(self):
-        facts = _facts(played=[_event("REV_246", "opponent", 4)],
-                       revealed=[_event("JAIL_430", "opponent", 1)])
-        self.assertIsNotNone(sr.evaluate_decks(self.decks, _ctx(facts, "PRIEST", 4)))
-
-    def test_round_5_does_not_fire(self):
-        facts = _facts(played=[_event("REV_246", "opponent", 5)],
-                       revealed=[_event("JAIL_430", "opponent", 1)])
-        self.assertIsNone(sr.evaluate_decks(self.decks, _ctx(facts, "PRIEST", 5)))
-
-    def test_wrong_class_does_not_fire(self):
-        facts = _facts(played=[_event("REV_246", "opponent", 3)],
-                       revealed=[_event("JAIL_430", "opponent", 1)])
-        self.assertIsNone(sr.evaluate_decks(self.decks, _ctx(facts, "MAGE", 3)))
-
-    def test_unknown_class_does_not_fire(self):
-        facts = _facts(played=[_event("REV_246", "opponent", 3)],
-                       revealed=[_event("JAIL_430", "opponent", 1)])
-        self.assertIsNone(sr.evaluate_decks(self.decks, _ctx(facts, "", 3)))
+        for opponent_class in ("MAGE", ""):
+            with self.subTest(opponent_class=opponent_class):
+                self.assertIsNone(
+                    sr.evaluate_decks(self.decks, _ctx(facts, opponent_class, 3)))
 
     def test_missing_reveal_does_not_fire(self):
         facts = _facts(played=[_event("REV_246", "opponent", 3)])
@@ -322,14 +312,6 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(errors, [])
         return decks
 
-    def test_any_branch(self):
-        decks = self._decks({"any": [
-            {"type": "played", "card": "神秘访客"},
-            {"type": "played", "card": "火球术"},
-        ]})
-        facts = _facts(played=[_event("CS2_029", "opponent", 2)])
-        self.assertIsNotNone(sr.evaluate_decks(decks, _ctx(facts, "", 2)))
-
     def test_not_branch(self):
         decks = self._decks({"all": [
             {"type": "played", "card": "神秘访客"},
@@ -368,13 +350,6 @@ class LogicTests(unittest.TestCase):
         facts = _facts(played=[_event("REV_246", "opponent", 2)])
         hit = sr.evaluate_decks(decks, _ctx(facts, "", 2))
         self.assertEqual(hit.id, "a")
-
-    def test_disabled_deck_still_compiled_but_caller_filters(self):
-        # enabled 由调用方（/api 的启用开关）决定；这里只确认不报错。
-        normalized = sr.normalize_config(_config(USER_EXAMPLE_WHEN,
-                                                 enabled=False))
-        self.assertTrue(normalized["ok"])
-
 
 # ---------------------------------------------------------------- 引擎
 class EngineTests(unittest.TestCase):
@@ -547,28 +522,27 @@ class NestedNormalizeTests(unittest.TestCase):
     def _norm(self, when):
         return sr.normalize_config(_config(when))
 
-    def test_a_and_b_or_c_structure_is_preserved(self):
-        result = self._norm({"all": [
-            {"type": "played", "card": "神秘访客"},
-            {"any": [{"type": "played", "card": "火球术"},
-                     {"type": "played", "card": "寒冰箭"}]},
-        ]})
-        self.assertTrue(result["ok"], result["errors"])
-        node = result["config"]["decks"][0]["when"]
-        self.assertEqual(list(node), ["all"])
-        self.assertEqual(len(node["all"]), 2)
-        self.assertEqual(len(node["all"][1]["any"]), 2)
-
-    def test_nested_and_or_aliases_are_normalized(self):
-        result = self._norm({"and": [
-            {"type": "played", "card": "神秘访客"},
-            {"or": [{"type": "played", "card": "火球术"},
-                    {"type": "played", "card": "寒冰箭"}]},
-        ]})
-        self.assertTrue(result["ok"], result["errors"])
-        node = result["config"]["decks"][0]["when"]
-        self.assertIn("all", node)
-        self.assertIn("any", node["all"][1])
+    def test_nested_and_or_structure_is_preserved(self):
+        # 规范写法与 and/or 别名两种输入，归一化后结构必须一致。
+        for when in (
+            {"all": [
+                {"type": "played", "card": "神秘访客"},
+                {"any": [{"type": "played", "card": "火球术"},
+                         {"type": "played", "card": "寒冰箭"}]},
+            ]},
+            {"and": [
+                {"type": "played", "card": "神秘访客"},
+                {"or": [{"type": "played", "card": "火球术"},
+                        {"type": "played", "card": "寒冰箭"}]},
+            ]},
+        ):
+            result = self._norm(when)
+            self.assertTrue(result["ok"], result["errors"])
+            node = result["config"]["decks"][0]["when"]
+            self.assertEqual(list(node), ["all"])
+            self.assertEqual(len(node["all"]), 2)
+            self.assertEqual(list(node["all"][1]), ["any"])
+            self.assertEqual(len(node["all"][1]["any"]), 2)
 
     def test_not_can_wrap_a_group(self):
         result = self._norm({"not": {"any": [

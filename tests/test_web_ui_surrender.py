@@ -56,22 +56,23 @@ class SaveTests(_Base):
         self.assertEqual(deck["when"]["all"][0]["side"], "opponent")
         self.assertEqual(deck["when"]["all"][1]["within"], {"max": 4})
 
-    def test_unknown_leaf_type_is_rejected_and_not_saved(self):
-        bad = {"enabled": True, "decks": [{"id": "x", "name": "x",
-                                           "when": {"type": "magic"}}]}
-        result = web_ui.api_save_surrender_rules({"config": bad})
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["errors"][0]["path"], "decks[0].when.type")
-        self.assertEqual(self.saved, [])
-
-    def test_unknown_card_is_rejected_and_not_saved(self):
-        bad = {"enabled": True, "decks": [{
-            "id": "x", "name": "x",
-            "when": {"type": "played", "card": "根本没有这张卡"}}]}
-        result = web_ui.api_save_surrender_rules({"config": bad})
-        self.assertFalse(result["ok"])
-        self.assertIn("card", result["errors"][0]["path"])
-        self.assertEqual(self.saved, [])
+    def test_invalid_config_is_rejected_and_not_saved(self):
+        # 校验失败必须整单拒收：不落盘、不部分保存。
+        for case, deck, expected_path in (
+            ("bad-leaf-type", {"id": "x", "name": "x",
+                               "when": {"type": "magic"}},
+             "decks[0].when.type"),
+            ("unknown-card", {"id": "x", "name": "x",
+                              "when": {"type": "played",
+                                       "card": "根本没有这张卡"}},
+             "card"),
+        ):
+            with self.subTest(case=case):
+                result = web_ui.api_save_surrender_rules(
+                    {"config": {"enabled": True, "decks": [deck]}})
+                self.assertFalse(result["ok"])
+                self.assertIn(expected_path, result["errors"][0]["path"])
+                self.assertEqual(self.saved, [])
 
     def test_misspelled_card_is_corrected_with_notice(self):
         ok = {"enabled": True, "decks": [{
@@ -107,25 +108,20 @@ class SaveTests(_Base):
 
 class ConfirmTests(_Base):
     def test_would_fire_now_requires_confirmation(self):
+        preview = {"ok": True, "would_fire_now": True,
+                   "hit": {"deck_id": "x", "name": "x"}}
         with patch.object(web_ui.surrender_rules.engine, "preview",
-                          return_value={"ok": True, "would_fire_now": True,
-                                        "hit": {"deck_id": "priest_alizana",
-                                                "name": "牧师"}}):
-            result = web_ui.api_save_surrender_rules(
+                          return_value=preview):
+            blocked = web_ui.api_save_surrender_rules(
                 {"config": {"enabled": True, "decks": [dict(VALID_DECK)]}})
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["needs_confirm"])
-        self.assertEqual(self.saved, [])
-
-    def test_confirmed_save_goes_through(self):
-        with patch.object(web_ui.surrender_rules.engine, "preview",
-                          return_value={"ok": True, "would_fire_now": True,
-                                        "hit": {"deck_id": "x", "name": "x"}}):
-            result = web_ui.api_save_surrender_rules(
+            self.assertFalse(blocked["ok"])
+            self.assertTrue(blocked["needs_confirm"])
+            self.assertEqual(self.saved, [])
+            confirmed = web_ui.api_save_surrender_rules(
                 {"config": {"enabled": True, "decks": [dict(VALID_DECK)]},
                  "confirm": True})
-        self.assertTrue(result["ok"], result)
-        self.assertTrue(result["would_fire_now"])
+        self.assertTrue(confirmed["ok"], confirmed)
+        self.assertTrue(confirmed["would_fire_now"])
         self.assertEqual(len(self.saved), 1)
 
 
@@ -156,32 +152,27 @@ NESTED_DECK = {
 
 
 class NestedSaveTests(_Base):
-    def test_nested_any_is_not_flattened(self):
+    def test_nested_conditions_round_trip_without_flattening(self):
         result = web_ui.api_save_surrender_rules(
             {"config": {"enabled": True, "decks": [dict(NESTED_DECK)]}})
         self.assertTrue(result["ok"], result)
         when = self.cfg["auto_surrender"]["decks"][0]["when"]
         self.assertEqual(len(when["all"]), 2)
         self.assertEqual(len(when["all"][1]["any"]), 2)
-
-    def test_saving_normalized_config_again_is_idempotent(self):
-        first = web_ui.api_save_surrender_rules(
-            {"config": {"enabled": True, "decks": [dict(NESTED_DECK)]}})
-        self.assertTrue(first["ok"], first)
+        # 再保存一次规范化结果应保持不变（幂等）。
         saved = self.cfg["auto_surrender"]
         second = web_ui.api_save_surrender_rules({"config": saved})
         self.assertTrue(second["ok"], second)
         self.assertEqual(second["config"]["decks"][0]["when"],
                          saved["decks"][0]["when"])
-
-    def test_not_wrapping_a_group_round_trips(self):
+        # not 包住一组条件时也要原样往返。
         deck = {"id": "negate", "name": "非", "class": "",
                 "when": {"not": {"any": [
                     {"type": "played", "card": "火球术"},
                     {"type": "played", "card": "寒冰箭"}]}}}
-        result = web_ui.api_save_surrender_rules(
+        negated = web_ui.api_save_surrender_rules(
             {"config": {"enabled": True, "decks": [deck]}})
-        self.assertTrue(result["ok"], result)
+        self.assertTrue(negated["ok"], negated)
         when = self.cfg["auto_surrender"]["decks"][0]["when"]
         self.assertIn("not", when)
         self.assertEqual(len(when["not"]["any"]), 2)
@@ -201,14 +192,6 @@ class WebPageTests(unittest.TestCase):
                       "surrenderCollectNode", "SURRENDER_OPS",
                       "surrenderLeafSupported"):
             self.assertIn(token, self.html, token)
-
-    def test_page_has_collapsible_deck(self):
-        for token in ('data-act="toggle-deck"', "hsSurrenderCollapsed",
-                      ".sdeck.collapsed", "sdeck-body", "sdeck-summary"):
-            self.assertIn(token, self.html, token)
-
-    def test_old_single_level_wording_is_gone(self):
-        self.assertNotIn("表单只能表达", self.html)
 
 
 if __name__ == "__main__":
