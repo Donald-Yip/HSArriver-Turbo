@@ -1,0 +1,110 @@
+# R02F Test Cluster Reduction
+
+## Task ID
+
+R02F
+
+## Goal
+
+Reduce duplicated, implementation-coupled, and low-signal tests in four
+behavior clusters while keeping every safety contract that guards real
+mouse/keyboard input.
+
+The user-facing trigger: the default headless gate had grown from the R02E
+target of 1,495 to 1,826-1,851 tests because each bug fix added a new
+regression file. The reduction is quality-first: no fixed numeric target.
+
+## Scope
+
+Four independently revertible batches:
+
+- B1 surrender cluster: `tests/test_surrender_rules.py`,
+  `tests/test_surrender_integration.py`, `tests/test_hsctl_surrender.py`,
+  `tests/test_web_ui_surrender.py`.
+- B2 display/DPI cluster.
+- B3 target-choice cluster.
+- B4 human-like timing cluster.
+- Low-risk leftovers: no-assert/constant assertions, merging the small
+  local-strategy regression files, removing empty `tests/native` and
+  `tests/tooling` directories, and refreshing stale test-count docs.
+
+Deletion criteria (user-approved):
+
+1. Duplicate coverage: the same behavior is already gatekept at a higher
+   level; keep the higher-level test and merge the low-level copies.
+2. Private-attribute-only assertions that do not protect user-visible
+   behavior.
+3. No assertions, or assertions that only re-state constants/HTML strings.
+4. Prefer merging sibling tests into one subTest matrix over deleting them.
+
+Red lines (user-approved): click safety, `battle_entry`, `hs_restart`, and
+surrender rule normalization keep at least one test each. Rules-level
+surrender coverage is not to be dismantled.
+
+## Current Increment
+
+B1 is executed in this task: the surrender cluster is consolidated from
+109 to 85 default tests by merging sibling cases (window boundary, class
+gating, rejection matrices, CLI on/off, confirm guard, nested round-trip)
+and deleting assertions already covered by rules-level or integration-level
+tests.
+
+## Non-Goals
+
+- No production behavior changes.
+- No change to `tools/run_headless_tests.py`, CI workflows, or gate policy.
+- No deletion of fail-closed, ambiguity, cancellation, deadline, safe-click,
+  or real user/API contract coverage.
+- No test moved to a new framework or opt-in gate.
+
+## Verification
+
+Each batch must be verified with the default headless runner and must not
+add a single failure relative to the recorded pre-batch baseline:
+
+```powershell
+$env:PYTHONUTF8='1'; uv run python tools/run_headless_tests.py
+```
+
+B1 pre-batch baseline: 1,850 run / 3 known screen-size dependent failures
+(local 1920x1080 DPI assertions, unrelated to the surrender cluster).
+B1 post-batch result: 1,826 run / 0 failures / 0 errors.
+
+## Allowed Files
+
+- `tests/test_surrender_*.py`
+- `tests/test_hsctl_surrender.py`
+- `tests/test_web_ui_surrender.py`
+- `tests/test_display_mapping.py`
+- `tests/test_calibrate_tool.py`
+- `tests/test_screen_regions.py`
+- `tests/test_overlay_dpi_scaling.py`
+- `tests/test_dpi_is_not_a_gate.py`
+- `tests/test_desktop_capture_scaled_roi.py`
+- `tests/test_validator_client_size.py`
+- `tests/test_choose_one.py`
+- `tests/test_choose_skill.py`
+- `tests/test_assemble_choice.py`
+- `tests/test_four_option_choices.py`
+- `tests/test_timeline_choice.py`
+- `tests/test_discover_with_target.py`
+- `tests/test_select_target_after_choice.py`
+- `tests/test_hand_or_board_targets.py`
+- `tests/test_targeted_battlecries.py`
+- `tests/test_friendly_hand_target_battlecries.py`
+- `tests/test_starship_launch.py`
+- `tests/test_targeted_locations.py`
+- `tests/test_human_like_*.py`
+- `tests/test_overlay_human_like_status.py`
+- `tests/test_strategy_*.py`
+- `tests/test_*strategy*.py`
+- `docs/tasks/R02F-*.md`
+- `docs/testing/*.md`
+- `docs/FEATURES.md`
+
+## Forbidden Files
+
+- Any production module under `src/` or any legacy root module
+- Any test file not listed above
+- `pyproject.toml`, `uv.lock`
+- Runtime configs, logs, screenshots, and Hearthstone interactions
