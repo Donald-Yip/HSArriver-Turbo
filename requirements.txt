@@ -1,12 +1,31 @@
-# DEPRECATED compatibility manifest for legacy self-check and tooling only.
-# Do not install with pip. The authoritative dependency contract is pyproject.toml + uv.lock.
-# R02 cleanup: migrate selfcheck/tooling to pyproject.toml and delete this compatibility file.
-# Run `uv sync` and all Python commands through `uv run python ...`.
+# ============================================================================
+# HearthstoneLegendArriver 依赖清单（群友安装用：Python 3.12 + pip）
+#
+#   1) 先准备 3.12 环境（已经有的跳过）：
+#        conda create -n HTL python=3.12 -y
+#        conda activate HTL
+#   2) 在解压目录里执行：
+#        pip install -r requirements.txt
+#   3) 管理员 PowerShell 启动：
+#        python web_ui.py
+#
+# 说明：
+#   * 项目自己的代码包（src/hslegend）**不用单独安装**：web_ui.py / hsctl.py /
+#     main.py 启动时会自动把 src/ 加进 sys.path（见 _srcpath.py）。
+#   * 更省事的方式是 uv（推荐，自动管 Python）：解压后 `uv sync`，
+#     然后管理员 `uv run python web_ui.py`，见 README「安装（5 步）」。
+#   * 版本必须与 pyproject.toml / uv.lock 保持一致；下面三个 opencv-* 必须
+#     同版本 —— paddleocr 会顺带要求 opencv-python，不钉死就会装成更新的
+#     版本，导致 cv2 版本和 headless 不一致（截图/识别玄学问题的来源）。
+#   * Python 必须 3.12（64 位）：3.13+ 没有 paddlepaddle 轮子，装不上。
+# ============================================================================
 click==8.4.2
 keyboard==0.13.5
 mcp==2.3.0
 numpy==2.5.2
 opencv_python_headless==4.10.0.84
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
 paddleocr==2.10.0
 paddlepaddle==2.6.2
 Pillow==12.3.0

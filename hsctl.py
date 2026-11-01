@@ -20,12 +20,13 @@ JSON」的翻译与结果渲染，不含任何自动化逻辑。所以可以用�
     hsctl status --watch 2       # 每 2 秒刷新一行状态
     hsctl log -f                 # 实时跟随日志（Ctrl+C 退出）
     hsctl start | stop | resume | prepare
-    hsctl delays set pre_action_delay_seconds=5
+    hsctl delays set mulligan_ready_delay_seconds=20
     hsctl human-like set --enabled
     hsctl surrender set --file rules.json    # 卡组识别投降（只判对方）
     hsctl card 神秘访客                      # 查卡名（本地，不联网）
     hsctl schedule at 22:30 --end 23:30
     hsctl serve start            # 后台拉起控制台（网页仍可用）
+    hsctl serve install-watchdog # 看门狗：控制台崩了每 5 分钟自动拉起（管理员跑一次）
     hsctl --json status          # 机器可读输出，给 agent 用
 
 退出码（agent 靠它分支）::
@@ -39,6 +40,10 @@ JSON」的翻译与结果渲染，不含任何自动化逻辑。所以可以用�
 """
 
 from __future__ import annotations
+
+# 兼容「只装 requirements.txt、没装项目包」的旧式部署：把仓库内 src/ 加进 sys.path，
+# 这样 click.py / FSM_action.py 里的 `from hslegend...` 也能导入（等价 pip install -e .）。
+import _srcpath  # noqa: F401
 
 import argparse
 import json
@@ -64,6 +69,14 @@ PID_FILE = ROOT / "log" / "ui_server.pid"
 SERVE_LOG = ROOT / "log" / "cli_serve.log"
 # 「最高权限」计划任务的启动器（由 serve install-task 生成；任务指向它而不是内联命令）
 TASK_LAUNCHER = ROOT / "log" / "hs_serve_elevated.cmd"
+# 「看门狗」计划任务：每 N 分钟跑一次隐藏启动器，控制台没在跑就把它拉起来。
+# 为什么用 .vbs：`wscript.exe //B` 跑 VBS 不弹黑框；.cmd 会闪一个控制台窗口。
+WATCHDOG_TASK_NAME = "HSLegendArriver_watchdog"
+WATCHDOG_LAUNCHER = ROOT / "log" / "hs_serve_watchdog.vbs"
+WATCHDOG_INTERVAL_MINUTES = 5
+# 「手动停止」标记文件：与 src/safety/resident_intent.py 的 DEFAULT_PATH 同一个文件
+# （web_ui 侧写它，hsctl --auto 读它；这里显式传路径，测试才不必碰真实 log/）。
+RESIDENT_INTENT_PATH = ROOT / "log" / "resident_intent.json"
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_BASE_PORT = 8765
@@ -561,12 +574,12 @@ RESTART_WAIT_SECONDS = 300.0
 RESTART_POLL_SECONDS = 2.0
 
 # 延时字段：与 config.py 的 _USER_DELAY_KEYS 一一对应（这里只用于帮助文本）。
+# 旧版固定回合开始延时（每张开局卡 / 每回合前）已废弃、不在白名单里
+# （见 config._DEPRECATED_DELAY_KEYS）：现在以右侧「结束回合」按钮的 OCR 为准。
 DELAY_KEYS = (
     "mulligan_ready_delay_seconds",
     "mulligan_post_ocr_delay_seconds",
     "mulligan_retry_delay_seconds",
-    "first_turn_per_card_delay_seconds",
-    "pre_action_delay_seconds",
     "post_action_delay_seconds",
     "draw_extra_delay_per_card_seconds",
     "discover_target_delay_seconds",
@@ -576,8 +589,6 @@ DELAY_KEYS = (
 DELAY_EFFECT = {
     "mulligan_ready_delay_seconds": "live",
     "mulligan_retry_delay_seconds": "live",
-    "pre_action_delay_seconds": "live",
-    "first_turn_per_card_delay_seconds": "live",
     "discover_target_delay_seconds": "live",
     "mulligan_post_ocr_delay_seconds": "next_start",
     "post_action_delay_seconds": "next_start",
@@ -799,15 +810,40 @@ def render_status(s: dict, url: str = "") -> str:
         f" · 本局 {_dur(s.get('game_elapsed_sec'))}"
     )
 
-    lv = s.get("liveness") or {}
-    lines.append(
-        f"存活检测 {_flag(lv.get('enabled'))} · 炉石 {_num(lv.get('status'))}"
-        f" · 停滞 {_num(lv.get('log_age'))}s"
-        f" ({_num(lv.get('log_stale_warn_seconds'))}s 告警 /"
-        f" {_num(lv.get('log_stale_stop_seconds'))}s 停止)"
-    )
-    if lv.get("alert"):
-        lines.append(f"         ⚠️ {lv['alert']}")
+    res = s.get("resident")
+    if isinstance(res, dict) and res:
+        if not res.get("enabled"):
+            res_text = "关"
+        else:
+            mode = RESIDENT_MODE_LABELS.get(
+                str(res.get("mode") or ""), res.get("mode") or "-"
+            )
+            deck = res.get("deck_index")
+            state_label = RESIDENT_STATE_LABELS.get(
+                str(res.get("state") or ""), res.get("state") or "-"
+            )
+            # 等待定时窗口时把原因（如「等待定时 23:00 开始」）并进状态标签；
+            # 老版本控制台没有该字段，.get 容错。
+            waiting_reason = res.get("waiting_reason")
+            if waiting_reason:
+                state_label = f"{state_label}（{waiting_reason}）"
+            warn_seconds = float(res.get("warn_seconds") or 0.0)
+            warn_text = f" · 提前告警 {warn_seconds:.0f}s" if warn_seconds > 0 else ""
+            res_text = (
+                f"开 · {state_label}"
+                f" · {mode} · 卡组 {deck or '未指定'}"
+                f" · 对局中 {float(res.get('stale_in_game_seconds') or 0):.0f}s"
+                f"/其它 {float(res.get('stale_other_seconds') or 0):.0f}s"
+                f"{warn_text}"
+                f" · 本窗口重启 {int(res.get('restarts_in_window') or 0)}"
+                f"/{int(res.get('max_restarts') or 0)}"
+                + ("（dry-run）" if res.get("dry_run") else "")
+            )
+        lines.append(f"守护     {res_text}")
+        if res.get("warning"):
+            lines.append(f"         ⚠️ {res['warning']}")
+    else:
+        lines.append("守护     （控制台未提供守护状态，可能是旧版本）")
 
     cd = s.get("concede") or {}
     det = s.get("concede_detect") or {}
@@ -936,6 +972,21 @@ def _ok_message(ctx: Ctx, payload: dict) -> int:
 
 
 # --------------------------------------------------------------------- 环境自诊
+def _console_python_ok(result: dict) -> bool:
+    """控制台自检里的 Python 项是否达标（口径：**任何 3.12 都算合格**）。
+
+    以前这里要求「控制台解释器路径 == 调用 hsctl 的解释器路径」，于是用 conda
+    3.12 起的控制台会被判成 ``env_wrong_interpreter`` —— 版本明明是对的，只是
+    不是同一个环境。现在只认控制台自己跑出来的 python 项（3.12 + 64 位）；路径
+    只作为信息展示，不再参与判定。真正的版本规则仍在 ``selfcheck.python_item``。
+    """
+    for item in result.get("items") or []:
+        if item.get("key") == "python":
+            return item.get("status") == "ok"
+    # 老控制台不带 items：退回按版本号字符串判断（3.12.x）。
+    return str(result.get("python") or "").startswith("3.12.")
+
+
 def _console_report(ctx: Ctx) -> dict:
     """控制台侧的诊断信息（连不上就说明没跑，不算错误）。"""
     info = read_port_file() or {}
@@ -978,9 +1029,7 @@ def _console_report(ctx: Ctx) -> dict:
         if executable:
             report["executable"] = executable
             report["console_python"] = result.get("python")
-            report["console_python_ok"] = bool(result.get("ok")) and report[
-                "executable"
-            ] == _normalize_python(sys.executable)
+            report["console_python_ok"] = _console_python_ok(result)
     except (ApiFailure, TransportError):
         pass
     return report
@@ -1469,65 +1518,159 @@ def cmd_mode(args, ctx: Ctx) -> int:
     return _ok_message(ctx, payload)
 
 
-def cmd_watchdog(args, ctx: Ctx) -> int:
-    """中断重启看门狗：日志长时间不变就重启炉石并把这一局重开。
+# 守护（原常驻）：状态码 → 中文。与 web_ui/log_overlay 的文案保持一致（各自渲染，
+# 不跨模块 import —— log_overlay 跑在浮窗线程里，hsctl 是独立进程）。
+RESIDENT_STATE_LABELS = {
+    "disabled": "已关闭",
+    "countdown": "倒计时中（等炉石稳定）",
+    "starting": "启动中",
+    "running": "运行中（守候中）",
+    "waiting_schedule": "等待定时窗口",
+    "recovering": "恢复中（重启炉石/重进对战）",
+    "paused": "已暂停",
+    "paused_exhausted": "已暂停（重启次数用尽）",
+    "error": "出错",
+    "cancelled": "已取消",
+}
+RESIDENT_MODE_LABELS = {"standard": "标准", "wild": "狂野", "casual": "休闲"}
+RESIDENT_MODE_ALIASES = {
+    "standard": "standard",
+    "wild": "wild",
+    "casual": "casual",
+    "标准": "standard",
+    "狂野": "wild",
+    "休闲": "casual",
+}
+
+
+def _resident_state_text(res: dict) -> str:
+    """把 /api/status 的 resident 段渲染成一段人读文本（缺字段也不崩）。"""
+    res = res if isinstance(res, dict) else {}
+    if not res:
+        return (
+            "守护：控制台没有提供守护状态（web_ui.py 可能是旧版本，"
+            "重启控制台后就有了）"
+        )
+    mode = RESIDENT_MODE_LABELS.get(str(res.get("mode") or ""), res.get("mode") or "-")
+    deck = res.get("deck_index")
+    target = f"{mode} · 卡组 {deck}" if deck else f"{mode} · 卡组 未指定"
+    age = res.get("log_age")
+    age_text = "—" if age is None else f"{float(age):.0f}s"
+    state = RESIDENT_STATE_LABELS.get(str(res.get("state") or ""), res.get("state") or "-")
+    warn_seconds = float(res.get("warn_seconds") or 0.0)
+    warn_text = f"{warn_seconds:.0f}s（0=关）" if warn_seconds > 0 else "关"
+    lines = [
+        "守护（无人值守自愈）",
+        f"  开关      : {_flag(res.get('enabled'))}",
+        f"  状态      : {state}",
+        f"  目标      : {target}",
+        (
+            f"  日志判定  : 对局中 ≥{float(res.get('stale_in_game_seconds') or 0):.0f}s"
+            f" / 其他界面 ≥{float(res.get('stale_other_seconds') or 0):.0f}s"
+            f"（当前停滞 {age_text}）"
+        ),
+        f"  提前告警  : {warn_text}",
+        (
+            f"  重启配额  : {float(res.get('window_seconds') or 0) / 60:.0f} 分钟内最多 "
+            f"{int(res.get('max_restarts') or 0)} 次"
+            f"（已用 {int(res.get('restarts_in_window') or 0)} 次，"
+            f"剩 {int(res.get('restarts_left') or 0)} 次，"
+            f"累计 {int(res.get('restarts_total') or 0)} 次）"
+        ),
+        f"  dry-run   : {_flag(res.get('dry_run'))}",
+    ]
+    if res.get("paused_reason"):
+        lines.append(f"  暂停原因  : {res['paused_reason']}")
+    # 等待定时窗口（waiting_schedule）时控制台会带 waiting_reason，紧跟在状态后面。
+    if res.get("waiting_reason"):
+        lines.insert(3, f"  等待原因  : {res['waiting_reason']}")
+    if res.get("warning"):
+        lines.append(f"  最近告警  : ⚠️ {res['warning']}")
+    if res.get("message"):
+        lines.append(f"  上次事件  : {res['message']}")
+    return "\n".join(lines)
+
+
+def cmd_resident(args, ctx: Ctx) -> int:
+    """守护（原常驻）：无人值守地等待/开局/卡住自愈（网页卡片与浮窗页签的 CLI 入口）。
 
     用法：
-      hsctl watchdog on|off            开关
-      hsctl watchdog status           看当前状态（默认）
-      hsctl watchdog set --stale 300 --max-restarts 3 --window 600
+      hsctl resident                    看当前状态（默认）
+      hsctl resident on [--mode wild --deck 2]
+      hsctl resident off
+      hsctl resident set --mode ... --deck ... --stale 180 --other-stale 300 --warn 120
+      hsctl resident set --max-restarts 3 --window 600 --start-delay 5 --dry-run on
 
-    与「存活检测」（hsctl liveness）的区别：存活检测判定无响应后**停止**并告警，
-    等人处理；本开关打开后改为**重启炉石并自动重新进入对战**，无人值守自己爬
-    回来。开关打开时由它接管「日志停滞」，存活检测那条自动停止不再触发。
+    判定与恢复逻辑在控制台（src/safety/resident_supervisor.py），这里只是
+    薄客户端：读/写 ui_config.json 的 resident 段并渲染。原「存活检测」「中断
+    重启」两个 CLI 子命令已并入本命令（--warn / --stale / --other-stale）。
     """
-    sub = getattr(args, "watchdog_cmd", None) or "status"
-    if sub == "on":
-        return _ok_message(ctx, ctx.post("/api/watchdog", {"enabled": True}))
-    if sub == "off":
-        return _ok_message(ctx, ctx.post("/api/watchdog", {"enabled": False}))
+    sub = getattr(args, "resident_cmd", None) or "status"
+    aliases = RESIDENT_MODE_ALIASES
+
+    if sub in ("on", "off"):
+        body = {"enabled": sub == "on"}
+        mode = getattr(args, "mode", None)
+        if mode is not None:
+            key = aliases.get(str(mode).strip().lower())
+            if key is None:
+                print("模式必须是 wild/standard/casual（或 狂野/标准/休闲）", file=sys.stderr)
+                return EXIT_USAGE
+            body["mode"] = key
+        deck = getattr(args, "deck", None)
+        if deck is not None:
+            if not 1 <= int(deck) <= 9:
+                print(f"卡组序号必须是 1-9（当前页只有 9 格），收到 {deck}", file=sys.stderr)
+                return EXIT_USAGE
+            body["deck_index"] = int(deck)
+        return _ok_message(ctx, ctx.post("/api/resident", body))
+
     if sub == "set":
         body = {}
-        if getattr(args, "stale", None) is not None:
-            body["stale_seconds"] = args.stale
-        if getattr(args, "max_restarts", None) is not None:
-            body["max_restarts"] = args.max_restarts
-        if getattr(args, "window", None) is not None:
-            body["window_seconds"] = args.window
+        mode = getattr(args, "mode", None)
+        if mode is not None:
+            key = aliases.get(str(mode).strip().lower())
+            if key is None:
+                print("模式必须是 wild/standard/casual（或 狂野/标准/休闲）", file=sys.stderr)
+                return EXIT_USAGE
+            body["mode"] = key
+        deck = getattr(args, "deck", None)
+        if deck is not None:
+            if int(deck) == 0:  # 0 = 清空（不自动选卡组）
+                body["deck_index"] = None
+            elif 1 <= int(deck) <= 9:
+                body["deck_index"] = int(deck)
+            else:
+                print(f"卡组序号必须是 1-9（0 = 清空），收到 {deck}", file=sys.stderr)
+                return EXIT_USAGE
+        pairs = (
+            ("stale", "stale_in_game_seconds"),
+            ("other_stale", "stale_other_seconds"),
+            ("warn", "warn_seconds"),
+            ("max_restarts", "max_restarts"),
+            ("window", "window_seconds"),
+            ("start_delay", "start_delay_seconds"),
+        )
+        for attr, key in pairs:
+            value = getattr(args, attr, None)
+            if value is not None:
+                body[key] = value
+        dry_run = getattr(args, "dry_run", None)
+        if dry_run is not None:
+            body["dry_run"] = str(dry_run).lower() == "on"
         if not body:
-            raise ApiFailure("没有要改的字段（用 --stale / --max-restarts / --window）")
-        return _ok_message(ctx, ctx.post("/api/watchdog", body))
+            raise ApiFailure(
+                "没有要改的字段（用 --mode / --deck / --stale / --other-stale / "
+                "--warn / --max-restarts / --window / --start-delay / --dry-run）"
+            )
+        return _ok_message(ctx, ctx.post("/api/resident", body))
 
     payload = ctx.get("/api/status")
-    wd = payload.get("watchdog") or {}
+    res = payload.get("resident") or {}
     if ctx.json:
-        print(json.dumps({"ok": True, "watchdog": wd}, ensure_ascii=False))
+        print(json.dumps({"ok": True, "resident": res}, ensure_ascii=False))
         return EXIT_OK
-    state_labels = {
-        "disabled": "已关闭",
-        "ok": "正常（日志在更新）",
-        "idle": "自动化未运行",
-        "stale": "日志停滞（即将重启）",
-        "settling": "重启后宽限期中",
-        "exhausted": "重启次数用尽（已停手等人工）",
-        "unknown": "无法判定",
-        "error": "读取失败",
-    }
-    print("中断重启看门狗")
-    print(f"  开关      : {'开' if wd.get('enabled') else '关'}")
-    print(f"  状态      : {state_labels.get(wd.get('status'), wd.get('status'))}")
-    print(f"  触发阈值  : 日志停滞 {wd.get('stale_seconds', 0):.0f} 秒")
-    print(
-        f"  限流      : {wd.get('window_seconds', 0) / 60:.0f} 分钟内最多 "
-        f"{wd.get('max_restarts', 0)} 次（已用 {wd.get('restarts_in_window', 0)} 次，"
-        f"累计 {wd.get('restarts_total', 0)} 次）"
-    )
-    age = wd.get("log_age")
-    print(f"  日志停滞  : {'—' if age is None else f'{age:.0f} 秒'}")
-    if wd.get("restart_running"):
-        print("  正在重启  : 是")
-    if wd.get("message"):
-        print(f"  最近事件  : {wd['message']}")
+    print(_resident_state_text(res))
     return EXIT_OK
 
 
@@ -2016,35 +2159,6 @@ def cmd_human_like_set(args, ctx: Ctx) -> int:
     if len(body) == 1:
         raise ApiFailure("没有要改的字段（用 --enabled / --post-delay-min 等）")
     return _ok_message(ctx, ctx.post("/api/human_like", body))
-
-
-def cmd_liveness_show(args, ctx: Ctx) -> int:
-    return _print_section(
-        ctx,
-        "liveness",
-        "炉石存活检测",
-        (
-            ("enabled", "总开关"),
-            ("status", "当前状态"),
-            ("process", "进程"),
-            ("log_age", "Power.log 停滞(秒)"),
-            ("log_stale_warn_seconds", "告警阈值(秒)"),
-            ("log_stale_stop_seconds", "自动停止阈值(秒)"),
-        ),
-    )
-
-
-def cmd_liveness_set(args, ctx: Ctx) -> int:
-    body = {"hot": not args.no_hot}
-    mapping = (
-        ("enabled", args.enabled),
-        ("log_stale_warn_seconds", args.warn),
-        ("log_stale_stop_seconds", args.stop),
-    )
-    body.update({k: v for k, v in mapping if v is not None})
-    if len(body) == 1:
-        raise ApiFailure("没有要改的字段（用 --enabled / --warn / --stop）")
-    return _ok_message(ctx, ctx.post("/api/liveness", body))
 
 
 def cmd_concede_show(args, ctx: Ctx) -> int:
@@ -2573,7 +2687,8 @@ def cmd_serve(args, ctx: Ctx) -> int:
     if args.action == "stop":
         return _serve_stop(args, ctx)
     if args.action == "restart":
-        _serve_stop(args, ctx)
+        # 重启不是「用户想停」：不写手动停止标记，否则看门狗之后不会再把控制台拉回来。
+        _serve_stop(args, ctx, record_manual=False)
         time.sleep(1.0)
         return _serve_start(args, ctx)
     if args.action == "install-task":
@@ -2582,6 +2697,12 @@ def cmd_serve(args, ctx: Ctx) -> int:
         return cmd_serve_uninstall_task(args, ctx)
     if args.action == "task-status":
         return cmd_serve_task_status(args, ctx)
+    if args.action == "install-watchdog":
+        return cmd_serve_install_watchdog(args, ctx)
+    if args.action == "uninstall-watchdog":
+        return cmd_serve_uninstall_watchdog(args, ctx)
+    if args.action == "watchdog-status":
+        return cmd_serve_watchdog_status(args, ctx)
     raise ApiFailure(f"未知动作：{args.action}")
 
 
@@ -2710,14 +2831,15 @@ def _run_quiet(argv) -> tuple:
     return proc.returncode, raw.decode("utf-8", "replace")
 
 
-def _task_xml():
+def _task_xml(name: str = TASK_NAME):
     """取计划任务的 XML 定义（用于确认真的勾了「最高权限」）。
 
+    ``name`` 默认是 serve 任务；看门狗任务用同一个查询逻辑，只是任务名不同。
     `schtasks /query /xml` 在中文 Windows 上吐 UTF-16LE，所以先看有没有 NUL 字节。
     """
     try:
         proc = subprocess.run(
-            ["schtasks", "/query", "/tn", TASK_NAME, "/xml"],
+            ["schtasks", "/query", "/tn", name, "/xml"],
             capture_output=True,
             timeout=30,
         )
@@ -2866,6 +2988,14 @@ def _serve_start(args, ctx: Ctx) -> int:
             return EXIT_OK
     except TransportError:
         pass
+    if getattr(args, "auto", False) and _autostart_blocked():
+        # 只有看门狗（--auto）看这个标记：用户退出控制台后不该被自动拉回来。
+        intent = _resident_intent_summary()
+        reason = intent.get("reason") or "手动退出"
+        at = intent.get("at") or "时间未知"
+        print(f"上次为手动退出控制台（{reason}，{at}），看门狗本次不自动启动。")
+        print("  在页面里手动点「开始对战」/「开启常驻」后，自动拉起恢复正常。")
+        return EXIT_OK
     if not (ROOT / "web_ui.py").exists():
         raise ApiFailure(f"找不到 {ROOT / 'web_ui.py'}")
     if getattr(args, "via_task", False):
@@ -3092,20 +3222,295 @@ def cmd_serve_task_status(args, ctx: Ctx) -> int:
     return EXIT_OK
 
 
-def _serve_self_stop(ctx: Ctx, timeout: float = 25.0) -> bool:
+# ------------------------------------------------------------ 控制台看门狗
+# 要解决的事：控制台（web_ui.py）就是常驻模式本体；它一旦崩掉，没有任何东西会
+# 把它拉回来 —— 夜里中断后能一直停到第二天。这里注册一个「每 N 分钟」的计划任务，
+# 由它跑隐藏启动器：hsctl serve start --auto（自带探活，已在跑就什么都不做）。
+#
+# 为什么是「计划任务 + VBS」而不是常驻守护进程：计划任务由 Windows 托管，重启后
+# 还在；VBS 用 wscript //B 跑，不闪黑框。为什么要 --auto：用户主动 `serve stop`
+# 之后不该被看门狗拉回来（见 resident_intent），--auto 只在「不是手动停止」时才启动。
+def _watchdog_launcher_text() -> str:
+    """看门狗启动器（VBS）内容。
+
+    用 UTF-16 写盘（``text.encode("utf-16")``）：wscript 按 ANSI/UTF-16 识别脚本，
+    仓库路径带中文时只有 UTF-16 不会乱码。VBS 字符串里的双引号按 VBS 规则写两次。
+    """
+    python = _python_for_task()
+    command = (
+        f'"{python}" "{ROOT / "hsctl.py"}" serve start --auto --wait 120'
+    )
+    escaped = command.replace('"', '""')
+    return (
+        "' Generated by: hsctl serve install-watchdog\r\n"
+        "' Runs the console at most once (hsctl serve start --auto is idempotent),\r\n"
+        "' so a 5-minute trigger cannot pile up duplicate consoles.\r\n"
+        'Set sh = CreateObject("WScript.Shell")\r\n'
+        f'sh.CurrentDirectory = "{ROOT}"\r\n'
+        f'sh.Run "{escaped}", 0, True\r\n'
+    )
+
+
+def _ensure_watchdog_launcher() -> Path:
+    """生成/覆盖看门狗启动器，返回它的路径。"""
+    WATCHDOG_LAUNCHER.parent.mkdir(parents=True, exist_ok=True)
+    WATCHDOG_LAUNCHER.write_bytes(_watchdog_launcher_text().encode("utf-16"))
+    return WATCHDOG_LAUNCHER
+
+
+def _watchdog_action() -> str:
+    """计划任务的动作串：wscript 静默执行启动器（窗口样式 0 在 VBS 里指定）。
+
+    用**完整路径**的 wscript.exe：计划任务不保证继承 PATH，只写 `wscript.exe`
+    在部分机器上会找不到程序。
+    """
+    system_root = os.environ.get("SystemRoot") or r"C:\Windows"
+    wscript = Path(system_root) / "System32" / "wscript.exe"
+    return f'{wscript} //B "{WATCHDOG_LAUNCHER}"'
+
+
+def _watchdog_create_argv() -> list:
+    _ensure_watchdog_launcher()
+    return [
+        "schtasks",
+        "/create",
+        "/tn",
+        WATCHDOG_TASK_NAME,
+        "/tr",
+        _watchdog_action(),
+        "/sc",
+        "MINUTE",
+        "/mo",
+        str(WATCHDOG_INTERVAL_MINUTES),
+        "/rl",
+        "HIGHEST",  # 最高权限：控制台要能点鼠标/写日志，不能是低权限
+        "/f",
+    ]
+
+
+def _watchdog_create_hint() -> str:
+    """给用户复制粘贴的管理员 PowerShell 命令。
+
+    为什么不是原始 schtasks：`/tr "wscript.exe //B \\"...\\""` 这种内层引号只有
+    cmd 认，PowerShell 会拆散参数（实测）。为什么带 `&` 调用符：PowerShell 里直接
+    粘贴以引号开头的命令会把它当字符串表达式报「意外的标记」，`&"<exe>" ...` 才是
+    正确的调用语法（实测可运行）。任务本身由 hsctl 用 argv 建，零引号风险。
+    """
+    return (
+        f'& "{_python_for_task()}" "{ROOT / "hsctl.py"}" '
+        "serve install-watchdog"
+    )
+
+
+# ---- 手动停止标记（读：--auto 守卫、watchdog-status；写：serve stop 成功时）
+def _resident_intent_module():
+    """延迟 import 手动停止标记模块（只用标准库；hsctl 其余部分只依赖标准库）。"""
+    try:
+        from src.safety import resident_intent
+    except Exception:
+        return None
+    return resident_intent
+
+
+_EMPTY_INTENT = {
+    "kind": "first_run", "manual_stop": False, "scope": "",
+    "reason": "", "at": "",
+}
+
+
+def _resident_intent_summary() -> dict:
+    """读「上次是怎么退出的」摘要；模块不可用/文件坏掉一律当 first_run。"""
+    module = _resident_intent_module()
+    if module is None:
+        return dict(_EMPTY_INTENT)
+    try:
+        data = module.summary(RESIDENT_INTENT_PATH)
+    except Exception:
+        return dict(_EMPTY_INTENT)
+    if not isinstance(data, dict):
+        return dict(_EMPTY_INTENT)
+    return {
+        "kind": str(data.get("kind") or "first_run"),
+        "manual_stop": bool(data.get("manual_stop")),
+        "scope": str(data.get("scope") or ""),
+        "reason": str(data.get("reason") or ""),
+        "at": str(data.get("at") or ""),
+    }
+
+
+def _autostart_blocked() -> bool:
+    """看门狗是否该跳过本次自动启动。
+
+    只有「用户退出了整个控制台」才挡；只是停了自动化（scope=automation）不挡，
+    控制台崩溃后仍会被拉回来（常驻自己保持暂停等手动开始）。
+    """
+    module = _resident_intent_module()
+    if module is None:
+        return False
+    try:
+        return bool(module.autostart_blocked(RESIDENT_INTENT_PATH))
+    except Exception:
+        return False
+
+
+def _record_manual_stop(reason: str = "hsctl serve stop",
+                        scope: str = "console") -> dict:
+    """记录「用户手动停的控制台」。写失败静默：停止动作本身已经成功了。"""
+    module = _resident_intent_module()
+    if module is None:
+        return {}
+    try:
+        return module.record_manual_stop(
+            reason, scope=scope, path=RESIDENT_INTENT_PATH
+        )
+    except Exception:
+        return {}
+
+
+def _watchdog_state() -> dict:
+    """看门狗任务状态 + 手动停止标记（给 install/status 用）。"""
+    code, out = _run_quiet(["schtasks", "/query", "/tn", WATCHDOG_TASK_NAME])
+    exists = code == 0
+    xml = _task_xml(WATCHDOG_TASK_NAME) if exists else None
+    intent = _resident_intent_summary()
+    return {
+        "name": WATCHDOG_TASK_NAME,
+        "exists": exists,
+        "highest": ("HighestAvailable" in xml) if xml else None,
+        "action": _watchdog_action(),
+        "actual_action": _task_action_from_xml(xml),
+        "interval": WATCHDOG_INTERVAL_MINUTES,
+        "launcher": str(WATCHDOG_LAUNCHER),
+        "manual_stop": intent["manual_stop"],
+        "scope": intent["scope"],
+        "autostart_blocked": _autostart_blocked(),
+        "reason": intent["reason"],
+        "at": intent["at"],
+        "is_admin_now": is_user_admin(),
+        "query": (out or "").strip()[:400],
+    }
+
+
+def cmd_serve_install_watchdog(args, ctx: Ctx) -> int:
+    state = _watchdog_state()
+    if state["exists"] and not getattr(args, "force", False):
+        print(
+            f"看门狗计划任务已存在：{WATCHDOG_TASK_NAME}"
+            f"（最高权限：{'是' if state['highest'] else '否/未知'}）"
+        )
+        print("  要覆盖重建请加 --force。")
+        return EXIT_OK
+    if not is_user_admin():
+        # 绝不自己弹 UAC：把完整命令给出去，让用户在管理员窗口里跑一次。
+        hint = _watchdog_create_hint()
+        if ctx.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "kind": "api",
+                        "error": "注册看门狗计划任务需要管理员权限",
+                        "admin_command": hint,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            print("✗ 注册看门狗计划任务需要管理员权限，当前进程不是管理员。")
+            print("  请在**管理员** PowerShell 里执行下面这一条（只需一次）：")
+            print()
+            print("  " + hint)
+            print()
+            print("  跑完执行：hsctl serve watchdog-status（确认「最高权限：是」）")
+            print("  （本命令不会自己弹 UAC，也不会偷偷提权。）")
+        return EXIT_API
+    code, out = _run_quiet(_watchdog_create_argv())
+    if code != 0:
+        raise ApiFailure(f"注册看门狗计划任务失败：{(out or '').strip()[:400]}")
+    state = _watchdog_state()
+    if state.get("highest") is False:
+        print(f"✗ 看门狗计划任务已创建，但没有勾上「最高权限」：{WATCHDOG_TASK_NAME}")
+        print("  管理员 PowerShell 重跑：hsctl serve install-watchdog --force")
+        return EXIT_API
+    print(f"✓ 看门狗计划任务已注册：{WATCHDOG_TASK_NAME}")
+    print(
+        f"  每 {WATCHDOG_INTERVAL_MINUTES} 分钟检查一次：控制台没在跑就自动拉起"
+        "（隐藏窗口，不弹 UAC）。"
+    )
+    print(f"  最高权限：{'是' if state['highest'] else '未知（查不到任务 XML，请用 watchdog-status 复核）'}")
+    print("  查看状态：hsctl serve watchdog-status")
+    print("  卸载：hsctl serve uninstall-watchdog")
+    return EXIT_OK
+
+
+def cmd_serve_uninstall_watchdog(args, ctx: Ctx) -> int:
+    if not _watchdog_state()["exists"]:
+        print("看门狗计划任务不存在（无需卸载）。")
+        return EXIT_OK
+    code, out = _run_quiet(
+        ["schtasks", "/delete", "/tn", WATCHDOG_TASK_NAME, "/f"]
+    )
+    if code != 0:
+        raise ApiFailure(f"删除看门狗计划任务失败：{(out or '').strip()[:300]}")
+    print(f"✓ 看门狗计划任务已删除：{WATCHDOG_TASK_NAME}")
+    return EXIT_OK
+
+
+def cmd_serve_watchdog_status(args, ctx: Ctx) -> int:
+    state = _watchdog_state()
+    if ctx.json:
+        print(json.dumps(state, ensure_ascii=False))
+        return EXIT_OK
+    print(f"看门狗计划任务：{WATCHDOG_TASK_NAME}")
+    if not state["exists"]:
+        print("  已注册：否")
+        print("  注册（管理员 PowerShell 跑一次）：" + _watchdog_create_hint())
+        print("  （注册后控制台崩了会被自动拉起，不用人守着。）")
+    else:
+        print(f"  已注册：是（每 {WATCHDOG_INTERVAL_MINUTES} 分钟检查一次）")
+        print(f"  以最高权限运行：{'是' if state['highest'] else '否 / 未知'}")
+        # XML 的 <Command> 只取得到 wscript.exe，拿不到参数；这里打印完整动作。
+        print(f"  动作：{state['action']}")
+        print(f"  当前进程是管理员：{'是' if state['is_admin_now'] else '否'}")
+        if state["highest"] is False:
+            print("  ✗ 没勾「最高权限」；管理员重跑：hsctl serve install-watchdog --force")
+    if state["manual_stop"]:
+        reason = state.get("reason") or "手动停止"
+        at = state.get("at") or "时间未知"
+        if state.get("autostart_blocked"):
+            print(f"  上次为手动退出控制台（{reason}，{at}）→ 看门狗不会自动拉起控制台")
+            print("  在页面里手动点「开始对战」/「开启常驻」后恢复正常。")
+        else:
+            print(
+                f"  上次为手动停止自动化（{reason}，{at}）→ 常驻保持暂停；"
+                "控制台崩了看门狗仍会拉起"
+            )
+    else:
+        print("  上次不是手动停止 → 看门狗会照常拉起控制台")
+    return EXIT_OK
+
+
+def _serve_self_stop(ctx: Ctx, timeout: float = 25.0,
+                     keep_intent: bool = False) -> bool:
     """请求控制台**自己退出**（走 HTTP，不需要提权）。成功返回 True。
 
     为什么需要：控制台常常是提权起的，而非提权进程结束不了提权进程
     （taskkill 报 Access denied），于是"脚本停不掉"，只能人工用管理员 shell 再关。
     这里用端口文件里的 token 证明"是本机的调用方"，让控制台自己收尾退出。
+
+    ``keep_intent=True``（restart 用）让控制台**不写**「手动停止」标记：重启只是
+    换一份代码，不是用户不玩了；否则重启后常驻会一直暂停、看门狗也不会再拉起。
     """
     info = read_port_file() or {}
     token = str(info.get("token") or "")
     if not token:
         # 老版本控制台（端口文件里没有 token）：这条通道用不了，退回 taskkill。
         return False
+    body = {"token": token}
+    if keep_intent:
+        body["keep_intent"] = True
     try:
-        ctx.post("/api/serve/stop", {"token": token})
+        ctx.post("/api/serve/stop", body)
     except (ApiFailure, TransportError):
         # 接口不存在（老控制台）/ 已经被停掉，都按"没成功"处理，由调用方兜底。
         pass
@@ -3120,7 +3525,12 @@ def _serve_self_stop(ctx: Ctx, timeout: float = 25.0) -> bool:
     return False
 
 
-def _serve_stop(args, ctx: Ctx) -> int:
+def _serve_stop(args, ctx: Ctx, record_manual: bool = True) -> int:
+    """停止控制台。
+
+    ``record_manual=False`` 供 restart 使用：重启中途会停一次，但用户并不想停，
+    不能留下「手动停止」标记（否则重启后常驻一直暂停、看门狗也不会再拉起）。
+    """
     info = read_port_file() or {}
     pid = info.get("pid")
     if pid is None:
@@ -3145,7 +3555,11 @@ def _serve_stop(args, ctx: Ctx) -> int:
         return EXIT_OK
     # 先优雅停自动化，再结束进程：避免在出牌动作中途被硬杀。
     try:
-        ctx.post("/api/stop", {"mode": "now"})
+        stop_body = {"mode": "now"}
+        if not record_manual:
+            # restart 的停自动化不是用户喊停：不能写手动标记，也别毁掉定时计划。
+            stop_body.update({"_resident_internal": True, "keep_schedule": True})
+        ctx.post("/api/stop", stop_body)
         print("已请求停止自动化，等待它收尾……")
         deadline = time.time() + 20
         while time.time() < deadline:
@@ -3159,9 +3573,12 @@ def _serve_stop(args, ctx: Ctx) -> int:
     # 首选：让控制台自己停 —— 不需要提权，提权起的控制台也能停掉。
     if not getattr(args, "hard", False):
         print("正在请求控制台自停（HTTP，不需要提权）……")
-        if _serve_self_stop(ctx):
+        if _serve_self_stop(ctx, keep_intent=not record_manual):
             for path in (PORT_FILE, PID_FILE):
                 _unlink(path)
+            # 真正停掉了才算「用户手动停止」：看门狗之后不再自动拉起。
+            if record_manual:
+                _record_manual_stop("hsctl serve stop", scope="console")
             print(f"✓ 控制台已停止（pid {pid}，走的是自停通道）。")
             return EXIT_OK
         print("  自停没成功（可能控制台不是本脚本/端口文件没有 token），退回结束进程。")
@@ -3176,6 +3593,7 @@ def _serve_stop(args, ctx: Ctx) -> int:
             "拒绝结束它。确认无误可加 --force。"
         )
     ok, detail = _kill_pid(int(pid))
+    stopped_by_us = ok
     if not ok and not _pid_alive(int(pid)):
         # pid 已经不在了（刚好在这中间自己退出/被系统回收）。这时报"权限不足"
         # 会把人引到 UAC 上去查一个根本不存在的问题 —— 当成已停止，继续收尾。
@@ -3200,6 +3618,10 @@ def _serve_stop(args, ctx: Ctx) -> int:
         time.sleep(0.5)
     for path in (PORT_FILE, PID_FILE):
         _unlink(path)
+    if record_manual and stopped_by_us:
+        # 只有「我们真的结束了它」才算用户手动停止；进程自己没了属于崩溃/退出，
+        # 该让看门狗照常拉起，不能记成手动停止。
+        _record_manual_stop("hsctl serve stop", scope="console")
     print(f"✓ 控制台已停止（pid {pid}）。")
     return EXIT_OK
 
@@ -3290,7 +3712,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         description="炉石脚本命令行控制台（web_ui.py 的薄客户端）",
         epilog="示例：hsctl status | hsctl log -f | hsctl start | "
-        "hsctl delays set pre_action_delay_seconds=5 | "
+        "hsctl delays set mulligan_ready_delay_seconds=20 | "
         "hsctl serve start | hsctl repl",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3509,23 +3931,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(handler=cmd_mode)
     p = sub.add_parser(
-        "watchdog",
+        "resident",
         parents=[common],
-        help="中断重启：日志长时间不变就重启炉石并重开一局",
+        help="守护（原常驻）：无人值守等待/开局/卡住自愈（默认看状态）",
     )
     p.add_argument(
-        "watchdog_cmd",
+        "resident_cmd",
         nargs="?",
         default="status",
         choices=["on", "off", "status", "set"],
         help="on/off=开关；status=看状态（默认）；set=改参数",
     )
     p.add_argument(
+        "--mode",
+        default=None,
+        choices=["wild", "standard", "casual", "狂野", "标准", "休闲"],
+        help="对战模式：wild/standard/casual（或 狂野/标准/休闲）",
+    )
+    p.add_argument(
+        "--deck",
+        type=int,
+        default=None,
+        metavar="序号",
+        help="卡组序号 1-9（set 时 0 = 清空，不自动选卡组）",
+    )
+    p.add_argument(
         "--stale",
         type=float,
         default=None,
         metavar="秒",
-        help="日志停滞多少秒算卡住（默认 300 = 5 分钟）",
+        help="对局中日志停滞多少秒算卡住（默认 180）",
+    )
+    p.add_argument(
+        "--other-stale",
+        dest="other_stale",
+        type=float,
+        default=None,
+        metavar="秒",
+        help="非对局界面日志停滞多少秒算卡住（默认 300）",
+    )
+    p.add_argument(
+        "--warn",
+        type=float,
+        default=None,
+        metavar="秒",
+        help="提前告警阈值：停滞达到该秒数只告警不动作（默认 120；0=关）",
     )
     p.add_argument(
         "--max-restarts",
@@ -3542,7 +3992,22 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="秒",
         help="滑动窗口长度（默认 600 = 10 分钟）",
     )
-    p.set_defaults(handler=cmd_watchdog)
+    p.add_argument(
+        "--start-delay",
+        dest="start_delay",
+        type=float,
+        default=None,
+        metavar="秒",
+        help="开启后等多少秒再开始（默认 5）",
+    )
+    p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        default=None,
+        choices=["on", "off"],
+        help="只判定不真重启（on/off）",
+    )
+    p.set_defaults(handler=cmd_resident)
     p = sub.add_parser(
         "queue", parents=[common], help="待做命令队列：一次提交多条，控制台按顺序执行"
     )
@@ -3619,21 +4084,6 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--minion-hover-max", type=float, default=None)
     q.add_argument("--no-hot", action="store_true", help="运行中拒绝修改")
     q.set_defaults(handler=cmd_human_like_set)
-
-    # ---- liveness
-    p = sub.add_parser("liveness", parents=[common], help="炉石存活检测")
-    p.set_defaults(handler=cmd_liveness_show)
-    lsub = p.add_subparsers(dest="action", metavar="<动作>")
-    q = lsub.add_parser("show", parents=[common], help="显示当前配置")
-    q.set_defaults(handler=cmd_liveness_show)
-    q = lsub.add_parser("set", parents=[common], help="修改配置")
-    _add_bool(q, "enabled", "总开关")
-    q.add_argument("--warn", type=float, default=None, help="Power.log 停滞多少秒告警")
-    q.add_argument(
-        "--stop", type=float, default=None, help="Power.log 停滞多少秒自动停止"
-    )
-    q.add_argument("--no-hot", action="store_true", help="运行中拒绝修改")
-    q.set_defaults(handler=cmd_liveness_set)
 
     # ---- concede
     p = sub.add_parser(
@@ -3763,7 +4213,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "serve",
         parents=[common],
-        help="托管控制台进程（start/stop/status/restart/install-task）",
+        help="托管控制台进程（start/stop/status/restart/install-task/watchdog）",
     )
     p.set_defaults(handler=cmd_serve, action="status")
     vsub = p.add_subparsers(dest="sub_action", metavar="<动作>")
@@ -3772,6 +4222,11 @@ def build_parser() -> argparse.ArgumentParser:
     q = vsub.add_parser("start", parents=[common], help="后台拉起控制台")
     q.add_argument("--browser", action="store_true", help="同时打开浏览器")
     q.add_argument("--wait", type=float, default=60.0, help="最长等待秒数")
+    q.add_argument(
+        "--auto",
+        action="store_true",
+        help="由看门狗触发：上次若是手动停止/退出就跳过本次启动（手动启动不要加）",
+    )
     _add_launch_flags(q)
     q.set_defaults(handler=cmd_serve, action="start")
     q = vsub.add_parser("stop", parents=[common], help="停止控制台")
@@ -3803,6 +4258,23 @@ def build_parser() -> argparse.ArgumentParser:
         "task-status", parents=[common], help="看计划任务是否存在、是否勾了最高权限"
     )
     q.set_defaults(handler=cmd_serve, action="task-status")
+    q = vsub.add_parser(
+        "install-watchdog",
+        parents=[common],
+        help="注册看门狗计划任务：每 5 分钟检查，控制台崩了自动拉起（需管理员跑一次）",
+    )
+    q.add_argument("--force", action="store_true", help="已存在时覆盖重建")
+    q.set_defaults(handler=cmd_serve, action="install-watchdog")
+    q = vsub.add_parser(
+        "uninstall-watchdog", parents=[common], help="删除看门狗计划任务"
+    )
+    q.set_defaults(handler=cmd_serve, action="uninstall-watchdog")
+    q = vsub.add_parser(
+        "watchdog-status",
+        parents=[common],
+        help="看门狗任务是否存在/最高权限/上次是否手动停止",
+    )
+    q.set_defaults(handler=cmd_serve, action="watchdog-status")
 
     p = sub.add_parser("repl", parents=[common], help="进入交互模式")
     p.set_defaults(handler=None)
@@ -3843,7 +4315,7 @@ def build_parser() -> argparse.ArgumentParser:
 BANNER = f"""\
 hsctl {version_label()} —— 炉石脚本命令行控制台
 输入命令（不带 hsctl 前缀），help 看帮助，exit / Ctrl+D 退出。
-例：status | log -f | start | stop --after-game | delays set pre_action_delay_seconds=5
+例：status | log -f | start | stop --after-game | delays set mulligan_ready_delay_seconds=20
 """
 
 

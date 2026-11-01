@@ -17,6 +17,10 @@
 
 from __future__ import annotations
 
+# 兼容「只装 requirements.txt、没装项目包」的旧式部署：把仓库内 src/ 加进 sys.path，
+# 这样 click.py / FSM_action.py 里的 `from hslegend...` 也能导入（等价 pip install -e .）。
+import _srcpath  # noqa: F401
+
 import sys
 
 
@@ -33,6 +37,29 @@ def _configure_stdio() -> None:
 
 
 _configure_stdio()
+
+
+def _ensure_module_alias() -> None:
+    """`python web_ui.py` 启动时把本模块登记成 ``web_ui``（全进程唯一实例）。
+
+    控制台平时以 ``python web_ui.py`` 启动，此时本模块在 ``sys.modules["__main__"]``。
+    其它模块若按名字 ``import web_ui`` 会**再执行一遍本文件**，造出第二份
+    CTRL/RESIDENT —— 「守护」与安全网因此永远看不到自动化线程；FSM 的
+    ``sys.modules.get("web_ui")`` 也会恒为 None，导致守护「接管/让位」判定在
+    生产环境完全失效。
+
+    在模块体最前面补一个别名，后续任何 ``import web_ui`` / ``sys.modules["web_ui"]``
+    都命中同一个实例。正常被 import（``__name__ == "web_ui"``）时是 no-op。
+    """
+    if __name__ == "__main__":
+        try:
+            sys.modules.setdefault("web_ui", sys.modules[__name__])
+        except Exception:
+            # 嵌入/非常规加载器下 sys.modules 可能不完整；别名失败不应阻止启动。
+            pass
+
+
+_ensure_module_alias()
 
 import ctypes
 
@@ -65,6 +92,9 @@ from urllib.parse import parse_qs, urlparse
 
 # 脚本自己的日志文件：统计体积 / 打开位置 / 一键清理（纯函数在 script_logs.py）。
 import script_logs
+
+# 浮窗「OCR / 执行」分块流：每行日志都先喂给它（归块在 action_feed 里做）。
+import action_feed
 
 # 版本号的唯一来源（网页顶栏、浮窗品牌行、CLI 都从这里取）。
 import version
@@ -167,17 +197,20 @@ from config import (
     DEFAULT_AUTO_CONCEDE,
     DEFAULT_AUTO_SURRENDER,
     DEFAULT_HUMAN_LIKE,
-    DEFAULT_LIVENESS,
     DEFAULT_RANK_STOP,
+    DEFAULT_RESIDENT,
     RANK_STOP_ACTIONS,
     HOST,
     BASE_PORT,
     LOG_BUFFER_SIZE,
+    _DEPRECATED_DELAY_KEYS,
     _USER_DELAY_KEYS,
     RecommendationConfig,
+    box_fallback_settings,
     feedback_settings,
     joint_setting,
     max_search_setting,
+    save_box_fallback_setting,
     save_joint_setting,
     save_max_search_setting,
     save_strategy_setting,
@@ -273,8 +306,10 @@ DEFAULT_CONFIG = {
     "auto_concede": dict(DEFAULT_AUTO_CONCEDE),
     # 卡组识别投降：和 auto_concede 并存，各自独立开关。
     "auto_surrender": dict(DEFAULT_AUTO_SURRENDER),
-    "liveness": dict(DEFAULT_LIVENESS),
     "rank_stop": dict(DEFAULT_RANK_STOP),
+    # 守护（原常驻）：统一的自愈配置段；liveness/watchdog 旧段已删除（旧文件里的
+    # 键会被忽略，不会被当成配置误用）。
+    "resident": dict(DEFAULT_RESIDENT),
 }
 
 
@@ -359,6 +394,13 @@ def _log(level: str, msg: str):
                 "msg": str(msg),
             }
         )
+    # 合并面板的分块流：**每一行**都先喂给 action_feed（要在下面 _overlay_key
+    # 过滤之前：浮窗正文只显示关键行，但分块流需要完整上下文，包括被过滤掉的
+    # 「动作 3s 未确认，重新执行…」这类行）。浮窗只负责把 feed 画出来。
+    try:
+        action_feed.push(str(msg), level)
+    except Exception:
+        pass
     # 统一推入日志浮窗（关键行），与自动化日志同通道、按时间先后。
     # 浮窗若出现异常绝不能让日志系统把主流程一起拖垮。
     if log_overlay is not None and _overlay_key(str(msg)):
@@ -1096,6 +1138,10 @@ def _reset_score(fsm):
 
 def _start_automation(reset_stats: bool = True):
     """启动自动化；reset_stats=False 表示浮窗「恢复」续跑，保留已有战绩。"""
+    # 函数入口先通知常驻「马上要（重新）启动」：让暂停期间累积的日志年龄在
+    # settle_seconds 宽限期内不参与卡死判定（否则手动开始后第一次 poll 就被
+    # 当成日志卡死并触发恢复/装配，和用户抢鼠标）。
+    _resident_note_automation_started()
     cfg = load_config()
     name = (cfg.get("name") or "").strip()
     log_root = (cfg.get("log_root") or "").strip()
@@ -1287,6 +1333,161 @@ def _on_ctrl_q():
 
 
 # ---------------------------------------------------------------- 定时调度
+# 定时窗口到点后由常驻接管启动：最多等这么久（秒）让自动化线程真正起来，
+# 再进入结束时间监控（常驻装配可能要拉起炉石→进对战→选模式→选卡组）。
+RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS = 600.0
+RESIDENT_SCHEDULE_START_POLL_SECONDS = 0.5
+
+
+def _resident_window_state() -> tuple:
+    """读监督器当前状态与暂停原因（常驻未装配时返回空，按未开启处理）。"""
+    supervisor = RESIDENT
+    if supervisor is None:
+        return "", None
+    try:
+        state = dict(supervisor.state() or {})
+    except Exception:
+        return "", None
+    return str(state.get("state") or ""), state.get("paused_reason")
+
+
+def _schedule_clear_plan() -> None:
+    """清掉本次定时计划并落盘（跳过/无自动化可停时用，避免计划悬挂成 no-op）。"""
+    with CTRL.lock:
+        CTRL.phase = "idle"
+        CTRL.schedule = {"start": None, "end": None}
+    try:
+        _persist_schedule(None, None)
+    except Exception:
+        traceback.print_exc()
+
+
+def _schedule_skip(message: str, level: str = "WARN") -> bool:
+    """到点但不启动：记日志 + 清计划落盘 + 阶段回 idle，统一返回 False。"""
+    _log(level, message)
+    _schedule_clear_plan()
+    return False
+
+
+def _schedule_delegate_to_resident(state: str) -> bool:
+    """定时到点但由常驻接管启动：登记装配待办 + resume，等自动化真正跑起来。
+
+    绝不在这里直接 ``_start_automation``：与常驻同时启动会开出两个自动化线程。
+    等待上限 ``RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS``；常驻中途转 paused/
+    error 则尊重用户/限流决定，本次窗口不启动。
+    """
+    _log("SYS", f"定时启动：常驻状态为 {state}，交由常驻接管本次启动……")
+    if state == "paused":
+        # 上一个定时窗口结束留下的 stopped_by=schedule 是过期标记：监督器读到
+        # 它会立刻再转 paused，arm 永远起不来。只清这一种标记；用户手动停止
+        # 留下的 stopped_by 走不到这个分支（那是 paused != schedule）。
+        with CTRL.lock:
+            if CTRL.stopped_by == "schedule":
+                CTRL.stopped_by = None
+    _resident_set_arm_pending(True)
+    _resident_resume()
+    deadline = time.monotonic() + max(
+        0.0, float(RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS)
+    )
+    while True:
+        with CTRL.lock:
+            if CTRL.automation_thread is not None:
+                _log("SYS", "定时启动：常驻已把自动化拉起来，继续监控结束时间。")
+                return True
+        current, _ = _resident_window_state()
+        if current in ("paused", "paused_exhausted", "error",
+                       "cancelled", "disabled"):
+            return _schedule_skip(
+                f"定时启动：常驻已转入 {current}，本次定时窗口不启动。")
+        if time.monotonic() >= deadline:
+            # 超时：监控线程要收尾了，不能让常驻在没人监控结束时才把自动化拉起来。
+            _resident_set_arm_pending(False)
+            _resident_request_pause("定时启动超时")
+            return _schedule_skip(
+                "定时启动：等待常驻拉起自动化超时"
+                f"（{RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS:.0f}s），本次不启动。",
+                "ERROR",
+            )
+        time.sleep(max(0.0, float(RESIDENT_SCHEDULE_START_POLL_SECONDS)))
+
+
+def _schedule_wait_automation_thread(start_dt):
+    """窗口到点却没有自动化线程可停（常驻正在重启/恢复）时等它回来。
+
+    返回 ``(status, thread)``：status 为 ``"found"`` / ``"cancelled"``（计划被
+    取消或替换）/ ``"timeout"``（超过 ``RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS``
+    仍没有线程）。等待期间计划被取消立刻退出，不再动任何东西。
+    """
+    deadline = time.monotonic() + max(
+        0.0, float(RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS)
+    )
+    while True:
+        with CTRL.lock:
+            if CTRL.schedule.get("start") != start_dt:
+                return "cancelled", None
+            thread = CTRL.automation_thread
+        if thread is not None:
+            return "found", thread
+        if time.monotonic() >= deadline:
+            return "timeout", None
+        time.sleep(max(0.0, float(RESIDENT_SCHEDULE_START_POLL_SECONDS)))
+
+
+def _schedule_legacy_start() -> bool:
+    """旧路径：定时到点直接启动自动化（常驻关闭 / dry_run / 非委派状态）。"""
+    ok, msg = _start_automation()
+    if not ok:
+        with CTRL.lock:
+            CTRL.phase = "idle"
+            CTRL.schedule = {"start": None, "end": None}
+            CTRL.last_error = msg
+        _persist_schedule(None, None)
+        _log("ERROR", f"定时启动失败：{msg}")
+        return False
+    return True
+
+
+def _schedule_start_at_window() -> bool:
+    """到点启动的四个分支（返回 False = 本次窗口不启动，调度线程收尾）。
+
+    a. 自动化已在运行/正在启动 → 跳过启动（防双线程），继续结束监控；
+    b. 常驻在等这个窗口（waiting_schedule/countdown）或上一定时窗口结束暂停
+       → 委派常驻 arm + resume，等自动化起来；
+    c. 常驻被用户暂停/急停/耗尽/error → 不启动，只告警；
+    d. 其余（常驻关闭 / dry_run）→ 旧 ``_start_automation`` 路径。
+    """
+    _log("SYS", "到达计划开始时间，自动启动对战。")
+    with CTRL.lock:
+        running = CTRL.automation_thread is not None
+        starting = bool(CTRL.starting)
+    if running or starting:
+        _log(
+            "SYS",
+            "定时启动：自动化已在运行/正在启动，跳过本次启动（不再开第二个线程）。",
+        )
+        return True
+    settings = _resident_settings()
+    resident_on = bool(settings.get("enabled"))
+    dry_run = bool(settings.get("dry_run"))
+    if not resident_on:
+        return _schedule_legacy_start()
+    state, paused_reason = _resident_window_state()
+    if not dry_run:
+        if (
+            state in ("waiting_schedule", "countdown")
+            or (state == "paused" and str(paused_reason or "") == "schedule")
+        ):
+            return _schedule_delegate_to_resident(state)
+        if state in ("paused", "paused_exhausted", "error"):
+            return _schedule_skip(
+                "定时启动：常驻已暂停，本次定时窗口不启动；"
+                "如需运行请 hsctl resident on。"
+            )
+    # dry_run（或常驻不在委派/暂停分支）统一走旧路径：dry_run 时常驻不派发，
+    # 定时任务必须照旧自己启动，不能因为“常驻 paused”就整窗跳过。
+    return _schedule_legacy_start()
+
+
 def _schedule_worker(start_dt: datetime, end_dt):
     try:
         while datetime.now() < start_dt:
@@ -1294,30 +1495,34 @@ def _schedule_worker(start_dt: datetime, end_dt):
                 if CTRL.schedule.get("start") != start_dt:
                     return  # 计划被取消或替换
             time.sleep(0.5)
-        _log("SYS", "到达计划开始时间，自动启动对战。")
-        ok, msg = _start_automation()
-        if not ok:
-            with CTRL.lock:
-                CTRL.phase = "idle"
-                CTRL.schedule = {"start": None, "end": None}
-                CTRL.last_error = msg
-            _persist_schedule(None, None)
-            _log("ERROR", f"定时启动失败：{msg}")
+        if not _schedule_start_at_window():
             return
         if end_dt is None:
             return
+        # 窗口内只按时间 + 计划取消/替换判断，**不看 automation_thread**：
+        # 常驻自愈/重启时线程会短暂为 None，不能把它当成“窗口结束”而提前退出。
         while datetime.now() < end_dt:
             with CTRL.lock:
-                if (
-                    CTRL.schedule.get("start") != start_dt
-                    or CTRL.automation_thread is None
-                ):
+                if CTRL.schedule.get("start") != start_dt:
                     return
             time.sleep(0.5)
         _log("SYS", "到达计划结束时间：等待本局对战打完再停止。")
         with CTRL.lock:
             CTRL.phase = "stopping"
             CTRL.stopped_by = "schedule"
+        status, _thread = _schedule_wait_automation_thread(start_dt)
+        if status == "cancelled":
+            return
+        if status == "timeout":
+            # 窗口内一次自动化都没拉起来：没有可停的线程，清计划避免悬挂 no-op。
+            _schedule_clear_plan()
+            _log(
+                "WARN",
+                "到达计划结束时间，但 "
+                f"{RESIDENT_SCHEDULE_START_TIMEOUT_SECONDS:.0f}s 内没有自动化线程可停"
+                "（常驻未拉起自动化）；已取消本次定时计划。",
+            )
+            return
         try:
             CTRL.fsm.request_stop_after_game()
         except Exception as exc:
@@ -1373,12 +1578,13 @@ def _hot_requested(body) -> bool:
 #                  「开始对战」（fsm.init()）才生效；
 #   * restart   —— src/ocr/preprocess.py 在**模块导入期**就把值算成常量 _SCALE，
 #                  连重开自动化都改不动，必须重启脚本进程。
+# 注意：旧版「每张开局卡延时 / 每回合前延时」已废弃（R18 起我方回合就绪改判
+# 右侧「结束回合」按钮的 OCR 出现），它们不在本表里，也不在 _USER_DELAY_KEYS
+# 白名单里（见 config._DEPRECATED_DELAY_KEYS）。
 _DELAY_LIVE_KEYS = frozenset(
     {
         "mulligan_ready_delay_seconds",
         "mulligan_retry_delay_seconds",
-        "pre_action_delay_seconds",
-        "first_turn_per_card_delay_seconds",
     }
 )
 _DELAY_FILE_KEYS = frozenset(
@@ -1778,64 +1984,21 @@ def api_save_human_like(body):
     return {"ok": True, "message": "活人感配置已保存", "human_like": hl}
 
 
-# ------------------------------------------------------------------ 炉石存活检测
-def _current_liveness() -> dict:
-    """返回当前生效的存活检测配置（默认值叠加 ui_config.json 的 liveness 段）。"""
-    cfg = dict(DEFAULT_LIVENESS)
-    saved = load_config().get("liveness")
-    if isinstance(saved, dict):
-        for key in cfg:
-            if saved.get(key) is not None:
-                cfg[key] = saved[key]
-    return cfg
-
-
-def api_save_liveness(body):
-    """保存存活检测配置（ui_config.json 的 liveness 段）。
-
-    这是安全兜底功能：炉石闪退/卡死后脚本不能一直对着失效画面空转
-    （issue 反馈空转近 3 小时），所以默认开启，但允许用户关闭。
-    """
-    with CTRL.lock:
-        if CTRL.automation_thread is not None and not _hot_requested(body):
-            return {
-                "ok": False,
-                "error": "自动化运行中，请先停止后再修改存活检测配置。",
-            }
-        cfg = load_config()
-        lv = _current_liveness()
-        lv["enabled"] = bool(body.get("enabled", lv["enabled"]))
-        try:
-            warn = float(
-                body.get("log_stale_warn_seconds", lv["log_stale_warn_seconds"])
-            )
-            stop = float(
-                body.get("log_stale_stop_seconds", lv["log_stale_stop_seconds"])
-            )
-        except (TypeError, ValueError):
-            return {"ok": False, "error": "停滞阈值必须为数字（秒）。"}
-        warn = max(1.0, min(3600.0, warn))
-        stop = max(warn, min(7200.0, stop))
-        lv["log_stale_warn_seconds"] = warn
-        lv["log_stale_stop_seconds"] = stop
-        cfg["liveness"] = lv
-        save_config(cfg)
-    _log(
-        "SYS",
-        f"存活检测配置已保存：{'开启' if lv['enabled'] else '关闭'}"
-        f"（Power.log 停滞 {warn:.0f}s 告警 / {stop:.0f}s 自动停止）。",
-    )
-    return {"ok": True, "message": "存活检测配置已保存", "liveness": lv}
+# ------------------------------------------------------------------ 生存信号（守护的安全网）
+# 2026-11-01 三卡合并：「🩺 存活检测」的独立开关/配置段已删除。进程消失/日志停滞
+# 的阈值统一来自「守护」（config.resident_settings 的 warn_seconds 与
+# stale_in_game_seconds），检测本身见 src/safety/hearthstone_liveness.py，处置见
+# FSM_action.check_hearthstone_liveness（守护动手时让位，否则告警+停止）。
 
 
 # ------------------------------------------------------------------ 延时设置
 # 各延时字段的边界与默认值（默认值取自 RecommendationConfig，即上游时序）。
+# 只收 _USER_DELAY_KEYS 里的字段：废弃的固定回合开始延时不在其中（见
+# config._DEPRECATED_DELAY_KEYS），网页 / CLI 也就点不到它们。
 _DELAY_BOUNDS = {
     "mulligan_ready_delay_seconds": (0.0, 120.0),
     "mulligan_post_ocr_delay_seconds": (0.0, 30.0),
     "mulligan_retry_delay_seconds": (0.0, 60.0),
-    "first_turn_per_card_delay_seconds": (0.0, 20.0),
-    "pre_action_delay_seconds": (0.0, 60.0),
     "post_action_delay_seconds": (0.0, 10.0),
     "draw_extra_delay_per_card_seconds": (0.0, 20.0),
     "discover_target_delay_seconds": (0.0, 5.0),
@@ -1863,7 +2026,14 @@ def api_save_delays(body):
         if CTRL.automation_thread is not None and not hot:
             return {"ok": False, "error": "自动化运行中，请先停止后再修改延时配置。"}
         cfg = load_config()
-        delays = dict(cfg.get("delays") or {})
+        # 顺手清掉旧配置里残留的废弃字段：它们不生效，留着只会让网页/CLI
+        # 显示一个“调了也没用”的值（旧版固定回合开始延时，见
+        # config._DEPRECATED_DELAY_KEYS）。
+        delays = {
+            key: value
+            for key, value in (cfg.get("delays") or {}).items()
+            if key not in _DEPRECATED_DELAY_KEYS
+        }
         changes = {}
         for key in _USER_DELAY_KEYS:
             if key not in body:
@@ -1981,11 +2151,52 @@ def api_save_max_search(body):
     }
 
 
+def api_save_box_fallback(body):
+    """保存盒子推荐失效兜底（ui_config.json 的 box_fallback 键，R18K）。"""
+    body = body or {}
+    with CTRL.lock:
+        if CTRL.automation_thread is not None and not _hot_requested(body):
+            return {
+                "ok": False,
+                "error": "自动化运行中，请先停止后再修改盒子兜底（改完下一局生效）。",
+            }
+        current = box_fallback_settings()
+        try:
+            saved = save_box_fallback_setting(
+                enabled=body.get("enabled", current["enabled"]),
+                strategy=body.get("strategy", current["strategy"]),
+                fail_streak=body.get("fail_streak", current["fail_streak"]),
+                stall_seconds=body.get(
+                    "stall_seconds", current["stall_seconds"]),
+                mulligan_fail_streak=body.get(
+                    "mulligan_fail_streak", current["mulligan_fail_streak"]),
+            )
+        except KeyError as exc:
+            return {"ok": False, "error": str(exc)}
+        except (TypeError, ValueError) as exc:
+            return {"ok": False, "error": str(exc) or "盒子兜底配置不合法。"}
+    label = strategy_label(saved["strategy"])
+    state_text = "开启" if saved["enabled"] else "关闭"
+    _log("SYS", f"盒子推荐失效兜底已{state_text}（本地「{label}」，下一局生效）。")
+    return {
+        "ok": True,
+        "message": f"盒子兜底已{state_text}：本地「{label}」（下一局生效）",
+        "box_fallback": {**saved, "strategy_label": label},
+    }
+
+
 def api_start(body: dict):
     body = body or {}
+    # 有人显式启动了自动化（网页/浮窗/CLI）：常驻的“装配待办”已无意义，清掉，
+    # 免得下次自动化停掉时又跑一遍进对战的装配流程。
+    _resident_set_arm_pending(False)
     # 浮窗「恢复」续跑：keep_score=True 时保留已累计战绩（场数/胜场/认输数），
     # 只有“重新开始”才从 0 计。
     keep_score = bool(body.get("keep_score"))
+    # 内部 key：常驻在定时窗口内启动自动化时传 True，表示**不要**清掉定时计划
+    # （否则常驻刚被定时窗口拉起来就把窗口自己取消了）。默认 False 保持旧语义：
+    # 网页/浮窗/CLI 的手动「开始」仍然取消尚未开始的定时任务。
+    keep_schedule = bool(body.get("keep_schedule"))
     with CTRL.lock:
         if CTRL.automation_thread is not None:
             return {"ok": False, "error": "自动化已经在运行中。"}
@@ -2000,13 +2211,19 @@ def api_start(body: dict):
             return {"ok": False, "error": "请先填写炉石日志目录。"}
         if not os.path.isdir(log_root):
             return {"ok": False, "error": f"日志目录不存在：{log_root}"}
-        # 手动开始会取消尚未开始的定时计划
-        CTRL.schedule = {"start": None, "end": None}
+        # 手动开始会取消尚未开始的定时计划（常驻内部启动除外，见 keep_schedule）
+        if not keep_schedule:
+            CTRL.schedule = {"start": None, "end": None}
         # 从这一刻到 _start_automation 真正把自动化线程挂上之前，网页/浮窗要显示
         # 「启动中…」（以前这个标志从未置位，等于没有），并挡住并发的第二次点击。
         CTRL.starting = True
+    # 立刻通知常驻“新一轮启动开始了”（不要等 boot 线程进 _start_automation）：
+    # 把「starting 已生效、settle 还没刷新」这段极窄窗口也纳入宽限，避免暂停期间
+    # 累积的大日志年龄在这一瞬间被判成卡死。
+    _resident_note_automation_started()
     try:
-        _persist_schedule(None, None)
+        if not keep_schedule:
+            _persist_schedule(None, None)
     except Exception:
         with CTRL.lock:
             CTRL.starting = False
@@ -2023,6 +2240,17 @@ def api_start(body: dict):
                 with CTRL.lock:
                     CTRL.last_error = msg
                 _log("ERROR", msg)
+            else:
+                # 手动开始 = 用户明确要玩：解除「手动停止」标记并把常驻转回正常
+                # 监督（不按错误恢复处理、不计恢复次数）。
+                _resident_after_manual_start()
+                if not keep_schedule:
+                    # 手动开始：常驻已经进入启动宽限（note_automation_started），
+                    # 暂停期间累积的日志空档不会被当成卡死。
+                    _log(
+                        "SYS",
+                        "手动开始对战：常驻不会把暂停期间累积的日志空档算作卡死。",
+                    )
         finally:
             # 成功/失败都必须清掉，否则网页会一直显示「启动中…」、后续开始也被挡住。
             with CTRL.lock:
@@ -2137,15 +2365,39 @@ def api_prepare(body=None):
 
 
 def api_stop(body: dict):
+    body = body or {}
+    internal = bool(body.get("_resident_internal"))
+    # 常驻/看门狗内部重启的 stop 只是重启步骤之一，**不是**用户取消定时：
+    # 带 keep_schedule（或内部标记）时保留 CTRL.schedule 与磁盘配置，否则窗口内
+    # 一次自愈/重启就把定时计划永久毁掉。用户手动 stop 不带该标记，行为不变。
+    keep_schedule = bool(body.get("keep_schedule")) or internal
     mode = str(body.get("mode") or "now")
+    # 手动停止 = 常驻暂停（恢复中只记 pause_after_recover，由监督器收尾时生效）。
+    # 内部步骤（重启前的停自动化）带 _resident_internal 标记，不算用户喊停。
+    if not internal:
+        _resident_request_pause("user_stop")
+        # 用户手动停止 = 常驻暂停，并**落盘**「手动停止」标记：之后重启控制台
+        # 常驻保持暂停等手动开始，不会按错误恢复的流程自动装配/点鼠标。
+        _resident_record_manual_stop(
+            "用户停止（本局结束后）" if mode == "after_game" else "用户停止自动化"
+        )
+        # 常驻正在“开启装配”（进对战/选模式/选卡组）时也要停掉它的点击循环。
+        if _RESIDENT_ARM_RUNNING:
+            try:
+                import battle_entry
+
+                battle_entry.request_cancel()
+            except Exception:
+                pass
     if mode == "after_game":
         with CTRL.lock:
             if CTRL.automation_thread is None:
                 return {"ok": False, "error": "当前没有正在运行的自动化。"}
             fsm = CTRL.fsm
             CTRL.phase = "stopping"
-            CTRL.stopped_by = "user_after_game"
-            if CTRL.schedule.get("end"):
+            if not internal:
+                CTRL.stopped_by = "user_after_game"
+            if CTRL.schedule.get("end") and not keep_schedule:
                 CTRL.schedule = {"start": None, "end": None}
                 _persist_schedule(None, None)
         try:
@@ -2159,9 +2411,14 @@ def api_stop(body: dict):
             return {"ok": False, "error": "当前没有正在运行的自动化。"}
         fsm = CTRL.fsm
         CTRL.phase = "idle"
-        CTRL.stopped_by = "user_immediate"
-        CTRL.schedule = {"start": None, "end": None}
-    _persist_schedule(None, None)
+        # 内部 stop 只是重启步骤的前半段，**不能**写成用户停止（stopped_by 会让
+        # 常驻恢复刚结束就立刻转 paused）。
+        if not internal:
+            CTRL.stopped_by = "user_immediate"
+        if not keep_schedule:
+            CTRL.schedule = {"start": None, "end": None}
+    if not keep_schedule:
+        _persist_schedule(None, None)
     try:
         fsm.request_immediate_stop()
     except Exception as exc:
@@ -2186,23 +2443,36 @@ def api_cancel(body=None) -> dict:
 
     cancelled = []
     notes = []
+    # 急停同时让常驻停手：恢复中只记 pause_after_recover（收尾后生效），避免恢复
+    # 链路跑完又把自动化拉起来。
+    _resident_request_pause(str(CTRL.stopped_by or "user_cancel"))
+    # 急停是用户手动叫停：落盘「手动停止」标记，跨控制台重启保留。
+    _resident_record_manual_stop(
+        "Ctrl+Q 急停"
+        if str((body or {}).get("source") or "") == "hotkey"
+        else "用户急停/取消"
+    )
     with _ENTER_LOCK:
         entering = bool(_ENTER_STATE.get("running"))
     with _restart_lock:
         restarting = bool(_RESTART_STATE.get("running"))
+    # 常驻“开启装配”（拉起炉石→进对战→模式→卡组）也在点坐标，急停要一并叫停。
+    arming = bool(_RESIDENT_ARM_RUNNING)
     with CTRL.lock:
         fsm = CTRL.fsm
         automating = CTRL.automation_thread is not None
     with _QUEUE_LOCK:
         queued = bool(_QUEUE_STATE.get("running"))
 
-    if entering or restarting:
+    if entering or restarting or arming:
         # 只有真有循环在跑才置位，否则会给下一次单击留个"已取消"的坑。
         battle_entry.request_cancel()
         if entering:
             cancelled.append("进入对战（等待/点击循环）")
         if restarting:
             cancelled.append("重启炉石后的等待")
+        if arming:
+            cancelled.append("常驻开启装配")
     if automating and fsm is not None:
         try:
             CTRL.phase = "idle"
@@ -2598,9 +2868,10 @@ def _overlay_concede_detect():
 
 
 def _liveness_state() -> dict:
-    """炉石存活检测状态：自动化已加载时取状态机的实时判定，否则直接采样。
+    """生存检测状态（供浮窗「炉石」行）：自动化已加载时取状态机实时判定，否则直接采样。
 
-    直接采样让“还没开始对战”时浮窗/网页也能显示炉石进程在不在。
+    阈值已并入「守护」配置（warn_seconds / stale_in_game_seconds），本函数只负责
+    取信号与展示，不再有独立的「存活检测」开关。
     """
     with CTRL.lock:
         fsm = CTRL.fsm
@@ -2615,7 +2886,7 @@ def _liveness_state() -> dict:
         state = dict(default_monitor().sample(in_game=False))
     except Exception:
         state = {
-            "enabled": bool(_current_liveness().get("enabled")),
+            "enabled": True,
             "status": "unknown",
             "process": "unknown",
             "log_age": None,
@@ -2657,6 +2928,37 @@ def _overlay_account():
         return None
 
 
+def _overlay_ocr():
+    """浮窗「OCR 扫描」框：各区域最近一次读到的文字（旁路数据，只读）。
+
+    数据源是 legacy OCR 适配器写进 ``src.ocr.status`` 的记录；这里只做一层
+    容错转发（记录还没产生 / 导入失败都返回 None，浮窗显示“等待 OCR 数据”），
+    浮窗本身不认识 OCR 内部结构。
+    """
+    try:
+        from src.ocr.status import snapshot
+
+        return snapshot()
+    except Exception:
+        return None
+
+
+def _overlay_ocr_phase():
+    """浮窗「OCR 扫描」框空状态用：当前卡在哪一步 + Power.log 静默多久。
+
+    数据源是 ``FSM_action.automation_phase_state()``（自动化未加载/异常返回
+    None，浮窗退回原文案）。浮窗本身不认识 FSM 内部结构。
+    """
+    try:
+        with CTRL.lock:
+            fsm = CTRL.fsm
+        if fsm is None or not hasattr(fsm, "automation_phase_state"):
+            return None
+        return fsm.automation_phase_state()
+    except Exception:
+        return None
+
+
 def _overlay_exit():
     """浮窗“退出脚本”按钮：先停止自动化，再退出整个脚本进程。"""
     try:
@@ -2670,6 +2972,8 @@ def _overlay_exit():
         _log("SYS", "用户从浮窗点击“退出脚本”。")
     except Exception:
         pass
+    # 用户主动退出脚本：落盘「手动停止」标记（scope=console：看门狗也别拉起）。
+    _resident_record_manual_stop("浮窗退出脚本", scope="console")
     # 屏幕上还开着校准窗口的话先关掉，别让它留在桌面上。
     try:
         _stop_calibration()
@@ -2710,6 +3014,10 @@ def _bind_overlay():
         human_like_callback=_overlay_human_like,
         concede_callback=_overlay_concede_detect,
         liveness_callback=_overlay_liveness,
+        # 日志区下方的「OCR 扫描」框：各区域最近一次 OCR 读到的原文。
+        ocr_callback=_overlay_ocr,
+        # 面板空状态：当前卡在哪一步 + 日志静默多久（“为什么没在扫”）。
+        phase_callback=_overlay_ocr_phase,
         account_callback=_overlay_account,
         # 「账号」行的眼睛按钮：是否显示昵称（默认显示），点一下互换并记住。
         account_visible_setting=_overlay_account_visible(),
@@ -2733,6 +3041,10 @@ def _bind_overlay():
         # 「退出浮窗」：只关窗口，脚本继续跑，网页可以再打开。
         on_exit_overlay=_overlay_exit_overlay,
         on_exit=_overlay_exit,
+        # 浮窗「常驻」页：状态查询 / 开停常驻 / 保存设置（页面渲染在 log_overlay 里）。
+        resident_callback=_overlay_resident,
+        on_resident_toggle=_overlay_resident_toggle,
+        on_resident_apply=_overlay_resident_apply,
     )
     _verify_overlay_opened_async(status)
     return status
@@ -2935,10 +3247,31 @@ def _battlenet_window_ready() -> bool:
 
 
 def _overlay_restart_hearthstone():
-    """浮窗「重启炉石」按钮（已确认过）：后台执行，立刻返回不卡浮窗。"""
-    threading.Thread(
-        target=_restart_hearthstone_worker, name="hs-restart", daemon=True
-    ).start()
+    """浮窗「重启炉石」按钮（已确认过）：后台执行，立刻返回不卡浮窗。
+
+    与网页/CLI 的「重启炉石」共用 ``_restart_lock`` / ``_RESTART_STATE``：已有
+    重启在跑就直接拒绝，避免两次并发把刚拉起来的炉石又杀一遍。
+    """
+    with _restart_lock:
+        if _RESTART_STATE.get("running"):
+            _log("WARN", "浮窗想重启炉石，但上一次「重启炉石」还没结束，本次跳过。")
+            return False
+        _restart_begin("manual")
+    try:
+        import battle_entry
+
+        battle_entry.clear_cancel()
+    except Exception:
+        pass
+    try:
+        threading.Thread(
+            target=_restart_hearthstone_worker, name="hs-restart", daemon=True
+        ).start()
+    except Exception as exc:
+        with _restart_lock:
+            _RESTART_STATE["running"] = False
+        _log("ERROR", f"浮窗重启炉石失败：{exc}")
+        return False
     return True
 
 
@@ -2984,8 +3317,8 @@ def _overlay_resize_window(width):
         return None
 
 
-def _restart_hearthstone_worker(resume=False, source="manual"):
-    """停自动化 → 重置日志读取器 → 中止炉石 → 清空日志目录 → 重新拉起炉石。
+def _restart_hearthstone_worker():
+    """手动「重启炉石」：停自动化 → 重置日志读取器 → 中止炉石 → 清空日志目录 → 重新拉起炉石。
 
     每一步都往网页/浮窗写日志；任何一步失败都立刻停下并说明原因，绝不在拿不准
     的状态下继续删文件。
@@ -2994,64 +3327,36 @@ def _restart_hearthstone_worker(resume=False, source="manual"):
     炉石从启动到能操作还要过战网、登录、公告弹窗，只拉起进程就报成功会让后面的
     「进入对战」直接撞在加载画面上（用户 2026-10-17 明确要求）。
 
-    ``resume=True`` 时（看门狗自动重启）再多走两步：**进对战 → 重新开始自动化**，
-    真正做到"日志卡住就自己爬回来继续打"。
-    ``source`` 只用于日志文案（``watchdog`` / ``manual``）。
+    手动重启期间守护监督器会被**临时暂停**（避免它和重启步骤抢着拉起自动化），
+    重启成功或失败后都交给守护恢复/按配额自愈。自动恢复（重启+重进对战+重开
+    自动化）由守护的恢复链路负责，不再有第二套"看门狗重启"入口。
     """
+    # 手动重启会停掉自动化、且手动路径不自动恢复自动化；如果守护此刻在管事，
+    # 重启完成后要由守护把自动化重新拉起来。**必须在停自动化之前捕获**：重启
+    # 步骤里的 api_stop 会改 stopped_by，之后 _resident_will_act() 就不再为 True。
+    was_resident = _resident_will_act()
+    if was_resident:
+        # 隔离监督器：重启步骤会把 automation_thread 清成 None；监督器若还在跑，
+        # 1s 轮询会立刻派发启动/恢复，与重启步骤互相打断、白烧配额。
+        _resident_pause_supervisor("手动重启")
+    try:
+        return _restart_hearthstone_worker_body()
+    finally:
+        # 成功/失败都恢复守护（失败时让它按配额自愈）；非管事保持原状。
+        if was_resident:
+            _resident_resume_after_restart()
+        with _restart_lock:
+            _RESTART_STATE["running"] = False
+
+
+def _restart_hearthstone_worker_body() -> bool:
+    """``_restart_hearthstone_worker`` 的重启步骤本体（不含守护隔离/收尾）。"""
     _restart_stage("restarting")
     ok = _restart_hearthstone_steps()
     if not ok:
-        if source == "watchdog":
-            _log("ERROR", "看门狗重启未成功；已放弃本次自动恢复，等待人工处理。")
         _restart_finish("restart_failed", False, "重启炉石失败（见日志）")
         return False
-    if not resume:
-        return _restart_wait_main_menu()
-
-    # ---- 恢复：等主界面 → 进入对战 → 重开自动化 ----
-    import battle_entry
-
-    _restart_stage("recovering")
-    _log("SYS", "重启完成，开始自动恢复：等待主界面 → 进入对战 → 重新开始……")
-    try:
-        result = battle_entry.enter_battle(
-            deck_index=None, click_start=False,
-            foreground=_focus_hearthstone_if_present,
-            logger=lambda text: _log("SYS", text)
-        )
-    except Exception as exc:
-        _log("ERROR", f"自动进入对战失败：{exc}；请手动「进入传统对战」后再点开始。")
-        _restart_finish("recover_failed", False, f"自动进入对战失败：{exc}")
-        return False
-    if not result.get("ok"):
-        if result.get("stage") == "aborted":
-            _log("WARN", "收到取消请求，已停在自动恢复这一步；不会重新开始自动化。")
-            _restart_finish("cancelled", False, "已取消自动恢复")
-            return False
-        _log(
-            "WARN",
-            f"自动进入对战未完成：{result.get('message')}"
-            "（可能已在选套牌界面；继续尝试开始自动化）",
-        )
-    else:
-        _log("SYS", "已进入对战界面。")
-
-    started = api_start({"keep_score": True})
-    if not started.get("ok"):
-        _log("ERROR", f"重启后重新开始自动化失败：{started.get('error')}")
-        _restart_finish(
-            "recover_failed", False, f"重启后重新开始自动化失败：{started.get('error')}"
-        )
-        return False
-    _log("SYS", "✅ 重启并恢复成功：自动化已重新开始，继续挂机。")
-    _restart_finish("recovered", True, "已重启并恢复自动化（继续挂机）")
-    try:
-        from src.safety.restart_watchdog import default_watchdog
-
-        default_watchdog().note_restarted()
-    except Exception:
-        pass
-    return True
+    return _restart_wait_main_menu()
 
 
 def _restart_wait_main_menu() -> bool:
@@ -3111,7 +3416,12 @@ def _restart_hearthstone_steps() -> bool:
     with CTRL.lock:
         running = CTRL.automation_thread is not None
     if running:
-        api_stop({"mode": "now"})
+        # 内部停止只是重启的步骤之一，**不是**用户在喊停：带标记让 api_stop 不要
+        # 误把常驻置成 pause_after_recover（否则恢复成功后反而不自动续跑）；
+        # 同时保留定时计划（看门狗/手动/常驻三种重启都不能毁掉窗口）。
+        api_stop(
+            {"mode": "now", "_resident_internal": True, "keep_schedule": True}
+        )
         deadline = time.monotonic() + AUTOMATION_STOP_TIMEOUT
         stopped = False
         while time.monotonic() < deadline:
@@ -3186,33 +3496,6 @@ def _restart_hearthstone_steps() -> bool:
     return True
 
 
-def _restart_hearthstone_and_resume():
-    """看门狗调用的入口：后台跑「重启 + 恢复」，立刻返回是否成功**派发**。
-
-    返回 False 表示没能派发（比如上一次重启还在跑），此时看门狗应当放弃并告警，
-    不要每 15s 又派一次。
-    """
-    with _restart_lock:
-        if _RESTART_STATE.get("running"):
-            _log("WARN", "看门狗想重启，但上一次「重启炉石」还没结束，本次跳过。")
-            return False
-        _restart_begin("watchdog")
-
-    def _worker():
-        try:
-            _restart_hearthstone_worker(resume=True, source="watchdog")
-        except Exception as exc:
-            traceback.print_exc()
-            _log("ERROR", f"看门狗自动重启异常：{exc}")
-            _restart_finish("exception", False, f"看门狗自动重启异常：{exc}")
-        finally:
-            with _restart_lock:
-                _RESTART_STATE["running"] = False
-
-    threading.Thread(target=_worker, name="hs-watchdog-restart", daemon=True).start()
-    return True
-
-
 # 串行化「重启炉石」：并发触发两次会把刚拉起来的炉石再杀一遍。
 _restart_lock = threading.Lock()
 # 「重启炉石」的进度：CLI / agent 靠它判断"到底重启完了没"，不用自己 sleep 猜。
@@ -3272,25 +3555,17 @@ def _restart_snapshot() -> dict:
         return dict(_RESTART_STATE)
 
 
-def _bind_watchdog_restarter() -> None:
-    """给「中断重启」看门狗接上真正的重启动作。
-
-    看门狗模块本身不认识 web_ui（避免循环 import），所以由这里注入。
-    注入时机在启动时调用一次即可；重复调用无害（只是覆盖同一个函数）。
-    """
-    try:
-        from src.safety.restart_watchdog import default_watchdog
-
-        default_watchdog()._restarter = lambda cfg: _restart_hearthstone_and_resume()
-    except Exception as exc:
-        print(f"[watchdog] 注入重启通道失败（中断重启将不可用）：{exc}")
+# 「中断重启」看门狗已于 2026-11-01 并入「守护」（原常驻）：
+# 自动恢复统一走守护的恢复链路（`_resident_recover_dispatch` →
+# `_resident_recover_worker`）与手动「重启炉石」（`_restart_hearthstone_worker`），
+# 不再有独立的配置/网页卡/API/CLI，也没有第二套"重启+重进对战"的入口。
 
 
 def _as_bool(value) -> bool:
     """把网页/CLI 传进来的开关值统一成布尔。
 
     网页复选框给的是真布尔，CLI 给人打的是 ``on/off/1/0/true/false`` ——
-    两种都要认，否则 `hsctl watchdog on` 会被当成 False。
+    两种都要认，否则 `hsctl resident on` 会被当成 False。
     """
     if isinstance(value, bool):
         return value
@@ -3300,65 +3575,1546 @@ def _as_bool(value) -> bool:
     return text in ("1", "on", "true", "yes", "y", "开", "开启", "启用")
 
 
-def api_watchdog(body: dict = None) -> dict:
-    """读取/保存「中断重启」配置。
+# ---------------------------------------------------------------- 守护（原常驻）装配
+RESIDENT = None
+_RESIDENT_LOCK = threading.Lock()
+_RESIDENT_ALERT = {"text": None, "at": None}
+# 提前告警（warn_seconds，原存活检测的告警档并入守护）：只提示、不动作。
+_RESIDENT_WARN = {"text": None, "at": None}
+_RESIDENT_ARM_LOCK = threading.Lock()
+_RESIDENT_ARM_PENDING = False
+_RESIDENT_ARM_RUNNING = False
+# 常驻意图（手动停止/退出 vs 错误）：落盘在 log/resident_intent.json，**跨控制台
+# 重启保留**。启动分类决定要不要自动接管：manual = 用户手动停的 → 保持暂停等
+# 手动开始；error/first_run = 崩溃或首次 → 沿用自动装配（错误后自动开始）。
+# 设计边界：读写/分类全在 src/safety/resident_intent.py，本文件只做接线。
+_RESIDENT_INTENT_STATE = {
+    "kind": "first_run", "manual_stop": False, "scope": "",
+    "reason": "", "at": "",
+}
+_RESIDENT_INTENT_LOCK = threading.Lock()
+# 只在**真实控制台进程**里写盘：测试 import web_ui 时 __main__ 是 unittest，
+# 绝不能把测试里的 api_stop 落成真实标记（否则下次启动常驻会意外保持暂停）。
+_RESIDENT_INTENT_PATH = None  # None = src.safety.resident_intent 的默认 log/ 路径
+_RESIDENT_START_CAUSE = "manual"  # manual | autostart（本次启动的接管原因）
+_RESIDENT_START_CAUSE_LOCK = threading.Lock()
+# Windows 控制台关闭事件的回调：必须保引用，否则会被 GC 掉导致回调失效。
+_CONSOLE_CTRL_HANDLER = None
+# 与 status_snapshot 的 in_game 口径保持一致（换牌/对战中/结算都算“局内”）。
+_RESIDENT_IN_GAME_STATES = ("Choosing Card", "Battling", "Quitting Battle")
+# 恢复链路里的等待/重试时长：生产值按“炉石重启后日志重新写起来”的实测给，测试会调小。
+RESIDENT_RECONNECT_PROBE_SECONDS = 10.0
+RESIDENT_RECONNECT_PROBE_INTERVAL = 0.5
+RESIDENT_SELECT_RETRY_DELAY_SECONDS = 2.0
 
-    参数（都可省略，省略即保留当前值）：
-      * ``enabled``        开关（"on"/"off"/true/false/1/0 都认）
-      * ``stale_seconds``  日志停滞多少秒算卡住（默认 300 = 5 分钟）
-      * ``max_restarts``   滑动窗口内最多重启几次（默认 3）
-      * ``window_seconds`` 滑动窗口长度（默认 600 = 10 分钟）
+
+def _resident_settings() -> dict:
+    """读常驻配置（每次读 ui_config.json，改完即时生效）。模块缺失时按关闭处理。"""
+    try:
+        from config import resident_settings
+
+        return dict(resident_settings() or {})
+    except Exception:
+        return {"enabled": False}
+
+
+def _resident_enabled() -> bool:
+    return bool(_resident_settings().get("enabled"))
+
+
+# ---- 常驻意图：手动停止/退出 vs 错误（跨控制台重启保留）
+def _resident_running_as_console() -> bool:
+    """当前是不是**真的以控制台进程**在跑（`python web_ui.py`）。
+
+    只有这种进程才允许把「手动停止」写到磁盘：测试 import web_ui 时
+    ``__main__`` 是 unittest，写盘会污染真实标记，让下次启动的常驻莫名暂停。
     """
-    from src.safety.restart_watchdog import default_watchdog
+    try:
+        main = sys.modules.get("__main__")
+        main_file = getattr(main, "__file__", "") or ""
+        return Path(main_file).resolve() == Path(__file__).resolve()
+    except Exception:
+        return False
 
-    wd = default_watchdog()
-    current = dict(wd.settings())
 
-    if body:
-        raw_enabled = body.get("enabled")
-        if raw_enabled is not None:
-            current["enabled"] = _as_bool(raw_enabled)
-        for key in ("stale_seconds", "window_seconds"):
-            if body.get(key) not in (None, ""):
-                try:
-                    current[key] = max(30.0, float(body[key]))
-                except (TypeError, ValueError):
-                    return {"ok": False, "error": f"{key} 必须是数字（秒）"}
-        if body.get("max_restarts") not in (None, ""):
-            try:
-                current["max_restarts"] = max(1, int(body["max_restarts"]))
-            except (TypeError, ValueError):
-                return {"ok": False, "error": "max_restarts 必须是正整数"}
-        # 开关从关→开时，重置限流计数：上一轮"已经重启过 3 次"不该继续压着它。
-        turning_on = current["enabled"] and not wd.settings().get("enabled")
+def _resident_intent_module():
+    """延迟 import：resident_intent 晚于本文件落盘时，import web_ui 不能失败。"""
+    from src.safety import resident_intent
+
+    return resident_intent
+
+
+def _resident_intent_state() -> dict:
+    """当前手动停止标记（内存缓存；启动时/写盘后更新）。"""
+    with _RESIDENT_INTENT_LOCK:
+        return dict(_RESIDENT_INTENT_STATE)
+
+
+def _resident_refresh_intent() -> dict:
+    """从磁盘重读一次手动停止标记（启动分类用）；读失败按 first_run 处理。"""
+    global _RESIDENT_INTENT_STATE
+    try:
+        raw = _resident_intent_module().summary(_RESIDENT_INTENT_PATH)
+    except Exception as exc:
+        _log("WARN", f"常驻：读取手动停止标记失败（按首次启动处理）：{exc}")
+        raw = {}
+    kind = str((raw or {}).get("kind") or "first_run")
+    if kind not in ("manual", "error", "first_run"):
+        kind = "first_run"
+    scope = str((raw or {}).get("scope") or "")
+    if scope not in ("console", "automation"):
+        scope = ""
+    state = {
+        "kind": kind,
+        "manual_stop": bool((raw or {}).get("manual_stop")),
+        "scope": scope,
+        "reason": str((raw or {}).get("reason") or ""),
+        "at": str((raw or {}).get("at") or ""),
+    }
+    with _RESIDENT_INTENT_LOCK:
+        _RESIDENT_INTENT_STATE = state
+    return dict(state)
+
+
+def _resident_intent_writable() -> bool:
+    return _RESIDENT_INTENT_PATH is not None or _resident_running_as_console()
+
+
+def _resident_record_manual_stop(reason, scope="automation") -> None:
+    """用户手动停止/退出：落盘「手动停止」标记（跨控制台重启保留）。
+
+    之后重启控制台时 ``_bind_resident`` 会读到它并让常驻保持暂停，**不会**按
+    错误恢复的流程自动装配/点鼠标；用户手动点「开始对战」或显式开启常驻时
+    由 ``_resident_clear_manual_stop`` 清掉。
+
+    ``scope`` 只影响看门狗：
+    * ``automation``（默认）——只是停了自动化，控制台还开着；控制台若崩溃，
+      看门狗仍应把它拉回来（常驻自己保持暂停）。
+    * ``console``——用户退出了整个控制台（浮窗退出/关窗/Ctrl+C/serve stop），
+      看门狗不该再把控制台拉起来。
+    """
+    global _RESIDENT_INTENT_STATE
+    text = str(reason or "manual")
+    # 非控制台进程（测试 import web_ui）不落盘也不改内存：否则一个测试里的
+    # api_stop/main() 会把「手动停止」留在全局，后续测试的 api_start 会误判成
+    # 手动开始并真去 resume 监督器（曾把全量测试卡死在 inline 假线程里）。
+    if not _resident_intent_writable():
+        return
+    scope_text = "console" if scope == "console" else "automation"
+    payload = {}
+    try:
+        payload = _resident_intent_module().record_manual_stop(
+            text, scope=scope_text, path=_RESIDENT_INTENT_PATH
+        )
+    except Exception as exc:
+        _log("WARN", f"常驻：写手动停止标记失败（继续执行）：{exc}")
+    state = {
+        "kind": "manual",
+        "manual_stop": True,
+        "scope": str(payload.get("scope") or scope_text),
+        "reason": str(payload.get("reason") or text),
+        "at": str(payload.get("at") or _now_iso()),
+    }
+    with _RESIDENT_INTENT_LOCK:
+        _RESIDENT_INTENT_STATE = state
+    _log("SYS", f"常驻：记录「手动停止」（{text}）；重启控制台后保持暂停，等你手动开始。")
+
+
+def _resident_clear_manual_stop(reason="手动开始") -> bool:
+    """解除手动停止标记（用户手动开始对战 / 显式开启常驻时调用）。
+
+    用 ``record_running``（``manual_stop=false``）覆盖而不是删文件：这样之后
+    控制台真崩了，下次启动仍能判成 ``error``（日志写「自启接管」），不会退化成
+    ``first_run``；看门狗也照常能把它拉回来。
+    """
+    global _RESIDENT_INTENT_STATE
+    if not _resident_intent_state().get("manual_stop"):
+        return False
+    if _resident_intent_writable():
         try:
-            cfg = load_config()
-            cfg["watchdog"] = current
-            save_config(cfg)
+            _resident_intent_module().record_running(
+                f"manual_start:{reason}", path=_RESIDENT_INTENT_PATH
+            )
         except Exception as exc:
-            return {"ok": False, "error": f"保存失败：{exc}"}
-        if turning_on:
-            wd.reset()
+            _log("WARN", f"常驻：解除手动停止标记失败（继续执行）：{exc}")
+    with _RESIDENT_INTENT_LOCK:
+        _RESIDENT_INTENT_STATE = {
+            "kind": "first_run", "manual_stop": False, "scope": "",
+            "reason": "", "at": "",
+        }
+    _log("SYS", f"常驻：已解除「手动停止」标记（{reason}），转入正常监督。")
+    return True
+
+
+def _resident_after_manual_start() -> None:
+    """用户手动开始自动化后的收尾：解除手动停止标记并转入正常监督。
+
+    **与「错误后自动开始」区分**：这里不装配、不重启炉石、不计恢复次数；只清
+    标记 + resume 监督器（暂停期间累积的大日志年龄由启动宽限挡掉，不会被当成
+    卡死）。这样「手动暂停 → 手动开始」就是一次普通开始，而不是错误恢复。
+
+    先 ``set_start_cause("manual")`` 再解除标记：否则「error 启动后用户先手动开始」
+    这种路径里 clear 返回 False（本来就没标记），start_cause 会一直停在 autostart，
+    后续装配日志会误写「自启接管」。
+    """
+    _resident_set_start_cause("manual")
+    if not _resident_clear_manual_stop("手动开始对战"):
+        return
+    # 只唤醒**已装配**的监督器：这里不创建新实例（避免测试/未启用常驻时白起线程）。
+    supervisor = RESIDENT
+    if supervisor is not None:
+        try:
+            supervisor.resume()
+        except Exception as exc:
+            _log("WARN", f"常驻：手动开始后恢复监督失败（忽略）：{exc}")
+    _log("SYS", "常驻：检测到手动开始，转入正常监督（不按错误恢复处理）。")
+
+
+def _resident_mark_running(reason="console_boot") -> None:
+    """启动成功后写一份 ``manual_stop=false`` 的运行记录（不改变内存分类）。
+
+    为什么需要：解除手动标记时文件会被改成「运行中」；但若控制台在启动早期就
+    崩了（还没走到这里），下次启动只能按 ``first_run`` 处理。启动成功后写一份
+    运行记录，崩溃时文件还在，下次启动就能明确判成 ``error``（看门狗据此拉起）。
+    """
+    if not _resident_intent_writable():
+        return
+    try:
+        _resident_intent_module().record_running(
+            reason, path=_RESIDENT_INTENT_PATH
+        )
+    except Exception as exc:
+        _log("WARN", f"常驻：写运行标记失败（忽略）：{exc}")
+
+
+def _resident_manual_hold() -> bool:
+    """常驻是否因「上次是手动停止」而保持暂停（等用户手动开始）。"""
+    return bool(_resident_intent_state().get("manual_stop"))
+
+
+
+def _resident_start_cause() -> str:
+    with _RESIDENT_START_CAUSE_LOCK:
+        return str(_RESIDENT_START_CAUSE or "manual")
+
+
+def _resident_set_start_cause(cause: str) -> None:
+    global _RESIDENT_START_CAUSE
+    with _RESIDENT_START_CAUSE_LOCK:
+        _RESIDENT_START_CAUSE = "autostart" if cause == "autostart" else "manual"
+
+
+def _resident_arm_label() -> str:
+    """装配日志里的动作名：崩溃后自动接管叫「守护自启接管」，用户手动开启叫「守护开启」。"""
+    return "守护自启接管" if _resident_start_cause() == "autostart" else "守护开启"
+
+
+def _resident_monitor():
+    from src.safety.hearthstone_liveness import default_monitor
+
+    return default_monitor()
+
+
+def _resident_note_automation_started() -> None:
+    """告诉常驻监督器「自动化刚刚（重新）启动」——进入 settle 宽限期。
+
+    暂停/空闲一段时间后 Power.log 的年龄会很大；手动「开始对战」后若不重置
+    宽限，监督器第一次 poll 就会把这段空档当成「日志卡死」并触发恢复/装配，
+    和用户的手动启动抢鼠标。R1 的 ``note_automation_started()`` 负责重置 settle；
+    此处 getattr 兜底：R1 未落盘（旧版监督器）时静默跳过，绝不影响启动。
+    """
+    # 只通知**已装配**的监督器：未 bind 时常驻根本没有轮询在跑，无需通知；
+    # 也避免在未启用常驻/测试进程里懒创建一个多余实例。
+    supervisor = RESIDENT
+    if supervisor is None:
+        return
+    note = getattr(supervisor, "note_automation_started", None)
+    if not callable(note):
+        return
+    try:
+        note()
+    except Exception as exc:
+        _log("WARN", f"常驻启动宽限登记失败（忽略）：{exc}")
+
+
+def _resident_automation_running() -> bool:
+    """注入给监督器的 automation_running：装配（进对战）期间也算“正在拉起”，
+    否则监督器每个 check 周期都会重复派发一次启动、很快烧光启动配额。
+
+    手动 api_start 的 boot 窗口（``CTRL.starting``）同样算在跑：这时自动化线程
+    还没挂上，但用户正在启动，常驻绝不能把它当成“没运行”而抢着装配。
+    """
+    try:
+        with CTRL.lock:
+            if CTRL.automation_thread is not None:
+                return True
+            if bool(CTRL.starting):
+                return True
+    except Exception:
+        pass
+    return bool(_RESIDENT_ARM_RUNNING)
+
+
+def _resident_log_age():
+    """注入给监督器的 log_age：装配期间还没有可信的日志信号，返回 None。"""
+    if _RESIDENT_ARM_RUNNING:
+        return None
+    return _resident_monitor().log_age()
+
+
+def _resident_process_running():
+    """注入给监督器的 process_running：装配期间（拉起战网/登录）炉石可能短暂不在，
+    不能算“进程消失”，否则会和装配线程同时动手（一边启动一边重启）。"""
+    if _RESIDENT_ARM_RUNNING:
+        return True
+    return _resident_monitor().process_running()
+
+
+def _resident_in_game() -> bool:
+    """FSM 当前是否在对局内（注入给监督器的 in_game 信号；fsm 为 None 时 False）。"""
+    try:
+        fsm = CTRL.fsm
+        return bool(
+            fsm is not None
+            and getattr(fsm, "FSM_state", "") in _RESIDENT_IN_GAME_STATES
+        )
+    except Exception:
+        return False
+
+
+def _resident_fsm():
+    """当前 FSM 模块（自动化还没跑过时按需 import，但绝不启动自动化）。"""
+    if CTRL.fsm is not None:
+        return CTRL.fsm
+    try:
+        import FSM_action as fsm
+    except Exception:
+        return None
+    return fsm
+
+
+def _resident_log_in_game(fsm=None) -> bool:
+    """日志是否显示“正在局内”（重连判据）：有对局实体且日志未 COMPLETE。"""
+    try:
+        if fsm is None:
+            fsm = _resident_fsm()
+        if fsm is None:
+            return False
+        fsm.update_log_state()
+        state = getattr(fsm, "log_state", None)
+        if state is None:
+            return False
+        return int(getattr(state, "game_entity_id", 0) or 0) != 0 and not bool(
+            state.is_end
+        )
+    except Exception:
+        return False
+
+
+def _resident_reset_log_reader(fsm) -> None:
+    """重建日志读取器（清掉上一局/已删除日志的残留句柄与实体）。"""
+    try:
+        if fsm is not None:
+            fsm.init()
+            _log("SYS", "已重置日志读取器（守护恢复）。")
+    except Exception as exc:
+        _log("WARN", f"重置日志读取器失败（继续执行）：{exc}")
+
+
+def _resident_alert(message, *extra) -> None:
+    """监督器告警：写 ERROR 日志 + 记进 status 的 resident.alert（网页/CLI 看得到）。"""
+    text = " ".join(str(part) for part in (message,) + extra if part)
+    _RESIDENT_ALERT["text"] = text
+    _RESIDENT_ALERT["at"] = _now_iso()
+    try:
+        _log("ERROR", f"守护告警：{text}")
+    except Exception:
+        pass
+
+
+def _resident_warn(message, *extra) -> None:
+    """守护的**提前告警**（原存活检测的告警档）：只写 WARN 日志，不停止、不重启。"""
+    text = " ".join(str(part) for part in (message,) + extra if part)
+    _RESIDENT_WARN["text"] = text
+    _RESIDENT_WARN["at"] = _now_iso()
+    try:
+        _log("WARN", f"守护提前告警：{text}")
+    except Exception:
+        pass
+
+
+def _resident_request_pause(reason) -> None:
+    """手动停止/急停 → 常驻暂停；恢复中只记 pause_after_recover（监督器收尾时生效）。"""
+    supervisor = RESIDENT
+    if supervisor is None:
+        return
+    try:
+        supervisor.request_pause(str(reason or "user_cancel"))
+    except Exception as exc:
+        _log("WARN", f"常驻暂停请求未生效（忽略）：{exc}")
+
+
+def _resident_finish_recovery(ok: bool, message: str = "") -> None:
+    supervisor = RESIDENT
+    if supervisor is None:
+        return
+    try:
+        if message:
+            supervisor.note_recovered(bool(ok), message)
+        else:
+            supervisor.note_recovered(bool(ok))
+    except TypeError:
+        # 旧版监督器只收 ok 一个参数：降级调用，行为不变。
+        try:
+            supervisor.note_recovered(bool(ok))
+        except Exception as exc:
+            _log("WARN", f"守护恢复收尾失败（忽略）：{exc}")
+    except Exception as exc:
+        _log("WARN", f"守护恢复收尾失败（忽略）：{exc}")
+
+
+# 本次控制台运行期间「常驻恢复成功」的累计次数（浮窗/日志展示）。
+_RESIDENT_RECOVERY_COUNT = 0
+_RESIDENT_RECOVERY_COUNT_LOCK = threading.Lock()
+
+
+def _resident_note_recovery_success() -> int:
+    """记录一次常驻恢复成功，返回本次运行累计次数。"""
+    global _RESIDENT_RECOVERY_COUNT
+    with _RESIDENT_RECOVERY_COUNT_LOCK:
+        _RESIDENT_RECOVERY_COUNT += 1
+        return _RESIDENT_RECOVERY_COUNT
+
+
+# 常驻“已停手”的状态集合：这些状态下恢复/装配链路必须立刻中止。
+_RESIDENT_IDLE_STATES = (
+    "paused", "paused_exhausted", "error", "cancelled", "disabled",
+)
+# 用户主动停止/取消的来源（监督器 paused_reason / CTRL.stopped_by 的取值）。
+# 手动重启收尾要恢复常驻时，命中这些原因必须保持暂停：手动停止优先级最高，
+# 绝不能被“重启完成自动恢复”覆盖。
+_RESIDENT_USER_STOP_REASONS = frozenset({
+    "user_cancel",
+    "user_stop",
+    "user_immediate",
+    "user_after_game",
+    "rank_reached",
+    "ctrlq",
+    "cancelled",
+})
+
+
+def _resident_user_stop_reason():
+    """当前是否有用户主动停止/取消信号；有则返回原因，否则 None。
+
+    只看用户意图来源：battle_entry 的急停开关（Ctrl+Q/取消）与监督器的
+    ``paused_reason``；这两个是 api_cancel/api_stop 真正写进去的地方。
+    """
+    try:
+        import battle_entry
+
+        if battle_entry.is_cancelled():
+            return "cancelled"
+    except Exception:
+        pass
+    supervisor = RESIDENT
+    if supervisor is not None:
+        try:
+            reason = str((supervisor.state() or {}).get("paused_reason") or "")
+        except Exception:
+            reason = ""
+        if reason in _RESIDENT_USER_STOP_REASONS:
+            return reason
+    return None
+
+
+
+def _resident_stop_reason():
+    """常驻动作前的统一守卫：用户暂停/取消/停止时返回原因，否则 None。
+
+    三类信号都看：battle_entry 急停开关（Ctrl+Q/取消）、监督器是否已离开活动
+    状态、CTRL.stopped_by（自动化被停止过）。恢复链路每个阶段动作前、arm 每个
+    阶段动作前与 api_start 前都调它 —— 绝不违逆用户的停止/取消。
+    """
+    try:
+        import battle_entry
+
+        if battle_entry.is_cancelled():
+            return "cancelled"
+    except Exception:
+        pass
+    supervisor = RESIDENT
+    if supervisor is not None:
+        try:
+            state = str((supervisor.state() or {}).get("state") or "")
+        except Exception:
+            state = ""
+        if state in _RESIDENT_IDLE_STATES:
+            return state
+    try:
+        with CTRL.lock:
+            stopped = CTRL.stopped_by
+    except Exception:
+        stopped = CTRL.stopped_by
+    if stopped:
+        return "paused"
+    return None
+
+
+def _resident_pause_supervisor(reason: str) -> None:
+    """让监督器停在 paused（恢复中则把 pause_after_recover 落地）。
+
+    R1 语义：recovering 里 pause() 只登记待生效，必须 note_recovered() 收尾。
+    这里显式收尾一次，保证“恢复被中止/装配失败”后 supervisor 就是 paused，
+    后续 poll 不会再尝试拉起自动化。
+    """
+    supervisor = RESIDENT
+    if supervisor is None:
+        return
+    try:
+        supervisor.pause(str(reason or "守护已中止"))
+        state = str((supervisor.state() or {}).get("state") or "")
+        if state == "recovering":
+            supervisor.note_recovered(True)
+            # note_recovered(True) 会短暂记成 recovered：再 pause 一次，把 last_event/
+            # message 落回“已暂停：…”的准确文案（状态仍是 paused，仅修正展示）。
+            supervisor.pause(str(reason or "守护已中止"))
+    except Exception as exc:
+        _log("WARN", f"常驻暂停失败（忽略）：{exc}")
+
+
+def _resident_abort_recovery(reason: str, message: str = "") -> bool:
+    """恢复链路中止：不启动自动化、不继续点，并让常驻停在 paused（或保持关闭）。"""
+    text = message or f"守护恢复已中止：{reason}"
+    if reason == "disabled":
+        _resident_finish_recovery(False)
+        _resident_disable()
+    else:
+        _resident_pause_supervisor("守护恢复已取消")
+    _log("WARN", text)
+    _restart_finish(
+        "cancelled" if reason in ("cancelled", "disabled") else "paused",
+        False,
+        text,
+    )
+    return False
+
+
+def _resident_will_act() -> bool:
+    """常驻此刻是否真的会动手（旧看门狗据此让位）。
+
+    只看 enabled 不够：dry_run / 已暂停 / 配额耗尽时常驻不会做任何动作，旧
+    看门狗应当照常工作，否则两边都不动。
+    """
+    supervisor = RESIDENT
+    if supervisor is None:
+        return False
+    try:
+        state = dict(supervisor.state() or {})
+    except Exception:
+        return False
+    return bool(
+        state.get("enabled")
+        and not bool(state.get("dry_run"))
+        and str(state.get("state") or "")
+        in ("countdown", "starting", "running", "recovering")
+    )
+
+
+def _resident_schedule_hold():
+    """定时窗口未开始时返回常驻待机原因（注入监督器的 ``hold_reason``）。
+
+    计划被取消（start=None）或已到开始时间返回 None，监督器立刻恢复正常判定。
+    只读 CTRL.schedule，不改任何状态；读不到按“不挂起”处理。
+    """
+    try:
+        with CTRL.lock:
+            start_dt = (CTRL.schedule or {}).get("start")
+    except Exception:
+        return None
+    if start_dt is None:
+        return None
+    try:
+        if datetime.now() < start_dt:
+            return f"等待定时 {start_dt:%H:%M} 开始"
+    except Exception:
+        return None
+    return None
+
+
+def _resident_supervisor():
+    """取（必要时创建）常驻监督器。只创建对象，不启动线程（线程由 _bind_resident 起）。"""
+    global RESIDENT
+    if RESIDENT is not None:
+        return RESIDENT
+    with _RESIDENT_LOCK:
+        if RESIDENT is not None:
+            return RESIDENT
+        try:
+            from src.safety.resident_supervisor import ResidentSupervisor
+        except Exception as exc:
+            _log("WARN", f"常驻判定模块不可用：{exc}")
+            return None
+        try:
+            RESIDENT = ResidentSupervisor(
+                settings=_resident_settings,
+                log_age=_resident_log_age,
+                in_game=_resident_in_game,
+                process_running=_resident_process_running,
+                automation_running=_resident_automation_running,
+                stopped_by=lambda: CTRL.stopped_by,
+                start_automation=_resident_start_automation,
+                recover=_resident_recover_dispatch,
+                alert=_resident_alert,
+                # 提前告警（warn_seconds）：只提示，不动作、不占配额。
+                warn=_resident_warn,
+                # 定时窗口还没开始：守护进 waiting_schedule 待机，不派发启动/恢复。
+                hold_reason=_resident_schedule_hold,
+            )
+        except Exception as exc:
+            _log("WARN", f"常驻监督器初始化失败：{exc}")
+            return None
+        return RESIDENT
+
+
+def _bind_resident():
+    """启动常驻监督器线程（main 里调用一次；重复调用无害）。
+
+    启动时先读一次「手动停止」标记（log/resident_intent.json），据此区分三种
+    完全不同的起点，**绝不把用户手动退出当成错误**：
+
+    * ``manual``：上次是用户手动停止/退出（停止按钮 / Ctrl+Q / 浮窗退出脚本 /
+      关控制台窗口 / hsctl serve stop）→ 本次保持暂停，不登记装配、不点鼠标；
+      等用户点「开始对战」或显式开启常驻再继续监督。
+    * ``error``：上次控制台/自动化异常结束（崩溃、被杀）→ 按「错误后自动开始」
+      走完整装配，日志用「守护自启接管」区分来源。
+    * ``first_run``：从没记录过 → 沿用旧行为（配置开启即自动装配）。
+    """
+    supervisor = _resident_supervisor()
+    if supervisor is None:
+        _log("WARN", "常驻模式不可用（判定模块未就绪）。")
+        return None
+    intent = _resident_refresh_intent()
+    kind = str(intent.get("kind") or "first_run")
+    manual_hold = kind == "manual"
+    _resident_set_start_cause("autostart" if kind == "error" else "manual")
+    # 开机时配置就是“守护开启”且上次不是手动停止：倒计时结束后走一次完整装配
+    # （拉起炉石→进对战），而不是只调 api_start（那时可能还停在主界面）。
+    try:
+        if (_resident_enabled() and CTRL.automation_thread is None
+                and not manual_hold):
+            _resident_set_arm_pending(True)
+        elif manual_hold:
+            _resident_set_arm_pending(False)
+    except Exception:
+        pass
+    if manual_hold:
+        # 手动退出后**不启动监督线程**：start_delay=0 时线程会在 pause 之前先判定
+        # 一次「自动化没在跑」并派发装配（真会拉起炉石/点鼠标）。只把状态置成
+        # paused 就够；用户手动开始/显式开启时 resume() 会自己把线程起起来。
+        try:
+            supervisor.pause("手动退出")
+        except Exception as exc:
+            _log("WARN", f"常驻：按手动退出保持暂停失败（忽略）：{exc}")
+        reason = str(intent.get("reason") or "手动停止")
+        at = str(intent.get("at") or "")
+        when = f"，{at}" if at else ""
         _log(
             "SYS",
-            "「中断重启」已"
-            + ("开启" if current["enabled"] else "关闭")
-            + f"（停滞 {current['stale_seconds']:.0f}s 触发，"
-            f"{current['window_seconds'] / 60:.0f} 分钟内最多 "
-            f"{current['max_restarts']} 次）",
+            f"常驻：上次为手动停止（{reason}{when}），本次保持暂停；"
+            "点「开始对战」或「开启守护」后继续监督。",
         )
-    return {"ok": True, "watchdog": wd.state()}
-
-
-def _watchdog_state() -> dict:
+        return supervisor
     try:
-        from src.safety.restart_watchdog import default_watchdog
-
-        state = default_watchdog().state()
+        supervisor.start()
     except Exception as exc:
-        state = {"enabled": False, "status": "error", "message": str(exc)}
-    state["restart_running"] = bool(_RESTART_STATE.get("running"))
+        _log("WARN", f"常驻监督器启动失败：{exc}")
+        return None
+    if kind == "error":
+        try:
+            takeover = bool(_resident_enabled()) and CTRL.automation_thread is None
+        except Exception:
+            takeover = bool(_resident_enabled())
+        if takeover:
+            _resident_mark_running("console_boot_after_error")
+            _log(
+                "SYS",
+                "常驻：上次控制台非正常退出（错误/崩溃），"
+                "按「错误后自动开始」接管，日志标记为「守护自启接管」。",
+            )
+        else:
+            _resident_mark_running("console_boot")
+            _log(
+                "SYS",
+                "常驻：上次控制台非正常退出；本次不需要自动接管"
+                "（常驻关闭或自动化已在运行）。",
+            )
+    else:
+        _resident_mark_running("console_boot")
+    return supervisor
+
+
+# ---- 开启守护时的首次装配（不杀进程）：拉起炉石 → 进对战 → 模式 → 卡组 → 开自动化
+def _resident_set_arm_pending(pending: bool) -> None:
+    global _RESIDENT_ARM_PENDING
+    with _RESIDENT_ARM_LOCK:
+        _RESIDENT_ARM_PENDING = bool(pending)
+
+
+def _resident_start_automation() -> bool:
+    """监督器要求“把自动化拉起来”。
+
+    **禁止盲 api_start**：只有日志确认已在局内（自动化异常死亡/重连）才直接续跑；
+    否则一律走完整装配（拉起炉石→进对战→模式→卡组→启动）。arm 选卡失败后
+    pending 已清，若这里盲 api_start，FSM 可能在未知界面自己进对战、用没确认的
+    卡组开打 —— 这正是要堵的缺口。
+    """
+    global _RESIDENT_ARM_PENDING
+    # 双保险：上次是用户手动停止/退出时绝不接管（正常情况下 _bind_resident 根本不
+    # 会启动监督线程，这里防的是 start_delay=0 等窄窗口里被误 resume/误调度）。
+    if _resident_manual_hold():
+        _log("SYS", "常驻：上次手动退出后尚未手动开始，先不接管。")
+        return True
+    # 手动/网页/浮窗正在启动（api_start 的 boot 窗口）：绝不抢启动、也别清装配
+    # 待办 —— 用户的手动启动优先，常驻等它真正挂上线程后继续正常监督。
+    try:
+        with CTRL.lock:
+            starting = bool(CTRL.starting)
+    except Exception:
+        starting = False
+    if starting:
+        _log("SYS", "常驻：检测到启动中，先不接管。")
+        return True
+    with _RESIDENT_ARM_LOCK:
+        if _RESIDENT_ARM_RUNNING:
+            # 装配线程还在跑（进对战可能要几分钟）：别重复派发、也别让监督器以为失败。
+            return True
+        arm_pending = _RESIDENT_ARM_PENDING
+        _RESIDENT_ARM_PENDING = False
+    if arm_pending:
+        return _resident_arm_dispatch()
+    try:
+        in_game = bool(_resident_log_in_game())
+    except Exception:
+        in_game = False
+    if in_game:
+        stop = _resident_stop_reason()
+        if stop:
+            _log("WARN", f"常驻：收到停止/急停请求（{stop}），不在局内续跑自动化。")
+            return False
+        try:
+            return bool(
+                (
+                    api_start({"keep_score": True, "keep_schedule": True}) or {}
+                ).get("ok")
+            )
+        except Exception as exc:
+            _resident_alert(f"自动重开自动化失败：{exc}")
+            return False
+    _log(
+        "SYS",
+        "常驻：自动化未运行且日志不在局内，走「进对战→模式→卡组」装配，不做盲启动。",
+    )
+    return _resident_arm_dispatch()
+
+
+def _resident_arm_dispatch() -> bool:
+    """后台跑一次“开启常驻”的装配（立刻返回是否派发成功）。"""
+    global _RESIDENT_ARM_RUNNING
+    with _RESIDENT_ARM_LOCK:
+        if _RESIDENT_ARM_RUNNING:
+            return True
+        _RESIDENT_ARM_RUNNING = True
+    cfg = _resident_settings()
+    try:
+        threading.Thread(
+            target=_resident_arm_worker,
+            args=(dict(cfg),),
+            name="hs-resident-arm",
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        with _RESIDENT_ARM_LOCK:
+            _RESIDENT_ARM_RUNNING = False
+        _resident_alert(f"守护开启失败：无法启动装配线程（{exc}）")
+        return False
+    return True
+
+
+def _resident_launch_hearthstone() -> bool:
+    """常驻开启时炉石没在运行：走与重启步骤相同的战网启动链路（不杀进程、不清日志）。"""
+    try:
+        import hs_restart
+
+        cfg = load_config()
+        info = hs_restart.resolve_paths((cfg.get("log_root") or "").strip())
+        if not info.get("ok"):
+            _log("ERROR", f"常驻拉起炉石失败：{info.get('error')}")
+            return False
+        launched = hs_restart.launch_hearthstone(
+            info["exe"],
+            battlenet_exe=info.get("battlenet_exe"),
+            launcher=_launch_hearthstone_via_battlenet,
+            battlenet_ready=_battlenet_window_ready,
+            window_ready=_hearthstone_window_ready,
+            foreground=_focus_hearthstone_if_present,
+            logger=lambda text: _log("SYS", text),
+        )
+        if not launched.get("ok"):
+            _log("ERROR", f"常驻拉起炉石失败：{launched.get('error')}")
+            return False
+        if _focus_hearthstone_if_present():
+            _log("SYS", "已把炉石窗口切回前台。")
+        _log("SYS", f"炉石已重新启动：{launched.get('message')}")
+        return True
+    except Exception as exc:
+        _log("ERROR", f"常驻拉起炉石异常：{exc}")
+        return False
+
+
+def _resident_start_after_ready(label: str) -> bool:
+    """装配最后一步：启动自动化（失败告警且**不假装成功**）。"""
+    stop = _resident_stop_reason()
+    if stop:
+        _log("WARN", f"{label}：收到停止/急停请求（{stop}），不启动自动化。")
+        return False
+    if not _resident_enabled():
+        _log("WARN", f"{label}：守护已被关闭，本次不启动自动化。")
+        return False
+    started = api_start({"keep_score": True, "keep_schedule": True})
+    if not (started or {}).get("ok"):
+        message = (started or {}).get("error") or "未知原因"
+        with CTRL.lock:
+            already_running = CTRL.automation_thread is not None
+        if already_running:
+            # 装配期间用户手动点了「开始对战」：这不是失败，直接转入监督。
+            _log("SYS", f"{label}：自动化已在运行，转入常驻监督。")
+            return True
+        _log("ERROR", f"{label}：重新开始自动化失败：{message}")
+        _resident_alert(f"{label}失败：自动化没能启动（{message}）。")
+        return False
+    _log("SYS", f"✅ {label}完成：自动化已开始，继续挂机。")
+    return True
+
+
+def _resident_select_mode_with_retry(mode: str) -> dict:
+    """切换对战模式（失败/异常重试 1 次，合计 2 次）；返回最后一次结果。"""
+    result = {"ok": False, "error": "切换模式失败"}
+    for attempt in range(2):
+        if attempt:
+            time.sleep(max(0.0, float(RESIDENT_SELECT_RETRY_DELAY_SECONDS)))
+            _log(
+                "WARN",
+                f"常驻：切换模式「{mode}」未成功，重试一次"
+                f"（{result.get('error')}）。",
+            )
+        try:
+            result = dict(_mode_click_inner(mode) or {})
+        except Exception as exc:
+            result = {"ok": False, "error": f"切换模式异常：{exc}"}
+        if result.get("ok"):
+            return result
+    return result
+
+
+def _resident_select_deck_with_retry(deck_index: int) -> dict:
+    """选卡组（跳过/失败等 2s 后重试 1 次，合计 2 次）；返回最后一次结果。"""
+    try:
+        import battle_entry
+    except Exception as exc:
+        return {"ok": False, "error": f"battle_entry 不可用：{exc}"}
+    result = {"ok": False, "error": "选卡组失败"}
+    for attempt in range(2):
+        if attempt:
+            time.sleep(max(0.0, float(RESIDENT_SELECT_RETRY_DELAY_SECONDS)))
+            _log(
+                "WARN",
+                f"常驻：选第 {deck_index} 个卡组未成功，重试一次"
+                f"（{result.get('error')}）。",
+            )
+        try:
+            result = dict(
+                battle_entry.select_deck(
+                    int(deck_index), logger=lambda text: _log("SYS", text)
+                )
+                or {}
+            )
+        except Exception as exc:
+            result = {"ok": False, "error": f"选卡组异常：{exc}"}
+        if result.get("ok") or result.get("cancelled"):
+            # 取消是用户意图：不再 2s 后重试（重试只会再点一次卡组）。
+            return result
+    return result
+
+
+def _resident_arm_worker(cfg: dict) -> bool:
+    """开启常驻（或错误后自启接管）的装配：拉起炉石 → 进对战 → 模式 → 卡组 → 开自动化。
+
+    ``label`` 区分来源：崩溃后自动接管叫「守护自启接管」，用户手动开启叫「守护开启」，
+    日志/告警里一眼能看出这次是「错误后自动开始」还是「手动开始」。
+
+    失败（含 Ctrl+Q 取消）**必须让常驻暂停**：否则 supervisor 下一拍会直接
+    api_start 盲启动，FSM 可能在未知界面自己进对战、用没确认的卡组开打。
+    """
+    global _RESIDENT_ARM_RUNNING
+    ok = False
+    label = _resident_arm_label()
+    try:
+        import battle_entry
+
+        battle_entry.clear_cancel()
+        if not _hearthstone_window_ready():
+            _log("SYS", f"{label}：炉石没在运行，先把它拉起来……")
+            if not _resident_launch_hearthstone():
+                _resident_alert(
+                    f"{label}失败：炉石没能自动启动；本次不启动自动化。"
+                )
+                return False
+        fsm = _resident_fsm()
+        _resident_reset_log_reader(fsm)
+        if _resident_log_in_game(fsm):
+            if _resident_stop_reason():
+                _log("WARN", f"{label}已中止：收到停止/急停请求，不会启动自动化。")
+                return False
+            _log("SYS", f"{label}：日志显示已在局内，直接续跑自动化。")
+            ok = _resident_start_after_ready(label)
+            return ok
+
+        if _resident_stop_reason():
+            _log("WARN", f"{label}已中止：收到停止/急停请求，不会进入对战。")
+            return False
+        _log("SYS", f"{label}：正在进入对战（主界面 → 选择套牌）……")
+        result = battle_entry.enter_battle(
+            deck_index=None,
+            click_start=False,
+            foreground=_focus_hearthstone_if_present,
+            logger=lambda text: _log("SYS", text),
+            # 装配全程可取消：Ctrl+Q / 停止按钮置位后下一轮轮询立刻停手。
+            should_abort=lambda: _resident_stop_reason() is not None,
+        )
+        if _resident_log_in_game(fsm):
+            if _resident_stop_reason():
+                _log("WARN", f"{label}已中止：收到停止/急停请求，不会启动自动化。")
+                return False
+            _log("SYS", f"{label}：进入对战时日志显示已在局内，跳过模式/卡组。")
+            ok = _resident_start_after_ready(label)
+            return ok
+        if not result.get("ok"):
+            message = result.get("message") or "自动进入对战未完成"
+            if result.get("stage") == "aborted" or _resident_stop_reason():
+                _log("WARN", f"{label}已取消：{message}；不会启动自动化。")
+                return False
+            _resident_alert(f"{label}失败：{message}；本次不启动自动化。")
+            return False
+
+        if _resident_stop_reason():
+            _log("WARN", f"{label}已中止：收到停止/急停请求，不再切模式。")
+            return False
+        mode = str(cfg.get("mode") or "standard")
+        _log("SYS", f"{label}：选择对战模式 {mode}……")
+        picked = _resident_select_mode_with_retry(mode)
+        if not picked.get("ok"):
+            if _resident_stop_reason():
+                _log("WARN", f"{label}已取消：收到停止/急停请求，不会启动自动化。")
+                return False
+            _resident_alert(
+                f"{label}失败：切换模式「{mode}」未成功"
+                f"（{picked.get('error')}）；本次不启动自动化。"
+            )
+            return False
+
+        deck_index = cfg.get("deck_index")
+        if deck_index:
+            if _resident_stop_reason():
+                _log("WARN", f"{label}已中止：收到停止/急停请求，不再选卡组。")
+                return False
+            _log("SYS", f"{label}：选择第 {int(deck_index)} 个卡组……")
+            picked_deck = _resident_select_deck_with_retry(int(deck_index))
+            if not picked_deck.get("ok"):
+                if _resident_stop_reason():
+                    _log("WARN", f"{label}已取消：收到停止/急停请求，不会启动自动化。")
+                    return False
+                _resident_alert(
+                    f"{label}失败：选第 {int(deck_index)} 个卡组未成功"
+                    f"（{picked_deck.get('error')}）；本次不启动自动化。"
+                )
+                return False
+
+        ok = _resident_start_after_ready(label)
+        return ok
+    except Exception as exc:
+        traceback.print_exc()
+        _resident_alert(f"{label}异常：{exc}；本次不启动自动化。")
+        return False
+    finally:
+        # 先暂停、再放 ARM_RUNNING 标志：反过来会留下“标志已清、supervisor 立刻
+        # 再派一次 arm”的窄窗口。
+        if not ok:
+            # 装配失败/被取消：让常驻暂停，绝不留给 supervisor 下一拍盲启动的机会。
+            _resident_request_pause(f"{label}失败")
+        with _RESIDENT_ARM_LOCK:
+            _RESIDENT_ARM_RUNNING = False
+
+
+# ---- 常驻恢复链路：重启步骤 → 重置日志 → 探测重连(≤10s) → 进对战 → 模式 → 卡组 → 开自动化
+def _resident_begin_restart(source: str) -> bool:
+    """标记一次重启恢复开始（与看门狗/手动重启共用 _RESTART_STATE 与串行锁）。"""
+    with _restart_lock:
+        if _RESTART_STATE.get("running"):
+            return False
+        _restart_begin(source)
+        return True
+
+
+def _resident_recover_dispatch(cfg=None, reason=None) -> bool:
+    """监督器的 recover 回调：加锁防并发、起后台线程，立刻返回是否派发。
+
+    兼容 R1 的两种调用形态：``recover(cfg, reason)`` 与 ``recover(reason)``。
+    """
+    if isinstance(cfg, str) and reason is None:
+        cfg, reason = None, cfg
+    if not isinstance(cfg, dict):
+        cfg = _resident_settings()
+    reason = str(reason or "resident")
+    if not _resident_begin_restart("resident"):
+        _log("WARN", "常驻想自动恢复，但上一次「重启炉石」还没结束，本次跳过。")
+        return False
+    threading.Thread(
+        target=_resident_recover_worker,
+        args=(dict(cfg), reason),
+        name="hs-resident-recover",
+        daemon=True,
+    ).start()
+    return True
+
+
+def _resident_select_failed(message: str) -> bool:
+    """选模式/卡组最终失败：告警 + 不启动自动化 + 收尾（返回 False 便于直接 return）。"""
+    _resident_alert(message)
+    _resident_finish_recovery(False)
+    _restart_finish("select_failed", False, message)
+    return False
+
+
+def _resident_recover_worker(cfg: dict, reason: str) -> bool:
+    """常驻恢复的完整链路。任何一步失败/被停止都停在安全状态：绝不启动自动化。
+
+    取消信号的生命周期：开始时清一次上一轮残留；**此之后不清**，因为重启步骤
+    可能跑 1–3 分钟，期间 Ctrl+Q 置的取消必须留到每个阶段动作前被检查到。
+    """
+    reason = str(reason or "resident")
+    _log("SYS", f"常驻：检测到异常（{reason}），开始自动恢复……")
+    try:
+        import battle_entry
+
+        battle_entry.clear_cancel()
+        stop = _resident_stop_reason()
+        if stop:
+            return _resident_abort_recovery(stop, "常驻恢复开始前已是停止状态。")
+
+        _restart_stage("restarting")
+        if not _restart_hearthstone_steps():
+            _resident_alert(
+                "常驻恢复失败：重启炉石没成功；已停在安全状态，不会再点任何坐标。"
+            )
+            _resident_finish_recovery(False)
+            _restart_finish("restart_failed", False, "常驻恢复：重启炉石失败（见日志）")
+            return False
+
+        # 重启步骤可能耗时 1–3 分钟：期间用户可能 Ctrl+Q/停止，必须复查（不能清掉）。
+        stop = _resident_stop_reason()
+        if stop:
+            return _resident_abort_recovery(stop, "重启炉石期间收到停止/取消请求。")
+
+        _restart_stage("waiting_session")
+        fsm = _resident_fsm()
+        _resident_reset_log_reader(fsm)
+
+        in_game = False
+        cancelled_early = False
+        deadline = time.monotonic() + max(
+            0.0, float(RESIDENT_RECONNECT_PROBE_SECONDS)
+        )
+        while True:
+            if _resident_log_in_game(fsm):
+                in_game = True
+                break
+            if battle_entry.is_cancelled():
+                cancelled_early = True
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(max(0.0, float(RESIDENT_RECONNECT_PROBE_INTERVAL)))
+
+        if cancelled_early:
+            return _resident_abort_recovery(
+                "cancelled", "常驻恢复已取消：收到手动急停请求。"
+            )
+        stop = _resident_stop_reason()
+        if stop:
+            return _resident_abort_recovery(stop, "常驻恢复在探测阶段被停止。")
+
+        if not in_game:
+            _restart_stage("entering")
+            _log("SYS", "常驻恢复：日志还没显示在局内，尝试进入对战……")
+            result = battle_entry.enter_battle(
+                deck_index=None,
+                click_start=False,
+                foreground=_focus_hearthstone_if_present,
+                logger=lambda text: _log("SYS", text),
+                # 重连成功要立刻停手转续打：手动急停 或 日志显示已在局内，都中止点击。
+                should_abort=lambda: battle_entry.is_cancelled()
+                or _resident_log_in_game(fsm),
+            )
+            in_game = _resident_log_in_game(fsm)
+            if not result.get("ok") and not in_game:
+                if result.get("stage") == "aborted" or _resident_stop_reason():
+                    return _resident_abort_recovery(
+                        "cancelled", "常驻恢复已取消：收到手动急停请求。"
+                    )
+                message = result.get("message") or "自动进入对战未完成"
+                _resident_alert(
+                    f"常驻恢复失败：{message}；不会启动自动化，等待人工处理。"
+                )
+                _resident_finish_recovery(False)
+                _restart_finish(
+                    "recover_failed", False, f"常驻恢复：进入对战失败（{message}）"
+                )
+                return False
+
+        stop = _resident_stop_reason()
+        if stop:
+            return _resident_abort_recovery(stop, "常驻恢复在进入对战后被停止。")
+
+        if in_game:
+            # 重连分支：已在局内就跳过模式/卡组，直接续跑（不点安全中心点）。
+            _log("SYS", "常驻恢复：日志显示已在局内（重连成功），直接续跑自动化。")
+        else:
+            mode = str(cfg.get("mode") or "standard")
+            _restart_stage("selecting_mode")
+            stop = _resident_stop_reason()
+            if stop:
+                return _resident_abort_recovery(stop, "常驻恢复在切模式前被停止。")
+            _log("SYS", f"常驻恢复：选择对战模式 {mode}……")
+            picked = _resident_select_mode_with_retry(mode)
+            if not picked.get("ok"):
+                if _resident_stop_reason():
+                    return _resident_abort_recovery(
+                        "cancelled", "常驻恢复已取消：收到停止/急停请求。"
+                    )
+                return _resident_select_failed(
+                    f"常驻恢复失败：切换模式「{mode}」未成功"
+                    f"（{picked.get('error')}）；不会启动自动化。",
+                )
+            stop = _resident_stop_reason()
+            if stop:
+                return _resident_abort_recovery(stop, "常驻恢复在选模式后被停止。")
+            deck_index = cfg.get("deck_index")
+            if deck_index:
+                _restart_stage("selecting_deck")
+                stop = _resident_stop_reason()
+                if stop:
+                    return _resident_abort_recovery(stop, "常驻恢复在选卡组前被停止。")
+                _log("SYS", f"常驻恢复：选择第 {int(deck_index)} 个卡组……")
+                picked_deck = _resident_select_deck_with_retry(int(deck_index))
+                if not picked_deck.get("ok"):
+                    if _resident_stop_reason():
+                        return _resident_abort_recovery(
+                            "cancelled", "常驻恢复已取消：收到停止/急停请求。"
+                        )
+                    return _resident_select_failed(
+                        f"常驻恢复失败：选第 {int(deck_index)} 个卡组未成功"
+                        f"（{picked_deck.get('error')}）；不会启动自动化。",
+                    )
+
+        _restart_stage("starting")
+        # api_start 前最后一道闸：用户暂停/取消/停止、常驻被关闭都绝不再启动。
+        stop = _resident_stop_reason()
+        if stop:
+            return _resident_abort_recovery(stop, "常驻恢复在启动自动化前被停止。")
+        if not _resident_enabled():
+            _log("WARN", "常驻已被关闭：本次恢复不启动自动化。")
+            _resident_finish_recovery(False)
+            _resident_disable()
+            _restart_finish("cancelled", False, "守护已关闭")
+            return False
+        started = api_start({"keep_score": True, "keep_schedule": True})
+        if not (started or {}).get("ok"):
+            message = (started or {}).get("error") or "未知原因"
+            _resident_alert(f"常驻恢复失败：重新开始自动化失败：{message}")
+            _resident_finish_recovery(False)
+            _restart_finish(
+                "recover_failed", False, f"常驻恢复：重新开始自动化失败：{message}"
+            )
+            return False
+
+        count = _resident_note_recovery_success()
+        # 次数放在最前面：浮窗「最近事件」只有约 18 个字符宽，放后面会被截掉。
+        note = (f"常驻第 {count} 次恢复成功（本次运行累计）："
+                f"自动化已重新开始，继续挂机。")
+        _log("SYS", f"✅ {note}")
+        _restart_finish("recovered", True, "常驻恢复：已重启并继续挂机")
+        _resident_finish_recovery(True, note)
+        return True
+    except Exception as exc:
+        traceback.print_exc()
+        _resident_alert(f"常驻恢复异常：{exc}")
+        _resident_finish_recovery(False)
+        _restart_finish("exception", False, f"常驻恢复异常：{exc}")
+        return False
+    finally:
+        with _restart_lock:
+            _RESTART_STATE["running"] = False
+
+
+# ---- 状态 / API / 浮窗回调
+def _resident_state() -> dict:
+    """常驻状态 = 监督器 state() + 重启恢复进度 + 最近告警（status 与浮窗共用）。"""
+    supervisor = RESIDENT if RESIDENT is not None else _resident_supervisor()
+    if supervisor is not None:
+        try:
+            state = dict(supervisor.state() or {})
+        except Exception as exc:
+            state = {
+                "enabled": False,
+                "state": "error",
+                "message": f"常驻状态读取失败：{exc}",
+            }
+    else:
+        settings = _resident_settings()
+        state = {
+            "enabled": bool(settings.get("enabled")),
+            "state": "disabled",
+            "mode": settings.get("mode", "standard"),
+            "deck_index": settings.get("deck_index"),
+            "message": "常驻判定模块未就绪",
+        }
+    snapshot = _restart_snapshot()
+    state["recover_stage"] = snapshot.get("stage")
+    state["recover_running"] = bool(snapshot.get("running"))
+    state["recover_source"] = snapshot.get("source")
+    state["recover_ok"] = snapshot.get("ok")
+    state["recover_message"] = snapshot.get("message")
+    state["alert"] = _RESIDENT_ALERT.get("text")
+    state["alert_at"] = _RESIDENT_ALERT.get("at")
+    # 提前告警（warn_seconds）：只提示、不动作；网页/浮窗状态行显示。
+    # 监督器已复位（warned=False）时自动隐藏，避免恢复完成后网页/CLI 一直挂着
+    # 旧的 ⚠️；没有 warned 字段的旧监督器（或测试替身）按"显示"处理。
+    warned = state.get("warned")
+    if warned is None or bool(warned):
+        state["warning"] = _RESIDENT_WARN.get("text")
+        state["warning_at"] = _RESIDENT_WARN.get("at")
+    else:
+        state["warning"] = None
+        state["warning_at"] = None
+    state["arm_pending"] = bool(_RESIDENT_ARM_PENDING)
+    state["arm_running"] = bool(_RESIDENT_ARM_RUNNING)
+    # 手动停止标记（跨控制台重启）：浮窗/网页/CLI 据此显示「上次是手动退出，
+    # 本次保持暂停等手动开始」，和「错误后自动开始」区分开。
+    manual = _resident_intent_state()
+    state["manual_stop"] = bool(manual.get("manual_stop"))
+    state["manual_stop_scope"] = manual.get("scope") or None
+    state["manual_stop_reason"] = manual.get("reason") or None
+    state["manual_stop_at"] = manual.get("at") or None
+    state["start_cause"] = _resident_start_cause()
+    # 「每次恢复成功」的累计次数（本次控制台运行）：浮窗常驻页/日志、网页、CLI 共用。
+    state["recoveries_total"] = int(_RESIDENT_RECOVERY_COUNT)
+    # 定时窗口作为常驻的外层约束：等待原因 + 当前计划起止时间，网页/浮窗/CLI
+    # 都从 /api/status.resident 直接读，不用再拼顶层字段。
+    state["waiting_reason"] = state.get("waiting_reason")
+    try:
+        with CTRL.lock:
+            schedule = dict(CTRL.schedule or {})
+    except Exception:
+        schedule = {}
+    state["schedule_start"] = (
+        schedule["start"].isoformat(timespec="minutes")
+        if schedule.get("start")
+        else None
+    )
+    state["schedule_end"] = (
+        schedule["end"].isoformat(timespec="minutes")
+        if schedule.get("end")
+        else None
+    )
     return state
+
+
+def _resident_busy_reason():
+    """常驻倒计时/启动/装配/恢复中拒绝手动点按的提示；不忙时返回 None。
+
+    只在**装配层**拦手：手动模式/卡组/进对战与常驻自己抢鼠标会互相打断。
+    """
+    if _RESIDENT_ARM_RUNNING:
+        return "守护正在开启装配（进对战/选模式/选卡组）；请等它结束再手动操作。"
+    supervisor = RESIDENT
+    if supervisor is None:
+        return None
+    try:
+        state = str((supervisor.state() or {}).get("state") or "")
+    except Exception:
+        return None
+    if state == "countdown":
+        return "守护正在倒计时；请等它开始后再手动操作。"
+    if state == "starting":
+        return "守护正在启动自动化；请稍候再手动操作。"
+    if state == "recovering":
+        return "守护正在自动恢复；请等它结束后再手动操作。"
+    return None
+
+
+def _resident_resume() -> None:
+    supervisor = _resident_supervisor()
+    if supervisor is None:
+        return
+    # 注意：**不在这里清 CTRL.stopped_by**。只有 api_resident 的显式开启意图才允许
+    # 清停止标记；纯设置保存（浮窗「保存常驻设置」/hsctl set）不能把暂停的常驻
+    # 重新拉起来。
+    try:
+        supervisor.resume()
+    except Exception as exc:
+        _log("WARN", f"常驻恢复启动失败：{exc}")
+
+
+def _resident_resume_after_restart() -> bool:
+    """手动重启炉石完成：把被这次重启打断的常驻恢复起来。
+
+    只在重启开始前常驻确实在管事（``_resident_will_act()``）时才调用。清掉重启
+    期间可能残留的停止标记、登记一次装配待办并 resume，让监督器重新把自动化
+    拉起来。常驻已被关闭时不恢复（保持现状）。
+
+    **手动停止优先级最高**：如果重启期间用户按了 Ctrl+Q/停止（取消开关已置位，
+    或监督器 paused_reason 是用户停止来源），这里保持暂停、绝不恢复；否则在
+    清停止标记/登记装配待办之前先清掉残留取消信号，避免装配一开头就被 abort。
+    """
+    if not _resident_enabled():
+        _log("SYS", "手动重启完成；常驻未开启，不自动恢复。")
+        return False
+    stop = _resident_user_stop_reason()
+    if stop:
+        _log("WARN", f"手动重启被用户取消/停止（{stop}），常驻保持暂停。")
+        return False
+    try:
+        import battle_entry
+
+        battle_entry.clear_cancel()
+    except Exception:
+        pass
+    try:
+        with CTRL.lock:
+            CTRL.stopped_by = None
+    except Exception:
+        pass
+    _resident_set_arm_pending(True)
+    _resident_resume()
+    _log("SYS", "手动重启完成，守护已恢复。")
+    return True
+
+
+def _resident_disable() -> None:
+    supervisor = _resident_supervisor()
+    if supervisor is None:
+        return
+    try:
+        supervisor.disable()
+    except Exception as exc:
+        _log("WARN", f"常驻关闭失败：{exc}")
+
+
+def api_resident(body: dict = None) -> dict:
+    """读取/保存「守护」（原常驻）配置（ui_config.json 的 resident 段）。
+
+    body 为空 → 只读回当前配置与状态（网页读取走 /api/status）。
+    支持字段：enabled / mode / deck_index / 各阈值（含 warn_seconds 提前告警）/
+    dry_run；越界值由 config.normalize_resident_settings 收敛。enabled 从关→开
+    且自动化在跑时拒绝。
+    """
+    body = body or {}
+    try:
+        from config import normalize_resident_settings
+    except Exception as exc:
+        return {"ok": False, "error": f"守护配置不可用：{exc}"}
+    cfg = load_config()
+    section = cfg.get("resident")
+    section = dict(section) if isinstance(section, dict) else {}
+    current = normalize_resident_settings(section)
+    if not body:
+        return {
+            "ok": True,
+            "resident": _resident_state(),
+            "settings": current,
+            "message": "守护状态与当前配置",
+        }
+
+    updated = dict(current)
+    if body.get("enabled") is not None:
+        updated["enabled"] = _as_bool(body.get("enabled"))
+    if body.get("mode") not in (None, ""):
+        updated["mode"] = str(body.get("mode"))
+    if "deck_index" in body:
+        raw = body.get("deck_index")
+        if raw in (None, ""):
+            updated["deck_index"] = None
+        else:
+            try:
+                updated["deck_index"] = int(raw)
+            except (TypeError, ValueError):
+                return {
+                    "ok": False,
+                    "error": "deck_index 必须是 1-9 的整数（或留空）",
+                }
+    for key in (
+        "stale_in_game_seconds",
+        "stale_other_seconds",
+        "warn_seconds",
+        "window_seconds",
+        "check_seconds",
+        "settle_seconds",
+        "start_delay_seconds",
+    ):
+        if body.get(key) in (None, ""):
+            continue
+        try:
+            updated[key] = float(body[key])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"{key} 必须是数字（秒）"}
+    if body.get("max_restarts") not in (None, ""):
+        try:
+            updated["max_restarts"] = int(body["max_restarts"])
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "max_restarts 必须是整数"}
+    if body.get("dry_run") is not None:
+        updated["dry_run"] = _as_bool(body.get("dry_run"))
+    updated = normalize_resident_settings(updated)
+
+    # 「开启并开始」意图：网页主按钮 / 浮窗一键恢复都会带 start=True。
+    # 与「只保存设置」区分开：保存不启动，start 才会进入装配/开局；
+    # 自动化正在运行时也能开启（只接管监督，不打断当前对局）。
+    start_intent = bool(_as_bool(body.get("start"))) or (
+        str(body.get("action") or "").strip().lower() in ("start", "arm")
+    )
+    if start_intent:
+        updated["enabled"] = True
+        updated = normalize_resident_settings(updated)
+
+    turning_on = bool(updated["enabled"]) and not bool(current["enabled"])
+    # 「显式开启意图」：body 里真的带了 enabled=true（浮窗一键恢复/CLI on）。
+    # 浮窗「保存常驻设置」与 hsctl set 只带 mode/阈值，**不代表**用户要恢复运行；
+    # 暂停中的常驻必须保持暂停（手动停止=暂停，重新开启才继续）。
+    explicit_on = bool(updated["enabled"]) and (
+        "enabled" in body and body.get("enabled") is not None
+    )
+    with CTRL.lock:
+        automation_running = bool(
+            CTRL.automation_thread is not None or CTRL.starting
+        )
+    if turning_on and not start_intent:
+        if automation_running:
+            return {"ok": False, "error": "先停止自动化再开启守护。"}
+
+    # N11：先登记“装配待办”再落盘，避免 start_delay=0 时监督器在保存前/后
+    # 抢跑看到“已开启但没待办”而做出错误派发。自动化正在跑时不派装配（会
+    # 打断当前对局），只接管监督。
+    if (turning_on or start_intent) and not automation_running:
+        _resident_set_arm_pending(True)
+    elif start_intent or turning_on:
+        _resident_set_arm_pending(False)
+
+    cfg["resident"] = dict(updated)
+    save_config(cfg)
+
+    if updated["enabled"]:
+        if turning_on or explicit_on or start_intent:
+            # B4：CTRL.stopped_by 不会自行清零；只有显式开启/恢复才清掉它并
+            # resume（否则倒计时一结束就被判 paused、永远不 arm）。
+            with CTRL.lock:
+                CTRL.stopped_by = None
+            # 显式开启常驻 = 用户手动开始的意图：解除跨重启的「手动停止」标记，
+            # 并让装配日志按「常驻开启」（不是「自启接管」）记录。
+            _resident_set_start_cause("manual")
+            _resident_clear_manual_stop("显式开启常驻")
+            _resident_resume()
+            delay = float(updated.get("start_delay_seconds") or 0.0)
+            if start_intent:
+                if automation_running:
+                    message = (
+                        "守护已开启：当前对局由守护监督，本局结束后会自动重开；"
+                        "点「暂停守护」可随时停手。"
+                    )
+                else:
+                    message = (
+                        f"守护已开启：{delay:.0f}s 后自动按"
+                        f"「{updated['mode']} · 卡组 {updated['deck_index'] or '未指定'}」"
+                        "进入对战并开始。"
+                    )
+            elif turning_on:
+                message = (
+                    f"守护已开启（{updated['mode']}，{delay:.0f}s 后自动装配）；"
+                    "停止自动化即暂停。"
+                )
+            else:
+                message = "守护已恢复（倒计时后自动接管）。"
+        else:
+            # 纯设置保存：不动运行态；暂停中保持暂停，不 resume、不清 stopped_by。
+            state = str((_resident_state() or {}).get("state") or "")
+            if state in ("paused", "paused_exhausted", "error"):
+                message = "设置已保存（常驻仍暂停）。"
+            else:
+                message = "守护设置已保存。"
+    else:
+        _resident_set_arm_pending(False)
+        _resident_disable()
+        # 正在跑恢复/装配时关常驻：把在点的循环也停掉（不点任何坐标），
+        # 收尾由各自 worker 走 cancelled 分支。
+        try:
+            with _restart_lock:
+                recovering = bool(_RESTART_STATE.get("running"))
+            if recovering or _RESIDENT_ARM_RUNNING:
+                import battle_entry
+
+                battle_entry.request_cancel()
+        except Exception:
+            pass
+        message = "守护已关闭。"
+    _log("SYS", message)
+    return {
+        "ok": True,
+        "message": message,
+        "resident": _resident_state(),
+        "settings": updated,
+    }
+
+
+def _overlay_resident():
+    """浮窗「常驻」页状态回调（出异常返回空 dict，浮窗显示占位）。"""
+    try:
+        return _resident_state()
+    except Exception:
+        return {}
+
+
+def _overlay_resident_toggle():
+    """浮窗「暂停常驻/开启常驻」按钮：返回一句话消息或 None。"""
+    try:
+        enabled = bool(_resident_state().get("enabled"))
+        result = api_resident({"enabled": not enabled})
+        if result.get("ok"):
+            return result.get("message")
+        return result.get("error") or "切换常驻失败"
+    except Exception as exc:
+        return f"切换常驻失败：{exc}"
+
+
+def _overlay_resident_apply(payload):
+    """浮窗「保存常驻设置」：接收 dict，返回 {"ok", "message"}。"""
+    try:
+        result = api_resident(dict(payload or {}))
+        return {
+            "ok": bool(result.get("ok")),
+            "message": result.get("message") or result.get("error") or "",
+        }
+    except Exception as exc:
+        return {"ok": False, "message": f"保存常驻设置失败：{exc}"}
 
 
 # ---------------------------------------------------------------- 界面识别 / 一键进入对战
@@ -3524,6 +5280,10 @@ def api_enter_battle(body=None) -> dict:
     import battle_entry
 
     body = body or {}
+    # 常驻倒计时/恢复中：两边同时点会互相打断，先拒绝手动进对战。
+    resident_guard = _resident_busy_reason()
+    if resident_guard:
+        return {"ok": False, "error": resident_guard}
     if CTRL.automation_thread is not None or CTRL.starting:
         return {
             "ok": False,
@@ -3631,6 +5391,10 @@ def api_deck_click(body=None) -> dict:
     import battle_entry
 
     body = body or {}
+    # 常驻倒计时/恢复中：两边同时点会互相打断，先拒绝手动点卡组。
+    resident_guard = _resident_busy_reason()
+    if resident_guard:
+        return {"ok": False, "error": resident_guard}
     if CTRL.automation_thread is not None or CTRL.starting:
         return {
             "ok": False,
@@ -3694,6 +5458,10 @@ def api_mode_click(body=None) -> dict:
     坐标可在 ui_config.json 顶层 `mode_click` 段覆盖。
     """
     body = body or {}
+    # 常驻倒计时/恢复中：两边同时点会互相打断，先拒绝手动切模式。
+    resident_guard = _resident_busy_reason()
+    if resident_guard:
+        return {"ok": False, "error": resident_guard}
     # 守卫③：队列在跑 → 拒绝（队列内部调用走 _mode_click_inner，不受此限）
     with _QUEUE_LOCK:
         if _QUEUE_STATE["running"]:
@@ -4180,12 +5948,18 @@ def status_snapshot():
     # 策略选择：网页「基础配置 → 策略选择」用这里回显（key 用于选中，label 用于提示）。
     strategy_key = strategy_setting()
     strategy_info = {"key": strategy_key, "label": strategy_label(strategy_key)}
+    # 盒子推荐失效兜底：enabled / strategy / 阈值（网页「基础配置」回显）。
+    box_fallback_info = box_fallback_settings()
+    box_fallback_info["strategy_label"] = strategy_label(
+        box_fallback_info.get("strategy", ""))
     # 浮窗是否真的开着：网页用它同步「🪟 日志浮窗（开/关）」按钮文字，
     # 也能解释「为什么大按钮回到了开始运行」。
     try:
         overlay_running = bool(log_overlay is not None and log_overlay.is_running())
     except Exception:
         overlay_running = False
+    # 常驻状态（判定在 R1 的监督器里；这里只读快照 + 恢复进度 + 告警）。
+    resident_state = _resident_state()
     return {
         "server_time": datetime.now().isoformat(timespec="seconds"),
         # 当前跑的是哪个版本：网页顶栏和浮窗品牌行都显示这个 label。
@@ -4215,9 +5989,11 @@ def status_snapshot():
         "surrenders": _surrender_state(),
         "rank_stop": _rank_stop_state(),
         "human_like": _current_human_like(),
-        "liveness": {**_liveness_state(), **_current_liveness()},
-        "liveness_alert": _liveness_state().get("alert"),
-        "watchdog": _watchdog_state(),
+        # 生存信号（进程/日志）：阈值已并入「守护」，这里只保留浮窗状态行用的采样值，
+        # 旧的 liveness/watchdog 配置与状态字段已删除。
+        "liveness": _liveness_state(),
+        # 守护（原常驻）：enabled/state/目标/阈值/提前告警/重启配额/恢复进度/最近告警。
+        "resident": resident_state,
         "name_match": _name_match_state(),
         "delays": _current_delays(),
         # 策略选择 / 联合模式 / 最大搜索深度（本地卡组策略，R18）。
@@ -4225,6 +6001,8 @@ def status_snapshot():
         "strategy_options": strategy_options(),
         "joint": joint_setting(),
         "max_search": max_search_setting(),
+        # 盒子推荐失效兜底（R18K）：盒子AI 连续失败/无进展时用本地策略接管。
+        "box_fallback": box_fallback_info,
         "selfcheck": selfcheck_summary(),
         "config": {"name": cfg.get("name", ""), "log_root": cfg.get("log_root", "")},
         "last_error": err,
@@ -4391,10 +6169,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_rank_stop(body))
             elif path == "/api/human_like":
                 self._json(api_save_human_like(body))
-            elif path == "/api/liveness":
-                self._json(api_save_liveness(body))
-            elif path == "/api/watchdog":
-                self._json(api_watchdog(body))
+            elif path == "/api/resident":
+                # 守护（原常驻）：POST 保存/开关；读取走 /api/status 的 resident 字段。
+                self._json(api_resident(body))
             elif path == "/api/delays":
                 self._json(api_save_delays(body))
             elif path == "/api/strategy":
@@ -4403,6 +6180,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(api_save_joint(body))
             elif path == "/api/max_search":
                 self._json(api_save_max_search(body))
+            elif path == "/api/box_fallback":
+                self._json(api_save_box_fallback(body))
             elif path == "/api/selfcheck":
                 self._json(api_selfcheck(force=True))
             elif path == "/api/serve/stop":
@@ -4445,16 +6224,32 @@ def api_serve_stop(body=None):
             403,
         )
     _log("SYS", "收到自停请求：停自动化 → 清理端口文件 → 退出控制台。")
-    threading.Thread(target=_self_shutdown, name="hs-self-stop", daemon=True).start()
+    keep_intent = bool(body.get("keep_intent"))
+    threading.Thread(
+        target=_self_shutdown,
+        args=(keep_intent,),
+        name="hs-self-stop",
+        daemon=True,
+    ).start()
     return {"ok": True, "message": "已受理：控制台正在退出"}, 200
 
 
-def _self_shutdown() -> None:
-    """自停收尾：先优雅停自动化，再清端口文件，最后退出进程。"""
+def _self_shutdown(keep_intent: bool = False) -> None:
+    """自停收尾：先优雅停自动化，再清端口文件，最后退出进程。
+
+    ``keep_intent=True`` 供 `hsctl serve restart` 使用：重启只是换一份代码，
+    不是「用户不玩了」，所以不写「手动停止」标记（重启后常驻照常自动接管）。
+    """
     try:
         if CTRL.automation_thread is not None:
             try:
-                api_stop({"mode": "now"})
+                if keep_intent:
+                    api_stop(
+                        {"mode": "now", "_resident_internal": True,
+                         "keep_schedule": True}
+                    )
+                else:
+                    api_stop({"mode": "now"})
             except Exception:
                 pass
             deadline = time.time() + 15
@@ -4462,12 +6257,61 @@ def _self_shutdown() -> None:
                 time.sleep(0.2)
     except Exception:
         pass
+    # 手动停止控制台（hsctl serve stop / 网页自停）：落盘标记，看门狗以后不自动拉起。
+    # restart 传 keep_intent=True，不算手动退出。
+    if not keep_intent:
+        try:
+            _resident_record_manual_stop(
+                "控制台自停（hsctl serve stop）", scope="console"
+            )
+        except Exception:
+            pass
     _clear_port_file()
     # 用 os._exit：这是"自己结束自己"，不需要（也拿不到）任何特权。
     os._exit(0)
 
 
 # ---------------------------------------------------------------- 启动
+def _install_console_ctrl_handler() -> bool:
+    """关闭控制台窗口/控制台中断时，先落盘「手动停止」标记再让系统收尾。
+
+    为什么需要：点窗口右上角 × 或用任务栏关闭，进程是被系统直接结束的，web_ui
+    的收尾代码一行都不会跑。不在这里写标记，下次启动就会把「用户手动关窗」当成
+    崩溃，按「错误后自动开始」装配/点鼠标——正是用户反馈的问题。
+    """
+    global _CONSOLE_CTRL_HANDLER
+    if os.name != "nt" or _CONSOLE_CTRL_HANDLER is not None:
+        return False
+    try:
+        from ctypes import wintypes
+
+        handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+
+        def _handler(event):
+            # 1 = CTRL_BREAK_EVENT，2 = CTRL_CLOSE_EVENT（关窗口）。
+            # CTRL_C 交给 Python 的 KeyboardInterrupt 分支处理，不在这里抢。
+            if int(event) in (1, 2):
+                try:
+                    _resident_record_manual_stop(
+                        "关闭控制台窗口" if int(event) == 2 else "控制台中断",
+                        scope="console",
+                    )
+                except Exception:
+                    pass
+            return False  # 交回系统默认处理（该退出还是退出）
+
+        _CONSOLE_CTRL_HANDLER = handler_type(_handler)
+        if not ctypes.windll.kernel32.SetConsoleCtrlHandler(
+            _CONSOLE_CTRL_HANDLER, True
+        ):
+            _CONSOLE_CTRL_HANDLER = None
+            return False
+        return True
+    except Exception as exc:
+        _log("WARN", f"注册控制台关闭回调失败（忽略）：{exc}")
+        return False
+
+
 def _write_port_file(port: int) -> None:
     """把实际监听端口写给 CLI / agent（原子替换，读到的永远是一份完整 JSON）。
 
@@ -4533,6 +6377,10 @@ def _boot_resume_schedule():
 
 def main():
     os.chdir(ROOT)
+    # 关闭控制台窗口（×/注销/中断）时先落盘「手动停止」标记：否则下次启动会把
+    # 用户手动关窗当成崩溃，按「错误后自动开始」自动装配/点鼠标。
+    if _resident_running_as_console():
+        _install_console_ctrl_handler()
     # DPI 感知必须最先声明：未声明时 Windows 会把客户区几何按系统缩放虚拟化
     # （150% 下 1920×1080 报成 1280×720），而抓图是物理像素 —— 两者对不上会
     # 让所有 ROI 错位、界面识别失败。见 display_mapping 模块 docstring。
@@ -4544,9 +6392,10 @@ def main():
         pass
     # 常驻阶段监测线程：停止自动化也继续检测当前阶段（随时可恢复）
     threading.Thread(target=_stage_monitor_loop, name="hs-stage", daemon=True).start()
-    # 「中断重启」看门狗的重启通道：把 web_ui 的重启动作注入给看门狗模块
-    # （看门狗本身不认识 web_ui，靠这里接线，避免循环 import）。
-    _bind_watchdog_restarter()
+    # 守护（原常驻）监督器：判定在 src/safety/resident_supervisor.py，
+    # 这里起线程 + 注入真实信号。热键注册之前起，保证启动即能接管
+    # 「自动化没在跑但守护开着」的续跑判定。
+    _bind_resident()
     # 全局 Ctrl+Q 急停：随控制台常驻（不跟自动化的生死走），空闲/手动进对战
     # 期间也能一键叫停正在点的动作。
     _register_hotkey()
@@ -4592,6 +6441,8 @@ def main():
         while True:
             time.sleep(3600)
     except KeyboardInterrupt:
+        # Ctrl+C 退出控制台也算「用户手动退出」：落盘标记，下次启动保持暂停。
+        _resident_record_manual_stop("Ctrl+C 退出", scope="console")
         print("\n控制台已退出。")
     finally:
         _clear_port_file()

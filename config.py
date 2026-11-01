@@ -223,98 +223,205 @@ DEFAULT_HUMAN_LIKE = {
 }
 
 
-# ---------------------------------------------------------------- 炉石存活检测
-# 挂机时最常见的两个“脚本不知道炉石已经没了”的场景（issue 反馈：
-# 炉石在换牌界面闪退后，脚本仍对失效画面做 OCR，空转近 3 小时）：
-#   1. Hearthstone.exe 进程消失（闪退/被杀/关掉）—— 权威信号，最可靠；
-#   2. 进程还在但卡死无响应（画面冻结）—— 用 Power.log 是否长时间无新增判断，
-#      只能作为辅助信号（匹配/选牌阶段日志本来就安静，所以只在“对局中”生效）。
-# 判定为“已退出/无响应”后立即在日志与浮窗醒目告警，并自动停止自动化。
-#   enabled              : 总开关（默认开；可在 Web「🩺 存活检测」里关闭）。
-#   process_grace_seconds: 进程消失后连续这么多秒都没回来才判定（防瞬时抖动）。
-#   log_stale_warn_seconds: Power.log 停滞超过该秒数 → 告警（不停止）。
-#   log_stale_stop_seconds: Power.log 停滞超过该秒数 → 判定无响应并自动停止。
-# 真实值保存在 ui_config.json 的 liveness 段。
-DEFAULT_LIVENESS = {
-    "enabled": True,
-    "process_grace_seconds": 6.0,
-    "log_stale_warn_seconds": 120.0,
-    "log_stale_stop_seconds": 300.0,
+# ---------------------------------------------------------------- 守护（原常驻/存活检测/中断重启）
+# 2026-11-01 合并：原「🩺 存活检测」「🔄 中断重启」「🛰️ 常驻模式」三个功能合并为
+# 一个「🛡️ 守护」，统一由 src/safety/resident_supervisor.py 判定：
+#   * 炉石进程消失 / 自动化停摆 / 日志停滞（对局中、其它界面两档）→ 自动重启炉石、
+#     重进对战、重新开局；统一配额、统一阈值、统一手动停止语义；
+#   * 守护**关闭**时保留最小安全网（见 FSM_action.check_hearthstone_liveness）：
+#     炉石进程消失 / 对局中日志卡死 → 告警并停止自动化，**不再**自动重启。
+# 旧的 ui_config.json 里如果有 `liveness` / `watchdog` 段会被**忽略**（不读取、
+# 不迁移）；这些键对应的网页卡与 CLI 子命令已删除。
+#
+# 判定逻辑在 src/safety/resident_supervisor.py（依赖全部注入、可无 Windows 单测），
+# 本段只负责配置的读取与收敛。
+
+#   enabled              : 总开关（默认**关**，要用户显式打开才生效）。
+#   mode                 : 目标模式 standard/wild/casual（也接受 标准/狂野/休闲）。
+#   deck_index           : 目标卡组序号 1..9；None = 不指定（沿用当前选中卡组）。
+#   stale_in_game_seconds: 对局中 Power.log 停滞多少秒判定卡住。
+#   stale_other_seconds  : 非对局界面（主菜单/选牌/结算）停滞多少秒判定卡住。
+#   warn_seconds         : 提前告警阈值（默认 120s）：日志停滞达到它但未到上面的
+#                          处理阈值时只告警、不动作；0 = 关闭提前告警。
+#   max_restarts         : 滑动窗口内最多自动恢复几次，超过就暂停守护并告警。
+#   window_seconds       : 滑动窗口长度（默认 600s = 10 分钟）。
+#   check_seconds        : 判定间隔。
+#   settle_seconds       : 一次恢复完成后的宽限期，期间不判定（给日志写起来）。
+#   start_delay_seconds  : 开启守护后的倒计时（留出用户在桌面上的操作时间）。
+#   dry_run              : 试运行：只判定/告警，不真的重启炉石或启动自动化。
+# 真实值保存在 ui_config.json 的 resident 段。
+RESIDENT_MODES = ("standard", "wild", "casual")
+
+# 用户可能写中文或大小写混写；统一归一化成上面的英文 key。
+RESIDENT_MODE_ALIASES = {
+    "standard": "standard",
+    "wild": "wild",
+    "casual": "casual",
+    "标准": "standard",
+    "狂野": "wild",
+    "休闲": "casual",
 }
 
-
-def liveness_settings() -> dict:
-    """读取 ui_config.json 的 liveness 段（每次调用都读文件，改完即时生效）。
-
-    缺字段/类型不对时回退默认值；数值做基本收敛（停止阈值不小于告警阈值），
-    避免配置写坏导致“刚开局就被判定无响应”。
-    """
-    cfg = dict(DEFAULT_LIVENESS)
-    data = _load_ui_config().get("liveness")
-    if isinstance(data, dict):
-        for key in cfg:
-            if data.get(key) is not None:
-                cfg[key] = data[key]
-    try:
-        cfg["enabled"] = bool(cfg["enabled"])
-        grace = max(0.0, float(cfg["process_grace_seconds"]))
-        warn = max(1.0, float(cfg["log_stale_warn_seconds"]))
-        stop = max(warn, float(cfg["log_stale_stop_seconds"]))
-        cfg["process_grace_seconds"] = grace
-        cfg["log_stale_warn_seconds"] = warn
-        cfg["log_stale_stop_seconds"] = stop
-    except (TypeError, ValueError):
-        return dict(DEFAULT_LIVENESS)
-    return cfg
-
-
-# ---------------------------------------------------------------- 中断重启（看门狗）
-# 「日志卡住就重启炉石重开一局」的看门狗。与存活检测（liveness）的区别：
-#   * liveness：Power.log 停滞 → **停止**自动化并告警，等人来处理；
-#   * watchdog：Power.log 停滞 → **重启炉石并重新开始**，无人值守自己爬回来。
-# 两者看的是同一个（其实不同的）信号，但 watchdog **优先级更高**：开关打开时
-# 由它接管「停滞」这件事，liveness 那条自动停止不再触发（见 FSM_action
-# check_hearthstone_liveness）。开关关闭时行为与从前完全一致。
-#   enabled           : 总开关（**默认关**，要用户显式打开才生效）。
-#   stale_seconds     : Power.log 停滞超过该秒数 → 判定卡住并重启（默认 300s = 5 分钟）。
-#   max_restarts      : 滑动窗口内最多重启几次，超过就停止并告警（防无限重启）。
-#   window_seconds    : 滑动窗口长度（默认 600s = 10 分钟）。
-#   check_seconds     : 判定间隔（默认 15s，别设太小以免抖动误判）。
-#   settle_seconds    : 重启并重新进入对战后，先给它这么多秒把日志写起来再重新计时
-#                       （默认 120s），否则刚重启完日志还没动就又被判停滞。
-# 真实值保存在 ui_config.json 的 watchdog 段。
-DEFAULT_WATCHDOG = {
+DEFAULT_RESIDENT = {
     "enabled": False,
-    "stale_seconds": 300.0,
+    "mode": "standard",
+    "deck_index": None,
+    "stale_in_game_seconds": 180.0,
+    "stale_other_seconds": 300.0,
+    "warn_seconds": 120.0,
     "max_restarts": 3,
     "window_seconds": 600.0,
-    "check_seconds": 15.0,
+    "check_seconds": 5.0,
     "settle_seconds": 120.0,
+    "start_delay_seconds": 5.0,
+    "dry_run": False,
 }
 
+# 收敛边界（与 DEFAULT_RESIDENT 的说明一一对应）。
+_RESIDENT_STALE_IN_GAME_RANGE = (60.0, 3600.0)
+_RESIDENT_WARN_RANGE = (0.0, 3600.0)
+_RESIDENT_CHECK_RANGE = (2.0, 60.0)
+_RESIDENT_MAX_RESTARTS_RANGE = (1, 20)
+_RESIDENT_START_DELAY_RANGE = (0.0, 60.0)
+_RESIDENT_DECK_RANGE = (1, 9)
 
-def watchdog_settings() -> dict:
-    """读取 ui_config.json 的 watchdog 段（每次调用都读文件，改完即时生效）。
 
-    缺字段/类型不对时回退默认值；数值做基本收敛，避免配置写坏导致
-    「刚开局就重启」或「无限重启」。
-    """
-    cfg = dict(DEFAULT_WATCHDOG)
-    data = _load_ui_config().get("watchdog")
-    if isinstance(data, dict):
-        for key in cfg:
-            if data.get(key) is not None:
-                cfg[key] = data[key]
+def _resident_bool(value, default: bool) -> bool:
+    """把 JSON/表单里可能出现的各种布尔写法归一化成 bool。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on", "是", "开"):
+            return True
+        if text in ("0", "false", "no", "off", "否", "关", ""):
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _resident_float(source: dict, key: str, default: float) -> float:
+    value = source.get(key)
+    if value is None or isinstance(value, bool):
+        return float(default)
     try:
-        cfg["enabled"] = bool(cfg["enabled"])
-        cfg["stale_seconds"] = max(30.0, float(cfg["stale_seconds"]))
-        cfg["max_restarts"] = max(1, int(cfg["max_restarts"]))
-        cfg["window_seconds"] = max(cfg["stale_seconds"], float(cfg["window_seconds"]))
-        cfg["check_seconds"] = max(5.0, float(cfg["check_seconds"]))
-        cfg["settle_seconds"] = max(0.0, float(cfg["settle_seconds"]))
+        return float(value)
     except (TypeError, ValueError):
-        return dict(DEFAULT_WATCHDOG)
-    return cfg
+        return float(default)
+
+
+def _resident_clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _resident_mode(value) -> str:
+    if not isinstance(value, str):
+        return str(DEFAULT_RESIDENT["mode"])
+    text = value.strip()
+    mode = RESIDENT_MODE_ALIASES.get(text) or RESIDENT_MODE_ALIASES.get(text.lower())
+    return mode if mode in RESIDENT_MODES else str(DEFAULT_RESIDENT["mode"])
+
+
+def _resident_deck_index(value) -> Optional[int]:
+    """卡组序号只接受 1..9 的整数；其余（None/越界/非整数）一律 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value.strip()) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError):
+        return None
+    if not number.is_integer():
+        return None
+    index = int(number)
+    return index if _RESIDENT_DECK_RANGE[0] <= index <= _RESIDENT_DECK_RANGE[1] else None
+
+
+def normalize_resident_settings(data: dict) -> dict:
+    """把任意（可能缺字段/越界的）resident 配置归一化成完整可用的 dict。
+
+    `resident_settings()` 读文件与 Web API 校验都走这里，保证两边口径一致：
+    缺字段回退默认值；类型不对回退默认值；数值夹在安全区间内。返回的 dict
+    只包含 `DEFAULT_RESIDENT` 里的键（未知键丢弃）。
+    """
+    source = data if isinstance(data, dict) else {}
+
+    enabled = _resident_bool(source.get("enabled"), bool(DEFAULT_RESIDENT["enabled"]))
+    mode = _resident_mode(source.get("mode"))
+    deck_index = _resident_deck_index(source.get("deck_index"))
+    dry_run = _resident_bool(source.get("dry_run"), bool(DEFAULT_RESIDENT["dry_run"]))
+
+    stale_in_game = _resident_clamp(
+        _resident_float(source, "stale_in_game_seconds",
+                        float(DEFAULT_RESIDENT["stale_in_game_seconds"])),
+        *_RESIDENT_STALE_IN_GAME_RANGE,
+    )
+    # 非对局界面的日志本来就安静（选牌/结算），阈值不能比"对局中"还小，
+    # 否则刚进主菜单就会被误判卡住；同时不低于 60s 防抖动。
+    stale_other = max(
+        max(60.0, stale_in_game),
+        _resident_float(source, "stale_other_seconds",
+                        float(DEFAULT_RESIDENT["stale_other_seconds"])),
+    )
+    # 提前告警必须在处理阈值之前才有效：夹到 (0, stale_in_game]；0 = 关闭提前告警。
+    warn_seconds = _resident_clamp(
+        _resident_float(source, "warn_seconds",
+                        float(DEFAULT_RESIDENT["warn_seconds"])),
+        *_RESIDENT_WARN_RANGE,
+    )
+    if warn_seconds > 0.0:
+        warn_seconds = min(warn_seconds, stale_in_game)
+    check_seconds = _resident_clamp(
+        _resident_float(source, "check_seconds",
+                        float(DEFAULT_RESIDENT["check_seconds"])),
+        *_RESIDENT_CHECK_RANGE,
+    )
+    max_restarts = int(_resident_clamp(
+        _resident_float(source, "max_restarts", float(DEFAULT_RESIDENT["max_restarts"])),
+        float(_RESIDENT_MAX_RESTARTS_RANGE[0]), float(_RESIDENT_MAX_RESTARTS_RANGE[1]),
+    ))
+    # 窗口不能比停滞阈值还短，否则"窗口内次数"永远统计不到有意义的重启。
+    window_seconds = max(
+        stale_other,
+        _resident_float(source, "window_seconds",
+                        float(DEFAULT_RESIDENT["window_seconds"])),
+    )
+    settle_seconds = max(
+        0.0,
+        _resident_float(source, "settle_seconds",
+                        float(DEFAULT_RESIDENT["settle_seconds"])),
+    )
+    start_delay_seconds = _resident_clamp(
+        _resident_float(source, "start_delay_seconds",
+                        float(DEFAULT_RESIDENT["start_delay_seconds"])),
+        *_RESIDENT_START_DELAY_RANGE,
+    )
+
+    return {
+        "enabled": enabled,
+        "mode": mode,
+        "deck_index": deck_index,
+        "stale_in_game_seconds": stale_in_game,
+        "stale_other_seconds": stale_other,
+        "warn_seconds": warn_seconds,
+        "max_restarts": max_restarts,
+        "window_seconds": window_seconds,
+        "check_seconds": check_seconds,
+        "settle_seconds": settle_seconds,
+        "start_delay_seconds": start_delay_seconds,
+        "dry_run": dry_run,
+    }
+
+
+def resident_settings() -> dict:
+    """读取 ui_config.json 的 resident 段（每次调用都重新读文件，改完即时生效）。
+
+    缺段/段类型不对时整段回退默认值；段内缺字段逐项回退，并做越界收敛，
+    避免配置写坏导致「常驻刚开就乱重启」或「配额被绕过」。
+    """
+    data = _load_ui_config().get("resident")
+    return normalize_resident_settings(data if isinstance(data, dict) else {})
 
 
 # ---------------------------------------------------------------- 策略选择
@@ -335,6 +442,21 @@ DEFAULT_MAX_SEARCH = 1500
 # 一次决策的墙钟预算（秒）：超时返回当前最优，避免把回合拖死。
 # 首次搜索要加载卡组策略/卡表（实测冷启动 ~2s），留 5s 兜底；热搜索 ~0.1s。
 DEFAULT_SEARCH_TIME_LIMIT = 5.0
+
+# 盒子推荐失效兜底（R18K）：盒子AI 路径连续失败/长时间无进展时，用本地策略
+# 接管；盒子恢复可执行推荐后自动切回。默认关闭，网页勾选后下一局生效。
+#   enabled            ：总开关
+#   strategy           ：ai/ 下的本地策略（不能是 hsbox）；默认「通用」
+#   fail_streak        ：连续 RETRY 次数阈值
+#   stall_seconds      ：我方回合内连续多少秒没有成功动作就接管
+#   mulligan_fail_streak：换牌盒子 OCR 连续失败次数阈值
+DEFAULT_BOX_FALLBACK = {
+    "enabled": False,
+    "strategy": "通用",
+    "fail_streak": 6,
+    "stall_seconds": 8.0,
+    "mulligan_fail_streak": 2,
+}
 
 
 def strategy_choices() -> dict:
@@ -442,6 +564,123 @@ def save_joint_setting(enabled) -> bool:
     CONFIG_PATH.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return value
+
+
+# ---------------------------------------------------------------- 盒子失效兜底
+def _box_fallback_bool(value, default: bool) -> bool:
+    """把配置里/网页传来的开关归一成 bool（兼容 "false"/"0" 这类字符串）。"""
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off"):
+            return False
+        return default
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
+def _box_fallback_int(value, low: int, high: int, default: int) -> int:
+    """整数收敛到 [low, high]；坏值回退默认。"""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _box_fallback_float(value, low: float, high: float, default: float) -> float:
+    """浮点收敛到 [low, high]；坏值回退默认。"""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:                       # NaN
+        return default
+    return max(low, min(high, number))
+
+
+def normalize_box_fallback(raw) -> dict:
+    """把 ui_config.json 的 box_fallback 归一化。
+
+    缺字段/类型不对逐项回退；数值夹到安全区间；`strategy` 必须是 ai/ 下的
+    本地策略（不能是盒子AI/未知名字），否则回退「通用」。配置写坏也不能让
+    自动化开不了工。
+    """
+    cfg = dict(DEFAULT_BOX_FALLBACK)
+    if isinstance(raw, dict):
+        for key in cfg:
+            if raw.get(key) is not None:
+                cfg[key] = raw[key]
+    cfg["enabled"] = _box_fallback_bool(cfg.get("enabled"),
+                                        DEFAULT_BOX_FALLBACK["enabled"])
+    allowed = strategy_choices()
+    strategy = str(cfg.get("strategy") or "").strip()
+    if strategy == STRATEGY_BOX or strategy not in allowed:
+        strategy = "通用" if "通用" in allowed else ""
+    cfg["strategy"] = strategy
+    cfg["fail_streak"] = _box_fallback_int(
+        cfg.get("fail_streak"), 1, 50, DEFAULT_BOX_FALLBACK["fail_streak"])
+    cfg["stall_seconds"] = _box_fallback_float(
+        cfg.get("stall_seconds"), 1.0, 120.0,
+        DEFAULT_BOX_FALLBACK["stall_seconds"])
+    cfg["mulligan_fail_streak"] = _box_fallback_int(
+        cfg.get("mulligan_fail_streak"), 1, 10,
+        DEFAULT_BOX_FALLBACK["mulligan_fail_streak"])
+    return cfg
+
+
+def box_fallback_settings() -> dict:
+    """读取盒子失效兜底配置（每次调用都重读 ui_config.json）。"""
+    return normalize_box_fallback(_load_ui_config().get("box_fallback"))
+
+
+def save_box_fallback_setting(enabled=None, strategy=None, fail_streak=None,
+                              stall_seconds=None,
+                              mulligan_fail_streak=None) -> dict:
+    """保存盒子失效兜底配置（只改 box_fallback，其余配置原样保留）。
+
+    只写调用方显式给出的字段（None = 沿用当前值）。未知/盒子策略抛 KeyError，
+    数字非法抛 ValueError（与 save_max_search_setting 的约定一致）。
+    """
+    data = _load_ui_config()
+    current = normalize_box_fallback(data.get("box_fallback"))
+    changes = {
+        "enabled": enabled,
+        "strategy": strategy,
+        "fail_streak": fail_streak,
+        "stall_seconds": stall_seconds,
+        "mulligan_fail_streak": mulligan_fail_streak,
+    }
+    for key, value in changes.items():
+        if value is not None:
+            current[key] = value
+
+    # 显式校验：网页/CLI 传了未知策略要报错，而不是悄悄回退。
+    key = str(current.get("strategy") or "").strip()
+    if key not in strategy_choices() or key == STRATEGY_BOX:
+        raise KeyError(f"未知策略：{key}")
+
+    # 数值字段非法时明确报错（不夹取）：避免用户以为保存成功但实际被改。
+    for name, caster, low, high in (
+            ("fail_streak", int, 1, 50),
+            ("stall_seconds", float, 1.0, 120.0),
+            ("mulligan_fail_streak", int, 1, 10)):
+        value = current.get(name)
+        try:
+            number = caster(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{name} 必须是数字")
+        if number != number or number < low or number > high:
+            raise ValueError(f"{name} 必须在 {low}..{high} 之间")
+        current[name] = number
+
+    current = normalize_box_fallback(current)
+    data["box_fallback"] = current
+    CONFIG_PATH.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return current
 
 
 def search_time_limit_setting() -> float:
@@ -965,13 +1204,19 @@ _USER_DELAY_KEYS = (
     "mulligan_ready_delay_seconds",
     "mulligan_post_ocr_delay_seconds",
     "mulligan_retry_delay_seconds",
-    # 兼容旧配置/网页/CLI：字段仍可读写，但运行期已不再用固定延时。
-    "first_turn_per_card_delay_seconds",
-    "pre_action_delay_seconds",
     "post_action_delay_seconds",
     "draw_extra_delay_per_card_seconds",
     "discover_target_delay_seconds",
     "ocr_preprocess_scale",
+)
+
+# 已废弃的「固定回合开始延时」：R18 起我方回合就绪改为 OCR 右侧「结束回合」按钮
+# （见 RecommendationConfig.turn_start_probe_interval_seconds），运行期**不再读取**
+# 这两个值。这里集中登记，用来把网页 / CLI / 接口 / 旧 ui_config.json 里的残留
+# 一并清掉——别再让用户调一个不会生效的开关（2026-11-01 用户反馈）。
+_DEPRECATED_DELAY_KEYS = (
+    "first_turn_per_card_delay_seconds",
+    "pre_action_delay_seconds",
 )
 
 
@@ -1112,8 +1357,10 @@ class RecommendationConfig:
     # 技能/拼装点击后日志暂时没变化时，先等这么久再重试，避免快速重击。
     unconfirmed_retry_delay_seconds: float = 3.0
 
-    # 旧版的固定回合开始延时已移除：现在以右侧「结束回合」按钮的 OCR
-    # 结果作为就绪信号。保留字段只为兼容已有构造调用，运行期不再读取。
+    # 旧版的固定回合开始延时（每张开局卡 / 每回合前）已移除：现在以右侧
+    # 「结束回合」按钮的 OCR 结果作为就绪信号。这两个字段**保留只为兼容已有
+    # 构造调用**（不怕传，但传了不生效），运行期不再读取，也不在网页 / CLI /
+    # 接口的延时字段白名单里（见 _DEPRECATED_DELAY_KEYS）。
     first_turn_per_card_delay_seconds: float = 0.0
     pre_action_delay_seconds: float = 0.0
 

@@ -26,8 +26,7 @@ import web_ui
 class _FrozenConfig:
     """模仿 RecommendationConfig：frozen dataclass，普通 setattr 会抛异常。"""
 
-    pre_action_delay_seconds: float = 7.0
-    first_turn_per_card_delay_seconds: float = 3.5
+    mulligan_retry_delay_seconds: float = 5.0
     post_action_delay_seconds: float = 0.2
     ocr_preprocess_scale: float = 1.4
 
@@ -46,7 +45,7 @@ class HotChannelTests(unittest.TestCase):
         self.addCleanup(lambda: setattr(web_ui.CTRL, "automation_thread",
                                        self.saved_thread))
         self.saved_cfg = {}
-        self.cfg = {"delays": {}, "human_like": {}, "liveness": {},
+        self.cfg = {"delays": {}, "human_like": {},
                     "auto_concede": {}, "rank_stop": {},
                     "name": "", "log_root": ""}
         for name, kwargs in (
@@ -65,9 +64,8 @@ class HotChannelTests(unittest.TestCase):
     # ------------------------------------------------ 守卫没有被放松
     def test_endpoints_without_hot_stay_blocked_while_running(self):
         cases = (
-            ("delays", web_ui.api_save_delays, {"pre_action_delay_seconds": 1}),
+            ("delays", web_ui.api_save_delays, {"mulligan_retry_delay_seconds": 1}),
             ("human_like", web_ui.api_save_human_like, {"enabled": True}),
-            ("liveness", web_ui.api_save_liveness, {"enabled": False}),
             ("concede", web_ui.api_save_concede, {"enabled": True}),
             ("rank_stop", web_ui.api_save_rank_stop, {"enabled": True}),
             ("config", web_ui.api_save_config, {"name": "A#1"}),
@@ -87,10 +85,6 @@ class HotChannelTests(unittest.TestCase):
              lambda saved: (
                  self.assertTrue(saved["human_like"]["enabled"]),
                  self.assertEqual(saved["human_like"]["post_delay_max"], 2.0))),
-            ("liveness", web_ui.api_save_liveness,
-             {"enabled": False, "log_stale_warn_seconds": 60,
-              "log_stale_stop_seconds": 120},
-             lambda saved: self.assertFalse(saved["liveness"]["enabled"])),
             ("concede", web_ui.api_save_concede,
              {"enabled": True, "threshold": 12, "rounds": 4},
              lambda saved: (
@@ -120,14 +114,14 @@ class HotChannelTests(unittest.TestCase):
         fake.recommendation_config = _FrozenConfig()
         with patch.dict(sys.modules, {"FSM_action": fake}):
             result = web_ui.api_save_delays(
-                {"hot": True, "pre_action_delay_seconds": 3.5})
+                {"hot": True, "mulligan_retry_delay_seconds": 3.5})
         self.assertTrue(result["ok"])
-        self.assertEqual(result["effects"]["pre_action_delay_seconds"], "live")
+        self.assertEqual(result["effects"]["mulligan_retry_delay_seconds"], "live")
         # 关键：frozen dataclass 也被就地改写了 —— 说明流程对象持有的同一实例
         # 会立刻看到新值（而不是只改了 ui_config.json 等下次重开）。
-        self.assertEqual(fake.recommendation_config.pre_action_delay_seconds, 3.5)
+        self.assertEqual(fake.recommendation_config.mulligan_retry_delay_seconds, 3.5)
         self.assertEqual(
-            self.saved_cfg["delays"]["pre_action_delay_seconds"], 3.5)
+            self.saved_cfg["delays"]["mulligan_retry_delay_seconds"], 3.5)
 
     def test_hot_delays_reports_effect_scope(self):
         fake = types.ModuleType("FSM_action")
@@ -150,23 +144,24 @@ class HotChannelTests(unittest.TestCase):
         fake.recommendation_config = _FrozenConfig()
         with patch.dict(sys.modules, {"FSM_action": fake}):
             result = web_ui.api_save_delays(
-                {"hot": True, "pre_action_delay_seconds": 2.0})
+                {"hot": True, "mulligan_retry_delay_seconds": 2.0})
         self.assertTrue(result["ok"])
         self.assertEqual(
-            self.saved_cfg["delays"]["pre_action_delay_seconds"], 2.0)
+            self.saved_cfg["delays"]["mulligan_retry_delay_seconds"], 2.0)
         # 没在跑就不该动内存里的实例（下次「开始对战」会重新读盘）
-        self.assertEqual(fake.recommendation_config.pre_action_delay_seconds, 7.0)
+        self.assertEqual(
+            fake.recommendation_config.mulligan_retry_delay_seconds, 5.0)
 
     # ------------------------------------------------ 校验规则照旧
     def test_hot_delays_still_enforces_bounds(self):
         result = web_ui.api_save_delays(
-            {"hot": True, "pre_action_delay_seconds": 9999})
+            {"hot": True, "mulligan_retry_delay_seconds": 9999})
         self.assertFalse(result["ok"])
         self.assertIn("必须介于", result["error"])
 
     def test_hot_delays_still_rejects_non_numeric(self):
         result = web_ui.api_save_delays(
-            {"hot": True, "pre_action_delay_seconds": "abc"})
+            {"hot": True, "mulligan_retry_delay_seconds": "abc"})
         self.assertFalse(result["ok"])
 
     def test_hot_delays_ignores_unknown_keys(self):

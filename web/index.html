@@ -85,6 +85,11 @@ input:focus,select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 
 input:disabled,select:disabled{opacity:.45;cursor:not-allowed}
 .input-row{display:flex;gap:8px}
 .input-row input,.input-row select{flex:1}
+/* 盒子里的一小块设置区（如「盒子失效兜底」）：和上面的普通表单拉开层次 */
+.settings-subpanel{background:var(--panel2);border:1px solid var(--border-soft);border-radius:12px;padding:12px 14px 2px;margin:4px 0 14px;transition:border-color .15s,box-shadow .15s}
+.settings-subpanel.active{border-color:rgba(232,185,59,.42);box-shadow:inset 0 0 0 1px rgba(232,185,59,.08)}
+.settings-subpanel .field{margin-bottom:10px}
+.settings-subpanel .field-hint{margin-top:0}
 .hint-line{margin-top:12px;font-size:12px;color:var(--muted);line-height:1.6}
 /* ---------- 按钮 ---------- */
 .btn{border-radius:10px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;transition:all .15s;color:var(--text);background:transparent}
@@ -305,6 +310,29 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
           <input id="chkJoint" type="checkbox" style="width:auto;height:22px">
         </label>
       </div>
+      <div class="settings-subpanel" id="boxFallbackPanel">
+        <label class="field" style="margin-bottom:8px">
+          <span class="field-label">🛟 盒子推荐失效时用本地策略兜底</span>
+          <input id="chkBoxFallback" type="checkbox" style="width:auto;height:22px">
+        </label>
+        <div class="input-row" style="flex-wrap:wrap;align-items:flex-start">
+          <label class="field" style="flex:2 1 200px">
+            <span class="field-label">兜底策略</span>
+            <select id="inpFallbackStrategy"></select>
+          </label>
+          <label class="field" style="flex:1 1 110px">
+            <span class="field-label">无进展秒数</span>
+            <input id="inpFallbackStall" type="number" min="1" max="120" step="1">
+          </label>
+          <label class="field" style="flex:1 1 110px">
+            <span class="field-label">连续失败次数</span>
+            <input id="inpFallbackFailStreak" type="number" min="1" max="50" step="1">
+          </label>
+        </div>
+        <div class="field-hint" style="margin-bottom:10px">
+          盒子AI 连续读不到可执行推荐，或连续这么多秒没有成功动作时，改用上面的本地策略；盒子恢复后自动切回。默认关闭，下一局生效。
+        </div>
+      </div>
       <div class="btn-row">
         <button id="btnSaveStrategy" class="btn btn-ghost" type="button">💾 保存策略</button>
       </div>
@@ -346,49 +374,47 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
     </section>
 
     <section class="card wide">
-      <h2 class="card-title">🩺 存活检测（挂机防空转）</h2>
+      <h2 class="card-title">🛡️ 守护（无人值守自愈）</h2>
       <div class="input-row">
         <label class="field" style="flex:none;min-width:90px">
           <span class="field-label">启用</span>
-          <input id="chkLiveness" type="checkbox" style="width:auto;height:22px">
+          <input id="chkResident" type="checkbox" style="width:auto;height:22px">
         </label>
         <label class="field">
-          <span class="field-label">日志停滞告警（秒）</span>
-          <input id="inpLvWarn" type="number" min="1" max="3600" step="10">
+          <span class="field-label">对战模式</span>
+          <select id="selResidentMode">
+            <option value="standard">标准</option>
+            <option value="wild">狂野</option>
+            <option value="casual">休闲</option>
+          </select>
         </label>
         <label class="field">
-          <span class="field-label">日志停滞自动停止（秒）</span>
-          <input id="inpLvStop" type="number" min="1" max="7200" step="10">
+          <span class="field-label">卡组序号（可空，1-9）</span>
+          <input id="inpResidentDeck" type="number" min="1" max="9" step="1" placeholder="不自动选">
+        </label>
+        <label class="field">
+          <span class="field-label">提前告警（秒，0=关）</span>
+          <input id="inpResidentWarn" type="number" min="0" max="3600" step="10" placeholder="120">
+        </label>
+        <label class="field">
+          <span class="field-label">对局中停滞（秒）</span>
+          <input id="inpResidentStaleGame" type="number" min="60" max="3600" step="30">
+        </label>
+        <label class="field">
+          <span class="field-label">其他界面停滞（秒）</span>
+          <input id="inpResidentStaleOther" type="number" min="60" max="3600" step="30">
+        </label>
+        <label class="field">
+          <span class="field-label">最多重启次数（10 分钟内）</span>
+          <input id="inpResidentMax" type="number" min="1" max="20" step="1">
         </label>
       </div>
       <div class="btn-row">
-        <button id="btnSaveLiveness" class="btn btn-ghost" type="button">💾 保存存活检测</button>
+        <button id="btnSaveResident" class="btn btn-ghost" type="button">💾 保存设置</button>
+        <button id="btnStartResident" class="btn btn-primary" type="button">▶ 开启守护并开始</button>
       </div>
-      <div class="hint-line">挂机时最怕“炉石已经没了，脚本还在对着失效画面做 OCR”。开启后每个循环都会确认：<b>Hearthstone.exe 进程是否还在</b>（闪退/被关，权威信号），以及<b>对局中 Power.log 是否还在更新</b>（进程还在但游戏卡死）。判定退出会立刻在日志与浮窗<b>醒目告警并自动停止自动化</b>，不会空转到天亮。默认开启；自动化运行中不可修改。</div>
-      <div class="hint-line" id="livenessStatus" style="margin-top:4px;color:var(--text)">存活状态：等待检测…</div>
-    </section>
-
-    <section class="card wide">
-      <h2 class="card-title">🔄 中断重启（卡住自动重开）</h2>
-      <div class="input-row">
-        <label class="field" style="flex:none;min-width:90px">
-          <span class="field-label">启用</span>
-          <input id="chkWatchdog" type="checkbox" style="width:auto;height:22px">
-        </label>
-        <label class="field">
-          <span class="field-label">日志停滞多久算卡住（秒）</span>
-          <input id="inpWdStale" type="number" min="30" max="3600" step="30">
-        </label>
-        <label class="field">
-          <span class="field-label">最多重启次数</span>
-          <input id="inpWdMax" type="number" min="1" max="20" step="1">
-        </label>
-      </div>
-      <div class="btn-row">
-        <button id="btnSaveWatchdog" class="btn btn-ghost" type="button">💾 保存中断重启</button>
-      </div>
-      <div class="hint-line">开启后，<b>自动化运行中</b>只要 <code>Power.log</code> 停滞超过阈值（默认 <b>300 秒 = 5 分钟</b>）就判定炉石卡住，自动执行：<b>重启炉石 → 等主界面 → 重新进入对战 → 重新开始挂机</b>，无人值守也能自己爬回来。<br>⚠️ 与上面的「存活检测」<b>不要同时依赖</b>：本开关打开时，日志停滞<b>交给它重启</b>，存活检测那条「自动停止」不再触发；关掉则恢复原来的「停止并等人工」。<br>🛡️ 防无限重启：<b>10 分钟内最多重启 3 次</b>，超过就停止并醒目告警（反复重启说明不是一两次抖动，继续只会烧资源）。<br>⚠️ 只在<b>自动化运行中</b>判定——停在主界面发呆时日志本来就不动，不会被误重启。</div>
-      <div class="hint-line" id="watchdogStatus" style="margin-top:4px;color:var(--text)">中断重启：等待检测…</div>
+      <div class="hint-line">🛡️ <b>这一张卡统一负责</b>：炉石进程消失、自动化停摆、日志停滞（对局中 / 其他界面两档阈值）→ <b>自动重启炉石 → 重进对战 → 重新开局</b>；<b>10 分钟</b>滑动窗口内最多重启 <b>N 次</b>（下方「最多重启次数」），超限就暂停并醒目告警，不会反复烧资源。<br>⏰ <b>提前告警</b>：日志停滞达到该秒数、但还没到处理阈值时<b>只告警不动作</b>（0 = 关）。<br>「<b>▶ 开启守护并开始</b>」= 保存设置后立即按<b>模式 + 卡组</b>进对战并开局（倒计时 5 秒）；已开启时按钮变成「⏸ 暂停守护」，一键停手。「💾 保存设置」只保存参数、不改运行状态，运行中也能改。<br>✋ <b>手动停止</b>（立即停止 / 急停 / Ctrl+Q / 浮窗退出）= <b>暂停守护</b>；再点「⚔️ 开始对战」或「🛡️ 开启守护并开始」才继续；手动退出脚本后重启会<b>保持暂停</b>。<br>🧯 守护<b>关闭</b>时仍有最小安全网：炉石进程消失、或对局中日志卡死，会告警并停止自动化（<b>不会再自动重启</b>）。<br>🖥️ 控制台自启（脚本本身崩了自动拉起）不在本卡内，用命令行：hsctl serve install-watchdog。</div>
+      <div class="hint-line" id="residentStatus" style="margin-top:4px;color:var(--text)">守护：等待检测…</div>
     </section>
 
     <section class="card wide">
@@ -544,16 +570,6 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
           <span class="field-hint">面板未就绪/推荐不可执行时每轮重试的等待</span>
         </label>
         <label class="field">
-          <span class="field-label">每张开局卡延时（秒）</span>
-          <input id="inpFirstTurnPerCard" type="number" min="0" max="20" step="0.5">
-          <span class="field-hint">检测到一张开局生效全局卡额外追加的秒数</span>
-        </label>
-        <label class="field">
-          <span class="field-label">每回合前延时（秒）</span>
-          <input id="inpPreDelay" type="number" min="0" max="60" step="0.5">
-          <span class="field-hint">新回合开始给盒子更新推荐留时间</span>
-        </label>
-        <label class="field">
           <span class="field-label">操作后延时（秒）</span>
           <input id="inpPostDelay" type="number" min="0" max="10" step="0.25">
           <span class="field-hint">一次操作后到下轮 OCR 的间隔</span>
@@ -578,6 +594,7 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
         <button id="btnSaveDelays" class="btn btn-ghost" type="button">💾 保存延时</button>
       </div>
       <div class="hint-line" id="delayHint">当前时序由服务端配置返回，见下方保存后刷新。</div>
+      <div class="hint-line">⚔️ <b>回合开始不再有固定延时</b>：日志判到我方回合后，以右侧「<b>结束回合</b>」按钮的 OCR 出现为准（每 <b>2 秒</b>复查一次），按钮画出来之前不读推荐、不出牌。旧版的「每张开局卡延时 / 每回合前延时」两个开关调了也不生效，已从网页/CLI 移除。</div>
     </section>
 
     <section class="card wide" id="cardRegions">
@@ -612,6 +629,12 @@ a:hover{color:#fff3c9;border-bottom-color:#fff3c9}
 <script>
 "use strict";
 function $(id){ return document.getElementById(id); }
+/* 勾选兜底时给子面板加金色描边，未勾选保持普通边框。 */
+function syncBoxFallbackPanel(){
+  var panel = $("boxFallbackPanel");
+  var check = $("chkBoxFallback");
+  if (panel && check) panel.classList.toggle("active", !!check.checked);
+}
 
 /* ---------- 基础请求 ---------- */
 function post(path, body){
@@ -660,8 +683,7 @@ var dirty = {name:false, log:false};
 var dirtyConcede = false;
 var dirtyDelays = false;
 var dirtyHumanLike = false;
-var dirtyLiveness = false;
-var dirtyWatchdog = false;
+var dirtyResident = false;
 var dirtyRankStop = false;
 var dirtyStrategy = false;
 
@@ -687,11 +709,6 @@ function renderBanners(s){
   }
   if (s.last_error){
     html += '<div class="banner banner-err"><span>❌</span><div>' + esc(s.last_error) + '</div></div>';
-  }
-  /* 炉石存活检测告警（进程消失/卡死，自动化已自动停止）——最重要，放最上面 */
-  var lvAlert = s.liveness_alert || (s.liveness && s.liveness.alert);
-  if (lvAlert){
-    html += '<div class="banner banner-err"><span>🩺</span><div>' + esc(lvAlert) + '</div></div>';
   }
   /* 环境自检没过：依赖/Python 版本/分辨率不对，先修这个再谈出牌 */
   var sc = s.selfcheck;
@@ -719,6 +736,55 @@ function renderBanners(s){
     }
   }
   box.innerHTML = html;
+}
+
+/* 守护状态 → 一行中文（render 与保存后提示共用）。 */
+function residentStatusText(rs){
+  if (!rs) return "守护：等待检测…";
+  var modeLabel = {standard:"标准", wild:"狂野", casual:"休闲"}[rs.mode] || rs.mode || "-";
+  var target = modeLabel + " · 卡组 " + (rs.deck_index ? rs.deck_index : "未指定");
+  var total = (rs.recoveries_total !== undefined && rs.recoveries_total !== null)
+          ? rs.recoveries_total : (rs.restarts_total || 0);
+  var rt = "本窗口重启 " + (rs.restarts_in_window || 0) + "/" + (rs.max_restarts || 0)
+         + " 次，累计 " + total + " 次";
+  var age = (rs.log_age === null || rs.log_age === undefined)
+          ? "—" : Math.round(rs.log_age) + "s";
+  var warnTxt = (rs.warning && rs.warning_at) ? " · ⚠️ " + rs.warning : "";
+  if (!rs.enabled) return "守护：已关闭（开启后无人值守：等开局 / 卡住自动重启 / 重进对战）" + warnTxt;
+  if (rs.manual_stop) {
+    return "守护：⏸ 已暂停（手动停止），点「⚔️ 开始对战」或「🛡️ 开启守护并开始」继续" + warnTxt;
+  }
+  if (rs.state === "waiting_schedule") {
+    return "守护：⏳ 等待定时窗口" + (rs.waiting_reason ? "（" + rs.waiting_reason + "）" : "")
+         + " · " + target + warnTxt;
+  }
+  if (rs.state === "waiting_user") {
+    return "守护：⏳ 等待人工处理" + (rs.waiting_reason ? "（" + rs.waiting_reason + "）" : "")
+         + " · " + target + warnTxt;
+  }
+  if (rs.state === "countdown") return "守护：⏳ 倒计时中… " + target + warnTxt;
+  if (rs.state === "starting") return "守护：🚀 正在启动（进对战/选模式/选卡组）… " + target + warnTxt;
+  if (rs.state === "recovering") {
+    return "守护：🔄 恢复中（重启炉石/重进对战）" + (rs.recover_stage ? " · " + rs.recover_stage : "")
+         + " · " + target + warnTxt;
+  }
+  if (rs.state === "paused" || rs.state === "manual_stop") {
+    return "守护：⏸ 已暂停" + (rs.paused_reason ? "（" + rs.paused_reason + "）" : "")
+         + " · 重新开启或点浮窗「开启守护」继续" + warnTxt;
+  }
+  if (rs.state === "paused_exhausted") {
+    return "守护：⚠️ 重启次数用尽，已停手等人工处理（" + rt + "）" + warnTxt;
+  }
+  if (rs.state === "error") return "守护：❌ 出错" + (rs.message ? "：" + rs.message : "") + warnTxt;
+  if (rs.state === "cancelled") return "守护：已取消" + warnTxt;
+  if (rs.state === "disabled") return "守护：已关闭" + warnTxt;
+  if (rs.state === "running") {
+    return "守护：✅ 守候中 · " + target + " · 日志停滞 " + age
+         + "（对局中 ≥" + Math.round(rs.stale_in_game_seconds || 180) + "s / 其他界面 ≥"
+         + Math.round(rs.stale_other_seconds || 300) + "s 触发自愈）· " + rt
+         + (rs.dry_run ? " · dry-run（只判定不重启）" : "") + warnTxt;
+  }
+  return "守护：状态未知（" + (rs.state || "?") + "）" + warnTxt;
 }
 
 function render(s){
@@ -798,6 +864,31 @@ function render(s){
     if (typeof s.joint !== "undefined") $("chkJoint").checked = !!s.joint;
     if (typeof s.max_search !== "undefined") $("inpMaxSearch").value = s.max_search;
   }
+  /* 盒子推荐失效兜底：选项从策略列表里去掉 hsbox；选项集合变化才重建。 */
+  $("chkBoxFallback").disabled = busy;
+  $("inpFallbackStrategy").disabled = busy;
+  $("inpFallbackStall").disabled = busy;
+  $("inpFallbackFailStreak").disabled = busy;
+  var fallbackOpts = strategyOpts.filter(function(o){ return o.key !== "hsbox"; });
+  var fallbackSig = fallbackOpts.map(function(o){ return o.key + ":" + (o.label || ""); }).join("|");
+  var fallbackSel = $("inpFallbackStrategy");
+  if (fallbackSel.getAttribute("data-signature") !== fallbackSig){
+    fallbackSel.innerHTML = "";
+    fallbackOpts.forEach(function(o){
+      var op = document.createElement("option");
+      op.value = o.key;
+      op.textContent = o.label || o.key;
+      fallbackSel.appendChild(op);
+    });
+    fallbackSel.setAttribute("data-signature", fallbackSig);
+  }
+  if (!dirtyStrategy && s.box_fallback){
+    $("chkBoxFallback").checked = !!s.box_fallback.enabled;
+    if (s.box_fallback.strategy) $("inpFallbackStrategy").value = s.box_fallback.strategy;
+    if (typeof s.box_fallback.stall_seconds !== "undefined") $("inpFallbackStall").value = s.box_fallback.stall_seconds;
+    if (typeof s.box_fallback.fail_streak !== "undefined") $("inpFallbackFailStreak").value = s.box_fallback.fail_streak;
+  }
+  syncBoxFallbackPanel();
   if (s.concede && !dirtyConcede){
     $("chkConcede").checked = !!s.concede.enabled;
     $("inpConcedeThreshold").value = s.concede.threshold;
@@ -901,79 +992,43 @@ function render(s){
     $("rankStopStatus").textContent = rsTxt;
   }
 
-  /* 存活检测 */
-  $("chkLiveness").disabled = busy;
-  $("inpLvWarn").disabled = busy;
-  $("inpLvStop").disabled = busy;
-  $("btnSaveLiveness").disabled = busy;
-  if (s.liveness && !dirtyLiveness){
-    $("chkLiveness").checked = !!s.liveness.enabled;
-    $("inpLvWarn").value = s.liveness.log_stale_warn_seconds;
-    $("inpLvStop").value = s.liveness.log_stale_stop_seconds;
+  /* 守护（原「存活检测」「中断重启」「常驻模式」三卡合并） */
+  $("chkResident").disabled = busy;
+  $("selResidentMode").disabled = busy;
+  ["inpResidentDeck","inpResidentWarn","inpResidentStaleGame","inpResidentStaleOther","inpResidentMax"]
+    .forEach(function(id){ $(id).disabled = busy; });
+  $("btnSaveResident").disabled = busy;
+  if (s.resident){
+    var rs = s.resident;
+    if (!dirtyResident){
+      $("chkResident").checked = !!rs.enabled;
+      if (rs.mode) $("selResidentMode").value = rs.mode;
+      $("inpResidentDeck").value =
+        (rs.deck_index === null || rs.deck_index === undefined) ? "" : rs.deck_index;
+      if (rs.warn_seconds !== undefined && rs.warn_seconds !== null)
+        $("inpResidentWarn").value = rs.warn_seconds;
+      if (rs.stale_in_game_seconds !== undefined && rs.stale_in_game_seconds !== null)
+        $("inpResidentStaleGame").value = rs.stale_in_game_seconds;
+      if (rs.stale_other_seconds !== undefined && rs.stale_other_seconds !== null)
+        $("inpResidentStaleOther").value = rs.stale_other_seconds;
+      if (rs.max_restarts !== undefined && rs.max_restarts !== null)
+        $("inpResidentMax").value = rs.max_restarts;
+    }
+    $("residentStatus").textContent = residentStatusText(rs);
+  } else {
+    $("residentStatus").textContent =
+      "守护：控制台未提供守护状态（web_ui.py 可能是旧版本，重启控制台后可用）";
   }
-  if (s.liveness){
-    var lv = s.liveness, lvTxt;
-    if (!lv.enabled){
-      lvTxt = "存活状态：已关闭（不会检测炉石是否还在运行）";
-    } else if (lv.status === "gone"){
-      lvTxt = "存活状态：❌ 炉石已退出（Hearthstone.exe 进程消失）";
-    } else if (lv.status === "stale"){
-      lvTxt = "存活状态：❌ 炉石疑似无响应（对局中 Power.log 停滞 " + Math.round(lv.log_age || 0) + "s）";
-    } else if (lv.status === "warning"){
-      lvTxt = "存活状态：⚠️ 对局中 Power.log 已停滞 " + Math.round(lv.log_age || 0) + "s（超过 "
-            + lv.log_stale_stop_seconds + "s 将自动停止）";
-    } else if (lv.status === "idle"){
-      lvTxt = "存活状态：炉石未运行（点「开始运行」会先拉起战网/炉石）";
-    } else if (lv.status === "ok"){
-      lvTxt = "存活状态：✅ 炉石正在运行"
-            + (lv.in_game && lv.log_age !== null && lv.log_age !== undefined
-               ? "（Power.log " + Math.round(lv.log_age) + "s 前更新）" : "")
-            + "；判定退出阈值：" + lv.log_stale_warn_seconds + "s 告警 / "
-            + lv.log_stale_stop_seconds + "s 自动停止";
-    } else {
-      lvTxt = "存活状态：无法判定（进程列表读取失败）";
-    }
-    $("livenessStatus").textContent = lvTxt;
-  }
-
-  /* 中断重启（看门狗） */
-  $("chkWatchdog").disabled = busy;
-  $("inpWdStale").disabled = busy;
-  $("inpWdMax").disabled = busy;
-  $("btnSaveWatchdog").disabled = busy;
-  if (s.watchdog){
-    var wd = s.watchdog;
-    if (!dirtyWatchdog){
-      $("chkWatchdog").checked = !!wd.enabled;
-      $("inpWdStale").value = wd.stale_seconds;
-      $("inpWdMax").value = wd.max_restarts;
-    }
-    var wdTxt;
-    if (!wd.enabled){
-      wdTxt = "中断重启：已关闭（卡住时会走「存活检测」自动停止并等人工处理）";
-    } else if (wd.status === "exhausted"){
-      wdTxt = "中断重启：❌ " + Math.round((wd.window_seconds || 600) / 60) + " 分钟内已重启 "
-            + wd.restarts_in_window + " 次（达到上限），已停手等人工处理";
-    } else if (wd.restart_running){
-      wdTxt = "中断重启：🔄 正在重启炉石并重新进入对战…";
-    } else if (wd.status === "settling"){
-      wdTxt = "中断重启：⏳ 重启后宽限期中（还剩 " + Math.round(wd.settle_left || 0) + "s 再判定）";
-    } else if (wd.status === "stale"){
-      wdTxt = "中断重启：⚠️ 日志已停滞 " + Math.round(wd.log_age || 0) + "s（≥ "
-            + wd.stale_seconds + "s），即将重启";
-    } else if (wd.status === "idle"){
-      wdTxt = "中断重启：待机（自动化未运行，不判定）";
-    } else if (wd.status === "ok"){
-      wdTxt = "中断重启：✅ 待命中（日志 " + Math.round(wd.log_age || 0) + "s 前更新；停滞 ≥ "
-            + wd.stale_seconds + "s 触发重启；本窗口已用 "
-            + wd.restarts_in_window + "/" + wd.max_restarts + " 次，累计 "
-            + (wd.restarts_total || 0) + " 次）";
-    } else if (wd.status === "unknown"){
-      wdTxt = "中断重启：待命中（暂无 Power.log，打一局后开始计时）";
-    } else {
-      wdTxt = "中断重启：无法判定";
-    }
-    $("watchdogStatus").textContent = wdTxt;
+  var residentActive = !!(s.resident && s.resident.enabled &&
+    ["countdown","starting","running","recovering"]
+      .indexOf(String(s.resident.state || "")) >= 0);
+  var startBtn = $("btnStartResident");
+  if (startBtn){
+    startBtn.textContent = residentActive ? "⏸ 暂停守护" : "▶ 开启守护并开始";
+    startBtn.className = residentActive ? "btn btn-danger" : "btn btn-primary";
+    // 自动化运行中也能开启/暂停守护（只接管监督，不打断当前对局）；
+    // 只在「自动化启动中」这个短暂窗口禁一下，避免和启动流程抢。
+    startBtn.disabled = !!s.starting;
   }
 
   /* 账号昵称校验 */
@@ -999,8 +1054,6 @@ function render(s){
     $("inpReadyDelay").value = s.delays.mulligan_ready_delay_seconds;
     $("inpPostOcrDelay").value = s.delays.mulligan_post_ocr_delay_seconds;
     $("inpRetryDelay").value = s.delays.mulligan_retry_delay_seconds;
-    $("inpFirstTurnPerCard").value = s.delays.first_turn_per_card_delay_seconds;
-    $("inpPreDelay").value = s.delays.pre_action_delay_seconds;
     $("inpPostDelay").value = s.delays.post_action_delay_seconds;
     $("inpDrawDelay").value = s.delays.draw_extra_delay_per_card_seconds;
     $("inpChoiceTargetDelay").value = s.delays.discover_target_delay_seconds;
@@ -1014,8 +1067,6 @@ function render(s){
       "当前时序：换牌前 " + d.mulligan_ready_delay_seconds + "s / " +
       "识别后 " + d.mulligan_post_ocr_delay_seconds + "s / " +
       "换牌重试 " + d.mulligan_retry_delay_seconds + "s / " +
-      "每张开局卡 " + d.first_turn_per_card_delay_seconds + "s / " +
-      "回合前 " + d.pre_action_delay_seconds + "s / " +
       "操作后 " + d.post_action_delay_seconds + "s / " +
       "抽牌每张 " + d.draw_extra_delay_per_card_seconds + "s / " +
       "抉择选目标 " + d.discover_target_delay_seconds + "s / " +
@@ -1107,10 +1158,14 @@ $("inpLog").addEventListener("input", function(){ dirty.log = true; });
 $("inpStrategy").addEventListener("change", function(){ dirtyStrategy = true; });
 $("chkJoint").addEventListener("change", function(){ dirtyStrategy = true; });
 $("inpMaxSearch").addEventListener("input", function(){ dirtyStrategy = true; });
+$("chkBoxFallback").addEventListener("change", function(){ dirtyStrategy = true; syncBoxFallbackPanel(); });
+$("inpFallbackStrategy").addEventListener("change", function(){ dirtyStrategy = true; });
+$("inpFallbackStall").addEventListener("input", function(){ dirtyStrategy = true; });
+$("inpFallbackFailStreak").addEventListener("input", function(){ dirtyStrategy = true; });
 $("chkConcede").addEventListener("change", function(){ dirtyConcede = true; });
 $("inpConcedeThreshold").addEventListener("input", function(){ dirtyConcede = true; });
 $("inpConcedeRounds").addEventListener("input", function(){ dirtyConcede = true; });
-["inpReadyDelay","inpPostOcrDelay","inpRetryDelay","inpFirstTurnPerCard","inpPreDelay","inpPostDelay","inpDrawDelay","inpChoiceTargetDelay","inpOcrScale"]
+["inpReadyDelay","inpPostOcrDelay","inpRetryDelay","inpPostDelay","inpDrawDelay","inpChoiceTargetDelay","inpOcrScale"]
   .forEach(function(id){ $(id).addEventListener("input", function(){ dirtyDelays = true; }); });
 
 function saveConfig(){
@@ -1146,8 +1201,8 @@ $("btnCheckLog").addEventListener("click", function(){
     });
 });
 
-/* ---------- 策略选择（盒子AI / 本地卡组 + 联合模式 + 最大搜索深度） ---------- */
-/* 三个字段各有一个接口、写的是同一个 ui_config.json：必须**串行**保存，
+/* ---------- 策略选择（盒子AI / 本地卡组 + 联合模式 + 最大搜索深度 + 盒子失效兜底） ---------- */
+/* 每个字段各有一个接口、写的是同一个 ui_config.json：必须**串行**保存，
    并发写会互相覆盖（读-改-写竞态）。 */
 $("btnSaveStrategy").addEventListener("click", function(){
   post("/api/strategy", {strategy: $("inpStrategy").value}).then(function(r){
@@ -1158,7 +1213,15 @@ $("btnSaveStrategy").addEventListener("click", function(){
     return post("/api/max_search", {max_search: $("inpMaxSearch").value});
   }).then(function(r){
     if (!r.ok) throw new Error(r.error || "保存最大搜索深度失败");
-    toast("策略配置已保存（改策略下一局生效）", "ok");
+    return post("/api/box_fallback", {
+      enabled: $("chkBoxFallback").checked,
+      strategy: $("inpFallbackStrategy").value,
+      fail_streak: $("inpFallbackFailStreak").value,
+      stall_seconds: $("inpFallbackStall").value
+    });
+  }).then(function(r){
+    if (!r.ok) throw new Error(r.error || "保存盒子兜底失败");
+    toast("策略配置已保存（改策略/兜底下一局生效）", "ok");
     dirtyStrategy = false;
   }).catch(function(e){
     toast(e.message || "保存失败", "error");
@@ -1397,50 +1460,91 @@ $("btnSaveHumanLike").addEventListener("click", function(){
   });
 });
 
-/* ---------- 存活检测 ---------- */
-$("chkLiveness").addEventListener("change", function(){ dirtyLiveness = true; });
-["inpLvWarn","inpLvStop"].forEach(function(id){
-  $(id).addEventListener("input", function(){ dirtyLiveness = true; });
+/* ---------- 守护（原「存活检测 / 中断重启 / 常驻模式」三卡合并） ---------- */
+var dirtyResidentEnabled = false;
+$("chkResident").addEventListener("change", function(){
+  dirtyResident = true;
+  dirtyResidentEnabled = true;   // 只有用户真的切了勾选，保存才传 enabled
+});
+["selResidentMode","inpResidentDeck","inpResidentWarn","inpResidentStaleGame",
+ "inpResidentStaleOther","inpResidentMax"].forEach(function(id){
+  $(id).addEventListener("input", function(){ dirtyResident = true; });
+  $(id).addEventListener("change", function(){ dirtyResident = true; });
 });
 
-$("btnSaveLiveness").addEventListener("click", function(){
-  post("/api/liveness", {
-    enabled: $("chkLiveness").checked,
-    log_stale_warn_seconds: $("inpLvWarn").value,
-    log_stale_stop_seconds: $("inpLvStop").value
-  }).then(function(r){
+function _residentNumber(id){
+  var raw = String($(id).value || "").trim();
+  if (!raw) return null;
+  var value = Number(raw);
+  return isFinite(value) ? value : null;
+}
+
+/* 统一构造 /api/resident 的 body：卡组空 → null；提前告警空 → 默认 120s。
+   `includeEnabled` 默认 false：「保存设置」只传参数，不能把「手动暂停」的守护
+   又 resume 起来（R9 复审 should-fix）。开启/暂停按钮自己传 enabled。 */
+function _residentPayload(includeEnabled){
+  var warn = _residentNumber("inpResidentWarn");
+  if (warn === null) warn = 120;
+  var body = {
+    mode: $("selResidentMode").value,
+    deck_index: _residentNumber("inpResidentDeck"),
+    warn_seconds: warn,
+    stale_in_game_seconds: _residentNumber("inpResidentStaleGame"),
+    stale_other_seconds: _residentNumber("inpResidentStaleOther"),
+    max_restarts: _residentNumber("inpResidentMax")
+  };
+  if (includeEnabled) body.enabled = $("chkResident").checked;
+  return body;
+}
+
+$("btnSaveResident").addEventListener("click", function(){
+  post("/api/resident", _residentPayload(dirtyResidentEnabled)).then(function(r){
     if (r.ok){
-      toast(r.message, "ok");
-      dirtyLiveness = false;
+      toast(r.message || "守护设置已保存", "ok");
+      dirtyResident = false;
+      dirtyResidentEnabled = false;
+      refreshStatus();
     } else {
       toast(r.error || "保存失败", "error");
     }
   });
 });
 
-/* ---------- 中断重启（看门狗） ---------- */
-$("chkWatchdog").addEventListener("change", function(){ dirtyWatchdog = true; });
-["inpWdStale","inpWdMax"].forEach(function(id){
-  $(id).addEventListener("input", function(){ dirtyWatchdog = true; });
-});
-
-$("btnSaveWatchdog").addEventListener("click", function(){
-  if ($("chkWatchdog").checked && !confirm(
-      "开启「中断重启」后：自动化运行中如果日志停滞超过 "
-      + $("inpWdStale").value + " 秒，脚本会自动重启炉石并重新进入对战。\n\n"
-      + "注意：它会接管「存活检测」的日志停滞判定（不再自动停止改由它重启）。\n\n确定开启？")){
+/* 「开启守护并开始」/「暂停守护」：一次点击就进对战开局，或一键停手。 */
+$("btnStartResident").addEventListener("click", function(){
+  var rs = (lastStatus && lastStatus.resident) || {};
+  var active = !!(rs.enabled &&
+    ["countdown","starting","running","recovering"]
+      .indexOf(String(rs.state || "")) >= 0);
+  if (active){
+    post("/api/resident", {enabled: false}).then(function(r){
+      if (r.ok){
+        toast(r.message || "守护已暂停", "ok");
+        dirtyResidentEnabled = false;
+        refreshStatus();
+      } else {
+        toast(r.error || "暂停失败", "error");
+      }
+    });
     return;
   }
-  post("/api/watchdog", {
-    enabled: $("chkWatchdog").checked,
-    stale_seconds: $("inpWdStale").value,
-    max_restarts: $("inpWdMax").value
-  }).then(function(r){
+  if (!confirm(
+      "开启「守护」并开始对战：会按「模式 + 卡组」进入对战并自动开局；"
+      + "运行中炉石进程消失/日志卡住会自动重启炉石并重进对战。\n\n"
+      + "自动化正在运行时也可以开启：当前对局继续，由守护接管。确定？")){
+    return;
+  }
+  var body = _residentPayload();
+  body.enabled = true;
+  body.start = true;
+  post("/api/resident", body).then(function(r){
     if (r.ok){
-      toast("中断重启已保存", "ok");
-      dirtyWatchdog = false;
+      toast(r.message || "守护已开启", "ok");
+      dirtyResident = false;
+      dirtyResidentEnabled = false;
+      refreshStatus();
     } else {
-      toast(r.error || "保存失败", "error");
+      toast(r.error || "开启守护失败", "error");
     }
   });
 });
@@ -1451,8 +1555,6 @@ $("btnSaveDelays").addEventListener("click", function(){
     mulligan_ready_delay_seconds: $("inpReadyDelay").value,
     mulligan_post_ocr_delay_seconds: $("inpPostOcrDelay").value,
     mulligan_retry_delay_seconds: $("inpRetryDelay").value,
-    first_turn_per_card_delay_seconds: $("inpFirstTurnPerCard").value,
-    pre_action_delay_seconds: $("inpPreDelay").value,
     post_action_delay_seconds: $("inpPostDelay").value,
     draw_extra_delay_per_card_seconds: $("inpDrawDelay").value,
     discover_target_delay_seconds: $("inpChoiceTargetDelay").value,

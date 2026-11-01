@@ -25,6 +25,10 @@ MCP 客户端配置（stdio）::
 
 from __future__ import annotations
 
+# 兼容「只装 requirements.txt、没装项目包」的旧式部署：把仓库内 src/ 加进 sys.path，
+# 这样 click.py / FSM_action.py 里的 `from hslegend...` 也能导入（等价 pip install -e .）。
+import _srcpath  # noqa: F401
+
 import json
 import os
 import subprocess
@@ -284,7 +288,7 @@ def delays_show() -> str:
 
 
 @server.tool(
-    description="改延时参数（支持运行中热改）。pairs 是 ['键=值', ...]，例如 ['pre_action_delay_seconds=5']。"
+    description="改延时参数（支持运行中热改）。pairs 是 ['键=值', ...]，例如 ['mulligan_ready_delay_seconds=20']。"
 )
 def delays_set(pairs: list[str]) -> str:
     if not pairs:

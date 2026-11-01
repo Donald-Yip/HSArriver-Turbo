@@ -228,13 +228,23 @@ class RankConfirmGateTests(unittest.TestCase):
 class StartingFlagTests(unittest.TestCase):
     def setUp(self):
         self._saved = (web_ui.CTRL.starting, web_ui.CTRL.automation_thread,
-                       web_ui.CTRL.fsm, web_ui.CTRL.prepared)
+                       web_ui.CTRL.fsm, web_ui.CTRL.prepared,
+                       web_ui.RESIDENT, dict(web_ui._RESIDENT_INTENT_STATE))
         web_ui.CTRL.starting = False
         web_ui.CTRL.automation_thread = None
+        # 隔离常驻全局：别的测试可能留下「手动停止」标记 + 真监督器；本测试
+        # 把 threading.Thread 换成同步假线程，若 api_start 触发 resume() 会把
+        # 监督器线程的无限循环同步跑在当前线程上（R9 复审 blocking）。
+        web_ui.RESIDENT = None
+        web_ui._RESIDENT_INTENT_STATE = {
+            "kind": "first_run", "manual_stop": False, "scope": "",
+            "reason": "", "at": "",
+        }
 
     def tearDown(self):
         (web_ui.CTRL.starting, web_ui.CTRL.automation_thread,
-         web_ui.CTRL.fsm, web_ui.CTRL.prepared) = self._saved
+         web_ui.CTRL.fsm, web_ui.CTRL.prepared,
+         web_ui.RESIDENT, web_ui._RESIDENT_INTENT_STATE) = self._saved
 
     def _patches(self, start_side_effect):
         return (

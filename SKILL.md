@@ -220,11 +220,12 @@ uv run python hsctl.py stop [--after-game]
 
 # 参数（默认走热更新通道，运行中也能改；--no-hot 退回网页那种保护）
 uv run python hsctl.py delays                           # 看延时 + 每条生效时机
-uv run python hsctl.py delays set pre_action_delay_seconds=5
+uv run python hsctl.py delays set mulligan_ready_delay_seconds=20
 uv run python hsctl.py human-like set --enabled --post-delay-min 0.5 --post-delay-max 2.5
-uv run python hsctl.py liveness set --enabled --warn 120 --stop 300
-uv run python hsctl.py watchdog on                      # 中断重启：日志停滞 5 分钟就重启炉石并重开
-uv run python hsctl.py watchdog set --stale 300 --max-restarts 3 --window 600
+uv run python hsctl.py resident set --mode wild --deck 2 --warn 120  # 守护：模式 + 卡组序号（1-9）+ 提前告警秒数
+uv run python hsctl.py resident on                       # 开启守护（5s 倒计时后自动进对战）
+uv run python hsctl.py resident status                   # 守护状态（加 --json 给 agent 读）
+uv run python hsctl.py resident off                      # 关闭守护（仍保留最小安全网）
 uv run python hsctl.py concede set --enabled --threshold 12 --rounds 4
 # 卡组识别投降（只判对方）：认出对面是哪套卡组就投；规则是「特征牌 + 与/或/非」树
 uv run python hsctl.py surrender                        # 看配置（条件译成中文）
@@ -244,6 +245,29 @@ uv run python hsctl.py calibrate --target main_menu_battle   # 校准窗口直�
 uv run python hsctl.py schedule at 22:30 --end 23:30
 uv run python hsctl.py schedule at --in 30 --duration 90
 uv run python hsctl.py schedule cancel
+
+# 浮窗只有一个内容面板（R18J）：「OCR / 执行」分块流，每块=一步动作，块内顺序
+# OCR 内容 → 执行内容，新块置顶，块间 ─ 分隔；执行段写明“号位/卡名/目标 + 结果”
+# （适配层 `AdaptedAction.description` 生成）。归块/渲染在 action_feed.py，浮窗只负责画；
+# 完整原始日志仍看网页「实时日志」或 `ui_log_last.txt`（`[OCR] 图 …` 不进块）。
+# 排障「一直检测不到结束回合」看块里的 OCR 段 + 诊断行（`[SYS] 尚未检测到…（OCR 读到：…）`）。
+# 门禁本身容忍 OCR 把「结束回合」读残（「结束回」/拆两行），主框读不到会再用
+# 更宽的兜底框读一次 —— 框没拖准也不会整回合干等（R18G）。
+#
+# 长跑内存（R18F）：每局结束日志打一行「[SYS] 内存 RSS …（较基线 … / 峰值 …）」；
+# OCR 帧缓存有界（64 条 LRU）且每局开始清空；RSS ≥900MB 在对局结束重建 OCR 引擎
+# （`[SYS] 内存回收后：RSS X → Y MB`），≥1400MB 打 WARN 建议 `hsctl serve restart`。
+# 阈值与实现见 memory_watch.py；看内存趋势直接 grep 这一行，别凭感觉。
+#
+# 我方回合内一直扫描（R18H）：还没点掉「结束回合」时两次读屏间隔 ≤2s（含活人感/
+# 抽牌延时/结果等待），回合切换即停（`_TURN_SCAN_INTERVAL`）。浮窗 OCR 框空时
+# 会写「当前：等待对手操作」；Power.log ≥90s 不更新才转橙提示可能卡住。
+# 日志框最少 ~3 行、OCR 框最多 4 行可见，两个框不会重叠（改高度常量前先量）。
+#
+# 重试前刷新（R18I）：动作重试不再用旧场面 —— 适配动作用刷新后的 fresh_state；
+# 待确认超时先等日志 revision 前进并重判 postcondition（已生效就不再点第二次）；
+# 状态类重试码（revision_changed/duplicate_board_position/turn_changed）先等
+# revision 前进并清 OCR 帧缓存（`RETRY_REFRESH_TIMEOUT`=1.5s）。
 
 # 高风险（必须用户明确要求）
 uv run python hsctl.py restart-hearthstone --yes
@@ -323,12 +347,56 @@ uv run python hsctl.py serve stop --hard                # 跳过自停，直接�
 
 | 生效时机 | 字段 |
 | --- | --- |
-| 立即生效 | `mulligan_ready_delay_seconds`、`mulligan_retry_delay_seconds`、`pre_action_delay_seconds`、`first_turn_per_card_delay_seconds`、`discover_target_delay_seconds` |
+| 立即生效 | `mulligan_ready_delay_seconds`、`mulligan_retry_delay_seconds`、`discover_target_delay_seconds` |
 | 下次「开始对战」生效 | `mulligan_post_ocr_delay_seconds`、`post_action_delay_seconds`、`draw_extra_delay_per_card_seconds` |
 | **需重启脚本进程** | `ocr_preprocess_scale` |
 
+> 旧版「每张开局卡延时 / 每回合前延时」（`first_turn_per_card_delay_seconds`、
+> `pre_action_delay_seconds`）已废弃：回合就绪改判右侧「结束回合」按钮的 OCR，
+> 这两个字段调了不生效，已从网页/CLI 移除（传了也不报错，只是被忽略）。
+
 `hsctl delays set` 的回话里有 `effects` 字段直接告诉你每项的实际时机 —— **以此为准**，
-不要凭本表猜。活人感 / 存活检测 / 中断重启 / 自动投降 / 段位目标是每次读盘，改完立即生效。
+不要凭本表猜。活人感 / 守护 / 自动投降 / 段位目标是每次读盘，改完立即生效。
+
+**守护（`resident`，无人值守自愈；就是原来的「常驻模式」）**：一张卡统一负责 ①炉石进程消失
+②自动化停摆 ③日志停滞（**对局中** `stale_in_game` 默认 180s、**其它界面** `stale_other`
+默认 300s）→ 自动重启炉石 → 重进对战 → 重新开局（重连优先，否则重选模式+卡组开新局）；
+10 分钟内最多 3 次，超限暂停并告警（控制台不退出）。按 `mode + deck_index` 进对战并持续挂机。
+**提前告警** `warn_seconds`（默认 120，0=关）：日志停滞到它但没到处理阈值时只告警、不动作。
+`hsctl stop` / 浮窗停止 / Ctrl+Q = **暂停**守护（不会自动再开），`hsctl resident on` 恢复；
+`--dry-run on` 只判定不点击，适合先观察。
+
+**守护关闭时的安全网**：守护关着也保留最小保护——炉石进程消失 / 对局中日志卡死 →
+**告警 + 停止自动化**（不会自动重启，也不会自己开局）。想彻底无人值守才需要开守护。
+
+**失败语义**：重启成功但仍卡住 → 按配额继续重试；**自愈本身失败**（重启失败/进不去对战/
+模式卡组没点到）→ 暂停守护 + 告警、不盲开局，需要 `hsctl resident on` 重新开启。
+
+**与既有功能的边界**：定时任务可作为守护的**时间窗**——窗口外状态 `waiting_schedule`
+（显示「等待定时窗口」），到点由守护装配（拉起炉石→进对战→模式→卡组→开局），窗口结束
+打完本局停并暂停守护；守护内部启动传 `keep_schedule=True`，**不会清掉**定时计划；手动
+stop 优先级最高（定时到点也不会启动被手动暂停的守护）。守护管事时 `process_gone` 让位
+（不再「自动停止+告警」，直接交守护重启）；手动「重启炉石」后守护自动恢复。控分/段位/
+自动投降/卡组识别投降语义不变（段位达标退出后守护按手动停止暂停）。
+
+**人为暂停不算卡死**：手动 stop 后再点「开始」时，守护不会把暂停期间累积的日志年龄当
+卡死（手动启动触发 `note_automation_started()` 进入 settle 宽限；启动窗口内
+`CTRL.starting` 视为在跑，守护不抢装配）。被手动暂停的守护保持暂停，需 `hsctl resident on`。
+
+**恢复次数**：每次守护恢复**真正成功**（重启→重新开始自动化成功）会在浮窗日志与浮窗「常驻」页
+「最近事件」写「本次运行第 N 次」，`/api/status.resident.recoveries_total` 同步暴露；
+计数是本次控制台运行的累计值，暂停/取消/失败不计。
+
+**手动退出 ≠ 错误（跨控制台重启）**：手动停止 / Ctrl+Q / 浮窗「退出脚本」/ 关控制台窗口 /
+`hsctl serve stop` 会把「手动停止」意图落盘到 `log/resident_intent.json`。下次启动控制台时
+守护**保持暂停**、不装配、不点鼠标（`/api/status.resident.manual_stop=true`），等用户点
+「开始对战」或显式开启守护——这时按普通手动开始处理（不重启炉石、不计恢复次数）。只有上次
+是崩溃/被杀才按「错误后自动开始」自动接管，装配日志写「守护自启接管」。
+
+**控制台看门狗 ≠ 守护**：`hsctl serve install-watchdog`（每 5 分钟检查、`serve start --auto`
+在**退出控制台**类手动停止时跳过；只停自动化不算）/ `uninstall-watchdog` / `watchdog-status`
+是**控制台进程自启**——只管控制台脚本自己的生死，崩了拉起来；它不重启炉石、不重进对战，
+那些归上面的守护。`serve restart` 不写手动标记。注册需管理员 PowerShell 跑一次。
 
 **自动选卡组已停用**：自动化不再每局按 `hsctl deck 8` 点卡组（会覆盖手选）。
 选卡组只用 `deck-click N`（自动化未运行时立即点）或 `enter-battle --deck N`（进对战时选）。
@@ -380,9 +448,10 @@ uv run python hsctl.py ui --frame     # 它会告诉你 state / 两个匹配分�
 
 ## 7. 与用户沟通的要点
 
-- 报告状态时给出：阶段、是否在跑、战绩、账号是否匹配、有没有告警（`liveness.alert`、`last_error`）。
+- 报告状态时给出：阶段、是否在跑、战绩、账号是否匹配、有没有告警（`/api/status.resident.warning`、`last_error`）。
 - 用户说「随便调快一点」这类模糊需求时，优先改**立即生效**的字段
-  （`pre_action_delay_seconds`、`post_action_delay_seconds` 要下次开局才生效，别选它）。
+  （`mulligan_ready_delay_seconds`、`mulligan_retry_delay_seconds`；
+  `post_action_delay_seconds` 要下次开局才生效，别选它）。
 - 不确定端口/连不上时，用 `uv run python hsctl.py --json serve status` 看端口文件来源。
 - 用户想「远程/手机指挥」时：说明控制台只绑本机、交给本机 agent 跑 `hsctl` 即可，
   **不需要**也不应该把端口暴露到网络。

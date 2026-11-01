@@ -1,3 +1,7 @@
+# 兼容「只装 requirements.txt、没装项目包」的旧式部署：把仓库内 src/ 加进 sys.path，
+# 这样 click.py / FSM_action.py 里的 `from hslegend...` 也能导入（等价 pip install -e .）。
+import _srcpath  # noqa: F401
+
 from time import sleep
 from FSM_action import system_exit, AutoHS_automata
 import keyboard

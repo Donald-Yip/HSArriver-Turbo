@@ -185,11 +185,14 @@ def _random_hand_hover_point(last=None):
     return (960, HAND_HOVER_Y)
 
 
-def human_like_pause(mouse=None, settings=None, stop_event=None):
+def human_like_pause(mouse=None, settings=None, stop_event=None, tick=None):
     """活人感延时：0.5~3s 随机等待，期间鼠标在手牌区随机悬停。
 
     每处悬停时长同样随机（默认 0.2~1s，见 config.DEFAULT_HUMAN_LIKE）。
     全程只移动、绝不点击；结束前复位到 MOUSE_RESET_POS。返回本次总延时（秒）。
+
+    tick：可选的“扫描心跳”回调，每段悬停结束后调一次（R18H：我方回合里不能
+    长时间不读屏，否则浮窗 OCR 框会空掉）。回调异常一律吞掉，绝不影响延时。
     """
     cfg = settings or human_like_settings()
     if mouse is None:
@@ -218,6 +221,11 @@ def human_like_pause(mouse=None, settings=None, stop_event=None):
                 break
         else:
             time.sleep(min(hover, remaining))
+        if tick is not None:
+            try:
+                tick()
+            except Exception:
+                pass
         if stop_event is not None and stop_event.is_set():
             break
     if stop_event is not None and stop_event.is_set():

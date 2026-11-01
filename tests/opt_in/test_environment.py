@@ -9,9 +9,9 @@ import unittest
 
 import selfcheck
 from tests.helpers.env_contract import (
-    DEPRECATED_REQUIREMENTS,
     OPENCV_DISTRIBUTIONS,
     REQUIRED_IMPORTS,
+    REQUIREMENTS,
     pyproject_pins,
 )
 
@@ -28,11 +28,12 @@ class InstalledEnvironmentTests(unittest.TestCase):
         }
         self.assertEqual(expected, installed)
 
-    def test_deprecated_requirements_has_cleanup_note(self) -> None:
-        text = DEPRECATED_REQUIREMENTS.read_text(encoding="utf-8")
-        self.assertIn("DEPRECATED", text)
-        self.assertIn("Do not install with pip", text)
-        self.assertIn("R02 cleanup", text)
+    def test_requirements_documents_the_pip_install_path(self) -> None:
+        """群友按 requirements.txt 装：文件里必须写清 3.12 + pip 安装命令。"""
+        text = REQUIREMENTS.read_text(encoding="utf-8")
+        self.assertIn("pip install -r requirements.txt", text)
+        self.assertIn("3.12", text)
+        self.assertIn("web_ui.py", text)
 
     def test_opencv_distributions_and_runtime_agree(self) -> None:
         expected = pyproject_pins()["opencv-python-headless"]

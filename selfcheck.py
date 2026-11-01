@@ -55,8 +55,10 @@ PYTHON_HINT = (
 DEPENDENCIES: tuple[dict, ...] = (
     {"imports": ("win32gui", "win32api", "win32ui", "pywintypes"),
      "dist": ("pywin32",), "why": "炉石窗口句柄 / 全屏截图 / 系统分辨率"},
-    {"imports": ("cv2",), "dist": ("opencv-python-headless", "opencv-python"),
-     "why": "截图裁剪、颜色判定、OCR 预处理"},
+    {"imports": ("cv2",),
+     "dist": ("opencv-python-headless", "opencv-python",
+              "opencv-contrib-python"),
+     "why": "截图裁剪、颜色判定、OCR 预处理（三件套必须同版本）"},
     {"imports": ("numpy",), "dist": ("numpy",), "why": "截图像素解析"},
     {"imports": ("PIL",), "dist": ("Pillow",), "why": "截图（ImageGrab）"},
     {"imports": ("paddleocr",), "dist": ("paddleocr",), "why": "盒子面板文字识别"},

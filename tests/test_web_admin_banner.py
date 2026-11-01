@@ -23,6 +23,15 @@ def render(ansi):
 
 
 class AdminWarningBannerTests(unittest.TestCase):
+    def setUp(self):
+        # main() 会走守护启动/停止收尾；测试里必须隔离，避免留下真 RESIDENT 或
+        # 「手动停止」全局状态（R9 复审 blocking：会让后续同步假线程测试死锁）。
+        self._saved = (web_ui.RESIDENT, dict(web_ui._RESIDENT_INTENT_STATE))
+
+    def tearDown(self):
+        web_ui.RESIDENT, saved_intent = self._saved
+        web_ui._RESIDENT_INTENT_STATE = saved_intent
+
     def test_plain_banner_repeats_warning_and_hint_three_times(self):
         output = render(ansi=False)
 
@@ -68,7 +77,9 @@ class AdminWarningBannerTests(unittest.TestCase):
                 patch.object(web_ui, "IS_ADMIN", is_admin),
                 patch.object(web_ui.os, "chdir"),
                 patch.object(web_ui.threading, "Thread", _NoopThread),
-                patch.object(web_ui, "_bind_watchdog_restarter"),
+                # 不真的建守护线程/不写「手动停止」标记（KeyboardInterrupt 分支）。
+                patch.object(web_ui, "_bind_resident"),
+                patch.object(web_ui, "_resident_record_manual_stop"),
                 patch.object(web_ui, "_register_hotkey"),
                 patch.object(web_ui, "load_config", return_value={}),
                 patch.object(web_ui, "_apply_constants"),

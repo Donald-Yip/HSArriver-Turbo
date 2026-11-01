@@ -12,10 +12,10 @@ import get_screen
 import surrender_rules
 from config import (
     DEFAULT_AUTO_CONCEDE, DEFAULT_AUTO_SURRENDER, SNAPSHOT_WRITE_INTERVAL,
-    human_like_settings, joint_setting, rank_stop_settings,
-    strategy_label, strategy_setting, uses_box_ai,
+    box_fallback_settings, human_like_settings, joint_setting,
+    rank_stop_settings, strategy_label, strategy_setting, uses_box_ai,
 )
-from ai.deck_strategy import deck_strategy
+from ai.deck_strategy import deck_strategy, strategy_class
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
 )
@@ -23,7 +23,9 @@ from strategy import StrategyState
 import log_state as log_state_module
 from log_state import *
 from src.capture.desktop_capture import DesktopCapture
-from src.flow.mulligan_flow import MulliganFlow, MulliganStatus
+from src.flow.mulligan_flow import (
+    MulliganFallbackTracker, MulliganFlow, MulliganStatus,
+)
 from hslegend.application.recommendation_flow import (
     FlowStepStatus, RecommendationFlow,
 )
@@ -37,7 +39,6 @@ from src.recommendation_config import RecommendationConfig
 from hslegend.domain import ActionKind, normalize_card_name
 from src.safety.hearthstone_liveness import default_monitor
 from src.safety.recommendation_validator import RecommendationValidator
-from src.safety.restart_watchdog import default_watchdog
 
 
 FSM_state = ""
@@ -101,11 +102,13 @@ _name_match_reported = None
 # 炉石存活检测（进程消失 / Power.log 停滞）：状态机主循环每轮检查一次。
 # 与 Web 界面共享同一个检测器实例，浮窗/网页看到的是同一份判定。
 hearthstone_liveness = default_monitor()
-restart_watchdog = default_watchdog()
 # 最近一次“判定炉石已退出/无响应”的醒目告警（供网页横幅显示，下一轮开始时清空）。
 _liveness_alert = None
 # 连续“推荐读取失败（RETRY）”次数：只作为存活告警文案里的旁证，帮助判断卡在哪。
 _ocr_fail_streak = 0
+# 盒子推荐失效兜底（R18K）：每局 initialize 时按 box_fallback_settings 构建；
+# None = 未开启/策略不可用。回合兜底用 planner，换牌兜底用 chooser。
+_box_fallback = None
 # 调试快照写盘节流：日志每次变化都全量序列化整个 log_state 会拖慢主循环，
 # 只在间隔 SNAPSHOT_WRITE_INTERVAL 秒后重新写盘。（定义于 config.py）
 _last_snapshot_write = 0.0
@@ -337,6 +340,14 @@ def _log_current_strategy():
     """开局把「本局算法」打到日志，方便回看这一局到底听谁的。"""
     try:
         print(f"[SYS] 本局算法：{current_strategy_label()}")
+        fallback = _box_fallback
+        if fallback:
+            print(
+                "[SYS] 盒子兜底：本地「"
+                f"{fallback['label']}」（连续 {fallback['fail_streak']} 次 / "
+                f"{fallback['stall_seconds']:g}s 无进展时接管）")
+        elif uses_box_ai():
+            print("[SYS] 盒子兜底：未开启")
     except Exception:
         pass
 
@@ -357,6 +368,35 @@ def _local_mulligan_chooser(state):
         return ()
 
 
+def _build_box_fallback():
+    """按网页配置构建本局兜底快照；未开启/策略不可用时返回 None。
+
+    只在盒子AI 模式下构建（本地主模式不需要兜底）。每局 initialize 调用一次，
+    所以网页改配置下一局生效，和策略/联合模式一致。
+    """
+    settings = box_fallback_settings()
+    if not settings.get("enabled"):
+        return None
+    key = settings.get("strategy") or ""
+    if strategy_class(key) is None:
+        print(f"[SYS] 兜底策略「{key}」不可用，盒子推荐失效时不会接管。")
+        return None
+    strategy = deck_strategy(key)
+    if strategy is None:
+        print(f"[SYS] 兜底策略「{key}」加载失败，盒子推荐失效时不会接管。")
+        return None
+    return {
+        "key": key,
+        "label": strategy_label(key),
+        "planner": LegacyStrategyPlanner(strategy_key=key),
+        "chooser": (lambda state, _strategy=strategy:
+                    tuple(_strategy.choose(state) or ())),
+        "fail_streak": settings["fail_streak"],
+        "stall_seconds": settings["stall_seconds"],
+        "mulligan_fail_streak": settings["mulligan_fail_streak"],
+    }
+
+
 def initialize_recommendation_automation():
     """Rebuild per-game flows while reusing expensive OCR components.
 
@@ -368,7 +408,7 @@ def initialize_recommendation_automation():
     global auto_mulligan_flow, recommendation_flow
     global recommendation_config, recommendation_capture, mulligan_capture
     global recommendation_parser, recommendation_reader
-    global mulligan_reader, recommendation_validator
+    global mulligan_reader, recommendation_validator, _box_fallback
 
     # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
     recommendation_config = RecommendationConfig()
@@ -444,6 +484,9 @@ def initialize_recommendation_automation():
     if not box_ai and deck_strategy() is None:
         print(f"[SYS] 本地策略「{strategy_setting()}」加载失败，本局回退盒子AI。")
         box_ai = True
+    # 盒子兜底只在盒子AI 模式启用；本地主模式听本地策略，不需要“盒子失效”。
+    _box_fallback = _build_box_fallback() if box_ai else None
+    fallback = _box_fallback or {}
     recommendation_flow = RecommendationFlow(
         capture=recommendation_capture,
         reader=recommendation_reader,
@@ -452,6 +495,9 @@ def initialize_recommendation_automation():
         adapter=RecommendationAdapter(),
         validator=recommendation_validator,
         controller=manual_controller,
+        # 流程内的等待（操作后延时/抽牌额外延时/结果等待/未确认重试）也带扫描心跳：
+        # 我方回合里两次读屏间隔不超过 2s（R18H，用户 2026-10-31 要求）。
+        sleep=_scan_aware_sleep,
         result_timeout=recommendation_config.result_timeout_seconds,
         post_action_delay=recommendation_config.post_action_delay_seconds,
         unconfirmed_retry_delay=(
@@ -465,6 +511,11 @@ def initialize_recommendation_automation():
         planner=LegacyStrategyPlanner(),
         joint=(joint_setting() and not box_ai),
         strategy_name=strategy_setting(),
+        fallback_planner=fallback.get("planner"),
+        fallback_enabled=bool(fallback),
+        fallback_fail_streak=fallback.get("fail_streak", 6),
+        fallback_stall_seconds=fallback.get("stall_seconds", 8.0),
+        fallback_strategy_name=fallback.get("label", ""),
     )
     _log_current_strategy()
 
@@ -503,7 +554,7 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
                            ActionKind.MULLIGAN, ActionKind.SELECT_TARGET,
                            ActionKind.USE_ABILITY):
             return False
-        click.human_like_pause(stop_event=shutdown_event)
+        click.human_like_pause(stop_event=shutdown_event, tick=_scan_tick)
         return True
     except Exception as exc:
         try:
@@ -511,6 +562,79 @@ def _human_like_post_action_pause(action_kind=None) -> bool:
         except Exception:
             pass
         return False
+
+
+def _scan_tick(force=False):
+    """我方回合内的「扫描心跳」：至少每 2 秒读一次屏（只读，绝不点击）。
+
+    用户 2026-10-31：「直到扫描到回合结束并点击，否则应该一直扫描并执行」。
+    作用：① 浮窗「OCR 扫描」框始终有最新读数，不会“卡住时没有 OCR 扫描”；
+    ② 读屏本身是“回合还在不在我方”的第二信号（读到「对手回合」= 已经换人）。
+    对手回合/还没进对局/已经点掉结束回合时什么都不做。异常一律吞掉。
+    """
+    global _last_scan_tick_at
+    try:
+        if not _my_turn_active or log_state.game_entity_id == 0:
+            return
+        now = time.monotonic()
+        if not force and now - _last_scan_tick_at < _TURN_SCAN_INTERVAL:
+            return
+        _last_scan_tick_at = now
+        end_turn_button_present()
+    except Exception:
+        pass
+
+
+def _scan_aware_sleep(seconds: float) -> None:
+    """流程内的等待也带扫描心跳（R18H）。
+
+    注入给 ``RecommendationFlow`` 当 ``sleep``：把等待切成 ≤0.25s 的片，每片后
+    调一次 ``_scan_tick()``。总时长按**实际经过的时间**扣减，心跳的 OCR 时间
+    不会把配置的延时拉长；收到停止指令就提前退出。
+    """
+    try:
+        total = max(0.0, float(seconds or 0.0))
+    except (TypeError, ValueError):
+        total = 0.0
+    started = time.monotonic()
+    while True:
+        if shutdown_event.is_set():
+            return
+        remaining = total - (time.monotonic() - started)
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 0.25))
+        _scan_tick()
+
+
+def automation_phase_state() -> dict:
+    """浮窗「OCR 扫描」框空状态用：当前卡在哪一步 + 日志静默多久。
+
+    返回 ``{"code", "label", "log_idle_s"}``：``log_idle_s`` 是 Power.log 最近
+    一次有新内容距今的秒数（None = 还没读到过）；它比“没有 OCR”更能说明
+    “脚本真的卡住了”。异常一律不外溢（浮窗渲染不能因此报错）。
+    """
+    try:
+        code = str(last_automation_diagnostic or "")
+        label = _diagnostic_label(code)
+        idle = None
+        if _log_revision_at is not None:
+            idle = max(0.0, time.monotonic() - _log_revision_at)
+        return {"code": code, "label": label, "log_idle_s": idle}
+    except Exception:
+        return {"code": "", "label": "", "log_idle_s": None}
+
+
+def _diagnostic_label(code: str) -> str:
+    """诊断码 → 中文说明（``observe:x`` / ``retry:x`` 取后缀再查表）。"""
+    code = str(code or "").strip()
+    if not code:
+        return ""
+    for prefix in ("observe:", "retry:"):
+        if code.startswith(prefix):
+            code = code[len(prefix):]
+            break
+    return _DIAGNOSTIC_LABELS.get(code, code)
 
 
 def _human_like_opponent_minions(snapshot) -> int:
@@ -599,6 +723,15 @@ def reset_game_session():
     _oppo_minion_ids = None
     # 卡组识别投降：清掉上一局的事实（职业/打出/揭示/开局生效卡）。
     surrender_rules.engine.reset()
+    # OCR 帧缓存跨局没用（面板像素每局都变），开局清掉把内存还回去（R18F）。
+    for reader in (recommendation_reader, mulligan_reader):
+        clear_cache = getattr(reader, "clear_cache", None)
+        if clear_cache is None:
+            continue
+        try:
+            clear_cache()
+        except Exception:
+            pass
     click.center_mouse()
 
 
@@ -692,7 +825,7 @@ def _zone_before_update(state, container):
 
 def update_log_state():
     global active_game_generation
-    global _last_snapshot_write
+    global _last_snapshot_write, _log_revision_at
     log_container = next(log_iter)
     if log_container.log_type == LOG_CONTAINER_ERROR:
         return False
@@ -710,6 +843,10 @@ def update_log_state():
 
     if log_state.game_generation != active_game_generation:
         reset_game_session()
+
+    # 日志有新内容就记一次时刻：浮窗用它判断“日志多久没更新了”（真卡住信号）。
+    if log_state.revision != previous_revision:
+        _log_revision_at = time.monotonic()
 
     # 昵称校验：日志已经给出双方玩家名时比对配置的用户 ID（对不上就提示一次）。
     check_player_name_match()
@@ -985,6 +1122,12 @@ def ChoosingCardAction():
         # 不复用 post_ocr（那是“识别→点击”缓冲）：上游 post_ocr=0 时，
         # 若重试也取 0 会变成 0 秒忙等（CPU 空转 + 疯狂截图）。独立默认 5s。
         retry_delay = recommendation_config.mulligan_retry_delay_seconds
+        # 换牌兜底（R18K）：盒子换牌 OCR 连续失败后，用兜底策略的 choose() 提交。
+        mulligan_fallback = None
+        if _box_fallback is not None:
+            mulligan_fallback = MulliganFallbackTracker(
+                _box_fallback["mulligan_fail_streak"])
+        mulligan_fallback_logged = False
         while True:
             # 循环内必须检查停止标志：主循环只在状态分发处检查，
             # 本循环若能无限运行，立即停止后鼠标会继续点击。
@@ -1026,8 +1169,27 @@ def ChoosingCardAction():
             box_ai = getattr(recommendation_flow, "box_ai", None)
             if box_ai is None:
                 box_ai = uses_box_ai()
-            if box_ai:
+            use_mulligan_fallback = bool(
+                box_ai and mulligan_fallback is not None
+                and mulligan_fallback.active)
+            if use_mulligan_fallback:
+                if not mulligan_fallback_logged:
+                    mulligan_fallback_logged = True
+                    print(
+                        "[兜底] 换牌盒子推荐连续 "
+                        f"{mulligan_fallback.fail_streak} 次不可用 → 本地"
+                        f"「{_box_fallback['label']}」策略接管。")
+                # 换牌 ready 延时在进入循环前已经等过，兜底执行不再重复等。
+                auto_mulligan_flow.mark_panel_ready()
+                result = auto_mulligan_flow.run_local(
+                    chooser=_box_fallback["chooser"])
+            elif box_ai:
                 result = auto_mulligan_flow.run()
+                if mulligan_fallback is not None:
+                    if result.status == MulliganStatus.CONFIRMED:
+                        mulligan_fallback.note_box_success()
+                    else:
+                        mulligan_fallback.note_box_failure()
             else:
                 result = auto_mulligan_flow.run_local()
             if result.status == MulliganStatus.CONFIRMED:
@@ -1199,14 +1361,22 @@ def _alert_hearthstone_gone(message: str) -> None:
 
 
 def check_hearthstone_liveness():
-    """状态机主循环调用：存活检测 + 告警/自动停止。
+    """状态机主循环调用：存活检测 + 告警/自动停止（守护关闭时的**最小安全网**）。
 
     返回本次事件（``None`` = 正常或无需处理），方便日志/测试观察。
 
-    **与「中断重启」看门狗的优先级**：看门狗开关打开时，由它接管
-    「Power.log 长时间停滞」这件事（重启炉石并重开一局），此时这里**不再**
-    触发自动停止 —— 否则两个功能会在同一秒里一个要重启、一个要停机，
-    互相打架。看门狗开关关着时行为与从前完全一致。
+    **与「守护」的关系（2026-11-01 三卡合并）**：原来的「🩺 存活检测」「🔄 中断
+    重启」「🛰️ 常驻模式」看的是同一批信号，三套阈值/计数器互相打架。现在统一成
+    一个「守护」（判定在 src/safety/resident_supervisor.py）：
+
+    * 守护此刻真的会动手（``_guardian_takes_over()``：enabled 且非 dry_run、
+      状态在 countdown/starting/running/recovering、未暂停）→ 炉石进程消失 /
+      日志停滞都交给守护自动重启恢复。这里只写一条 [SYS] 说明，**不告警、不停止
+      自动化**，避免「自动化已自动停止」+「守护恢复成功」两套矛盾文案；
+    * 守护关闭 / 暂停 / 配额耗尽 / 出错 → 这里就是最小安全网：致命信号照旧
+      「告警 + 停止自动化」，不会再自动重启（等人工处理）。
+
+    ``log_stale_warn``（提前告警，非致命）在这里只写日志，不改状态。
     """
     try:
         event = hearthstone_liveness.check(
@@ -1214,58 +1384,52 @@ def check_hearthstone_liveness():
             detail=_liveness_detail())
     except Exception:
         return None
-
-    # 看门狗判定（独立于上面那条，只在"停滞"这一类事件上接管）。
-    watchdog_event = None
-    try:
-        watchdog_event = restart_watchdog.poll()
-    except Exception:
-        watchdog_event = None
-    if watchdog_event is not None:
-        _report_watchdog_event(watchdog_event)
-
     if event is None:
-        return watchdog_event
-    if event.get("kind", "").startswith("log_stale") and _watchdog_enabled():
-        # 停滞交给看门狗处理：这里只把告警文案写进日志，不触发自动停止。
-        try:
-            manual_controller.output(
-                f"[SYS] 检测到日志停滞：已交由「中断重启」处理"
-                f"（{event['message']}）")
-        except Exception:
-            pass
-        return watchdog_event or event
+        return None
+    takeover = _guardian_takes_over()
     if event.get("fatal"):
+        if takeover:
+            try:
+                manual_controller.output(
+                    f"[SYS] {event.get('message', '')}"
+                    "：交由「守护」自动重启恢复（不停止自动化）。")
+            except Exception:
+                pass
+            return event
         _alert_hearthstone_gone(event["message"])
-    else:
-        try:
-            manual_controller.output(f"[SYS] {event['message']}")
-        except Exception:
-            pass
+        return event
+    # 非致命 = 提前告警（log_stale_warn）。守护会动手时，它自己会按
+    # resident.warn_seconds 发同名告警；这里不重复，也不能说「将自动停止」——
+    # 守护实际会重启恢复，两句话互相矛盾（R9 复审 should-fix）。
+    if takeover:
+        return event
+    try:
+        manual_controller.output(f"[SYS] {event['message']}")
+    except Exception:
+        pass
     return event
 
 
-def _watchdog_enabled() -> bool:
-    """看门狗开关是否打开（读配置，失败按关闭处理=保持旧行为）。"""
+def _guardian_takes_over() -> bool:
+    """「守护」此刻是否真的会动手（决定存活检测要不要让位）。
+
+    只看 ``web_ui._resident_will_act``（enabled 且非 dry_run、状态在
+    countdown/starting/running/recovering）；旧版 web_ui 没有该函数时返回 False
+    = 保持最小安全网行为（告警 + 停止）。
+
+    暂停 / 配额耗尽 / 出错 / 关闭的守护不会动作，这时安全网必须接管，否则卡死
+    既不自愈也不停 —— 这正是原来三套逻辑互相打架的地方。
+    """
     try:
-        from config import watchdog_settings
-        return bool(watchdog_settings().get("enabled", False))
+        import sys
+
+        web_ui = sys.modules.get("web_ui")
+        will_act = getattr(web_ui, "_resident_will_act", None) if web_ui else None
+        if not callable(will_act):
+            return False
+        return bool(will_act())
     except Exception:
         return False
-
-
-def _report_watchdog_event(event: dict) -> None:
-    """把看门狗事件写进日志；「重启次数用尽」这类需要人工介入的走醒目告警。"""
-    try:
-        message = event.get("message") or ""
-        if not message:
-            return
-        if event.get("kind") == "exhausted":
-            _alert_hearthstone_gone(message)
-        else:
-            manual_controller.output(f"[SYS] {message}")
-    except Exception:
-        pass
 
 
 def hearthstone_liveness_state() -> dict:
@@ -1370,9 +1534,58 @@ _POST_GAME_MIN_CONFIDENCE = 0.5
 # 日志先报 TURN=我方，但对手结束回合动画还没播完时，右侧仍是「对手回合」。
 # 只把 OCR 读到的「结束回合」当作可操作信号；框与校准目标同源（测试校验）。
 _TURN_END_BUTTON_ROI = (1380, 430, 1600, 570)
+# 兜底框：主框只框住按钮主体，客户区缩放/布局微调时会把最后一个字裁掉
+# （实测读到「结束回」→ 关键字匹配失败、整回合白等）。主框读不到时用
+# 「主框四周各外扩这么多像素」的框再读一次——只补“最后一个字被裁”这一种情况。
+# 旧实现是写死 400×260 的框，放大 2 倍后把按钮右边的场面一起框进来，实测读到
+# 12 行卡名/倒计时垃圾字（`[OCR] 图 982x634 行 12`），所以改成按主框外扩。
+_TURN_END_FALLBACK_MARGIN = 16
+# 客户区基准尺寸（与 display_mapping.REFERENCE_CLIENT 同口径）：外扩后夹取用。
+_TURN_END_BASELINE_SIZE = (1920, 1080)
 _TURN_END_OCR_SCALE = 2.0
 _TURN_END_MIN_CONFIDENCE = 0.5
 _TURN_END_KEYWORDS = ("结束回合", "結束回合", "endturn")
+# 被裁掉最后一个字的写法（客户区缩放时实测出现）：「结束回」「結束回」。
+# 拼起来的文本里出现就认（倒计时可能排在这一行前面），但出现「对手」字样时不算。
+_TURN_END_TRUNCATED_KEYWORDS = ("结束回", "結束回")
+# 「对手回合」里的字样：出现就不算就绪（哪怕是兜底框读到了卡名/倒计时）。
+_TURN_END_OPPONENT_KEYWORDS = ("对手", "對方", "对方", "敌方", "敵人")
+# 最近一次「结束回合」框 OCR 读到的内容：只给诊断日志用（用户 2026-10-31
+# 反馈“老是检测不到结束回合”，日志里只有“行 2 置信 0.91”，看不出读到了什么）。
+# ``_turn_end_last_lines`` 是按行去重的原文列表（诊断只取前 2 行 + 总行数，
+# 避免旧兜底框读到的十几行把浮窗诊断行撑爆）；``_turn_end_last_text`` 是拼好
+# 的整段原文，保留给旧日志/旧代码看。
+# 浮窗的「OCR 扫描」框显示的是同一份数据（src.ocr.status），这里是为了让
+# 落盘的 ui_log_last.txt 里也能直接看到原文，事后排障不用重现。
+_turn_end_last_text = ""
+_turn_end_last_lines = []
+# ---------------------------------------------------------------- 回合扫描心跳
+# 用户 2026-10-31：「直到扫描到回合结束并点击，否则应该一直扫描并执行」。
+# 我方回合里原本有几段**完全不读屏**的空窗：活人感悬停（0.5~5s）、抽牌额外延时
+# （每张最多 2s，实测一次 9s）、动作结果等待/未确认重试（最长 3s×3）。这些空窗
+# 一长，浮窗「OCR 扫描」框就空了、用户也看不出脚本到底在等什么。
+# 心跳：我方回合内、本回合还没点掉「结束回合」时，至少每 2 秒读一次屏（只读）。
+_TURN_SCAN_INTERVAL = 2.0
+_last_scan_tick_at = 0.0
+# 当前这一轮快照是不是我方回合（run_automatic_battle_step 每轮更新）。
+# 心跳不自己读快照（贵），只看这个标志。
+_my_turn_active = False
+# 诊断码 → 中文说明（浮窗 OCR 框空状态用，见 automation_phase_state）。
+_DIAGNOSTIC_LABELS = {
+    "opponent_turn": "等待对手操作",
+    "my_turn": "轮到我方出牌",
+    "waiting_turn_end_button": "等待「结束回合」按钮",
+    "power_log_unavailable": "Power.log 暂不可用",
+    "turn_not_ready": "等待右侧「结束回合」出现",
+    "awaiting_action_confirmation": "等待动作结果确认",
+    "waiting_recommendation_update": "等待盒子更新推荐",
+    "stale_mulligan_recommendation": "等待盒子刷新对局推荐",
+    "already_consumed": "这条推荐已经执行过",
+    "stopped": "已收到停止指令",
+    "discover_choice_still_open": "发现选择仍在，准备重新点击",
+}
+# 最近一次 Power.log revision 变化的时刻（monotonic）：日志静默多久 = 可能卡住。
+_log_revision_at = None
 # -------------------------------------------------------------- 控分（action=keep）
 # 读到"名次比目标更靠前"时：点开始匹配 → 等进入对局 → 立刻投降 → 回到选卡组界面，
 # 再由主循环重新读名次（每次 dispatch 只投降一局，主循环持续做存活检测）。
@@ -1857,6 +2070,25 @@ def _turn_end_button_box() -> tuple:
     return _config_roi("turn_end_button_roi", _TURN_END_BUTTON_ROI)
 
 
+def _turn_end_fallback_box() -> tuple:
+    """「结束回合」兜底框：以当前主框为基准，四周各外扩 16 像素。
+
+    主框读不到时**只补“客户区缩放/布局微调把最后一个字裁掉”这一种情况**，所以
+    只外扩一圈，不再扫按钮右边的场面（旧实现写死 400×260，放大 2 倍后读到 12 行
+    卡名/倒计时垃圾字）。坐标是基准 1920×1080 客户区口径，外扩后 clamp 回边界内。
+    主框来自 :func:`_turn_end_button_box`，用户校准改框时兜底框跟着变。
+    """
+    left, top, right, bottom = _turn_end_button_box()
+    margin = _TURN_END_FALLBACK_MARGIN
+    width, height = _TURN_END_BASELINE_SIZE
+    return (
+        max(0, int(left) - margin),
+        max(0, int(top) - margin),
+        min(width, int(right) + margin),
+        min(height, int(bottom) + margin),
+    )
+
+
 def _post_game_rank_box() -> tuple:
     """段位数字的读取框：优先用用户校准的 post_game_rank_roi。
 
@@ -1919,24 +2151,103 @@ def click_post_game_point():
     click.commit_error_report()
 
 
-def end_turn_button_present() -> bool:
-    """右侧是否明确显示「结束回合」；「对手回合」不算就绪。"""
-    lines = _ocr_lines(_turn_end_button_box(), _TURN_END_OCR_SCALE, "turn_end")
-    if lines is None:
-        return False
-    for line in lines:
-        text = normalize_card_name(getattr(line, "text", ""))
+def _ocr_line_texts(lines) -> list:
+    """OCR 行 → 原文列表（去掉空行；诊断/拼接共用）。"""
+    texts = []
+    for line in lines or ():
+        text = str(getattr(line, "text", "") or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def _ocr_text_summary(lines) -> str:
+    """把一次 OCR 读到的几行拼成一句（给诊断日志用，去掉空行）。"""
+    return " / ".join(_ocr_line_texts(lines))
+
+
+def _turn_end_lines_ready(lines) -> bool:
+    """这批 OCR 行是否说明右侧按钮已经是「结束回合」。
+
+    不能只做“某一行完整包含「结束回合」”：
+    * 客户区缩放/框没对准时 OCR 会把最后一个字裁掉，实测读到「结束回」；
+    * OCR 也会把「结束」「回合」拆成两行。
+    所以把**够置信度的行拼起来**再判断，避免“字读到了却因为少一个字整回合
+    白等”（用户 2026-10-31 实测：每回合平均白等 6 秒、p90 9 秒）。
+    """
+    texts = []
+    for line in lines or ():
         confidence = float(getattr(line, "confidence", 0.0) or 0.0)
-        if confidence >= _TURN_END_MIN_CONFIDENCE and any(
-                keyword in text for keyword in _TURN_END_KEYWORDS):
+        if confidence < _TURN_END_MIN_CONFIDENCE:
+            continue
+        text = normalize_card_name(getattr(line, "text", "") or "")
+        if text:
+            texts.append(text)
+    if not texts:
+        return False
+    joined = "".join(texts)
+    # 倒计时/悬停卡名会一起被框进来：「对手回合」阶段绝不能当就绪。
+    if any(keyword in joined for keyword in _TURN_END_OPPONENT_KEYWORDS):
+        return False
+    if any(keyword in joined for keyword in _TURN_END_KEYWORDS):
+        return True
+    lowered = joined.lower()
+    if "endturn" in lowered or "end turn" in lowered:
+        return True
+    # 被裁掉最后一个字（「结束回」）：至少 3 个字，避免「结束」这种过短误读。
+    return any(keyword in joined for keyword in _TURN_END_TRUNCATED_KEYWORDS)
+
+
+def _turn_end_read_preview() -> str:
+    """诊断行里的短摘要：总行数 + 前 2 行原文（``读到 12 行：… / … …``）。
+
+    旧兜底框会把按钮右边的场面一起框进来（实测 12 行卡名/倒计时），整段原文
+    截 80 字仍然会把浮窗诊断行撑爆、也看不出重点，所以只留总行数 + 前 2 行。
+    """
+    texts = [str(text or "").strip() for text in (_turn_end_last_lines or ())]
+    texts = [text for text in texts if text]
+    if not texts:
+        # 兼容外部只写 ``_turn_end_last_text`` 的旧路径（既有分隔符就是 " / "）。
+        texts = [part.strip() for part in
+                 str(_turn_end_last_text or "").split(" / ") if part.strip()]
+    if not texts:
+        return "没读到文字"
+    if len(texts) <= 2:
+        return f"{len(texts)} 行：{' / '.join(texts)}"
+    return f"{len(texts)} 行，前 2 行：{' / '.join(texts[:2])} …"
+
+
+def end_turn_button_present() -> bool:
+    """右侧是否明确显示「结束回合」；「对手回合」不算就绪。
+
+    先读可校准的主框；主框读不到再用「主框外扩一圈」的兜底框读一次（客户区
+    缩放时主框可能把最后一个字裁掉）。读到的原文按行去重后记进
+    ``_turn_end_last_text`` / ``_turn_end_last_lines``，诊断日志里直接可见。
+    """
+    global _turn_end_last_text, _turn_end_last_lines
+    texts = []
+    for box in (_turn_end_button_box(), _turn_end_fallback_box()):
+        lines = _ocr_lines(box, _TURN_END_OCR_SCALE, "turn_end")
+        if lines is None:
+            continue
+        read = _ocr_line_texts(lines)
+        # 外扩框和主框有重叠：按原文去重，诊断里的行数才不是“两次读屏之和”。
+        for text in read:
+            if text not in texts:
+                texts.append(text)
+        if _turn_end_lines_ready(lines):
+            _turn_end_last_lines = read
+            _turn_end_last_text = _ocr_text_summary(lines)
             return True
+    _turn_end_last_lines = texts
+    _turn_end_last_text = " / ".join(texts)
     return False
 
 
 def _player_turn_ready(snapshot) -> bool:
     """日志已报我方回合后，以右侧按钮作为可安全操作信号。"""
     global player_turn_ready_key, _turn_ready_probe_key
-    global _turn_ready_next_probe_at
+    global _turn_ready_next_probe_at, _turn_end_last_text, _turn_end_last_lines
 
     turn = snapshot.game_num_turns_in_play
     probe_key = (log_state.game_generation, turn)
@@ -1950,10 +2261,17 @@ def _player_turn_ready(snapshot) -> bool:
         return False
     interval = float(recommendation_config.turn_start_probe_interval_seconds)
     _turn_ready_next_probe_at = now + interval
+    # 每次探针前清空：end_turn_button_present() 会把这次读到的原文写回来，
+    # 诊断行直接带上它（读不到「结束回合」时，用户/agent 一眼能看到读到了什么）。
+    _turn_end_last_text = ""
+    _turn_end_last_lines = []
     if not end_turn_button_present():
+        # 只留总行数 + 前 2 行原文：整段（旧兜底框能读到 12 行）会把浮窗诊断行撑爆。
+        seen = _turn_end_read_preview()
         _report_automation_diagnostic(
             "waiting_turn_end_button",
-            f"[SYS] 尚未检测到「结束回合」，每 {interval:g}s 复查一次。")
+            f"[SYS] 尚未检测到「结束回合」（OCR 读到：{seen}），"
+            f"每 {interval:g}s 复查一次。")
         return False
     player_turn_ready_key = probe_key
     manual_controller.output("[SYS] 已检测到「结束回合」，开始本轮推荐读取。")
@@ -2529,26 +2847,34 @@ def run_automatic_battle_step():
     global _modal_choice_probe_key, _modal_choice_next_probe_at
     global last_automation_diagnostic, _ocr_fail_streak
     global _concede_triggered
+    global _my_turn_active, _last_scan_tick_at
 
     snapshot = refresh_snapshot()
     if snapshot is None:
+        _my_turn_active = False
         _report_automation_diagnostic(
             "power_log_unavailable", "Power.log 暂不可用，继续重试。")
         return None
     if snapshot.is_end:
+        _my_turn_active = False
         return FSM_QUITTING_BATTLE
     if _concede_triggered:
         # 已触发自动认输：等待日志确认对局真正结束（COMPLETE）后再走结算计数，
         # 避免点完认输立刻计数导致“完成对局”时机不准。
+        _my_turn_active = False
         return None
     # 卡组识别投降：**在 is_my_turn 之前**判定 —— 特征卡往往是对手在他自己
     # 回合打出的，等到我方回合再看就已经晚了。命中就立刻点认输。
     surrender_hit = _maybe_surrender_by_rules()
     if surrender_hit is not None:
+        _my_turn_active = False
         _concede_triggered = True
         _do_concede(reason=f"识别为对方卡组「{surrender_hit['name']}」")
         return None
     if not snapshot.is_my_turn:
+        _my_turn_active = False
+        # 对手回合心跳停表：回到我方回合时立刻再扫一次（不等 2s 间隔）。
+        _last_scan_tick_at = 0.0
         # 活人感：对手回合里出现新随从就移上去悬停（只移动不点击）；
         # 这里本来就在空转等对手，不会拖慢自己的操作。
         _human_like_opponent_minions(snapshot)
@@ -2560,6 +2886,9 @@ def run_automatic_battle_step():
         _modal_choice_probe_key = None
         _modal_choice_next_probe_at = 0.0
         return None
+    _my_turn_active = True
+    # 我方回合内一直扫描：先强制读一次屏（用户 2026-10-31 要求，R18H）。
+    _scan_tick(force=True)
     # 日志判到我方回合后，动画可能还没结束：右侧按钮仍是「对手回合」时
     # 不读取推荐、不点牌；每 2 秒复查一次，出现「结束回合」才继续。
     if not _player_turn_ready(snapshot):
@@ -2602,6 +2931,8 @@ def run_automatic_battle_step():
 
     result = recommendation_flow.run_player_turn_step()
     _handle_automation_flow_result(result)
+    # 动作做完再补一拍扫描：下一次循环可能先走延时，面板/日志都要保持新鲜。
+    _scan_tick()
     return None
 
 
@@ -2639,6 +2970,33 @@ def Battling():
         time.sleep(0.2)
 
 
+def _note_memory_at_game_end():
+    """对局结束记一行内存读数；RSS 过高时重建 OCR 引擎回收内存（R18F）。
+
+    用户反馈「脚本运行久了占用的内存越来越多」。这里只做两件轻量的事：
+    ① 每局结束打一行 RSS（基线/峰值），长跑趋势直接进日志；
+    ② RSS 超过阈值时**在对局结束这个安全点**重建 OCR 引擎（引擎常驻几百 MB，
+       重建把碎片还回系统），不会打断正在进行的出牌。
+
+    观测/回收失败一律不外溢：对局收尾不能被内存观测打断。
+    """
+    try:
+        import gc
+
+        import memory_watch
+
+        backend = getattr(recommendation_reader, "backend", None)
+        recycle = None
+        if backend is not None and hasattr(backend, "reload"):
+            def recycle():
+                backend.reload()
+                gc.collect()
+        memory_watch.note_game_end(on_recycle=recycle)
+        gc.collect()
+    except Exception:
+        pass
+
+
 def QuittingBattle():
     """对局结束收尾：点掉结算界面 → 等「开始」→ 点「开始」。
 
@@ -2657,6 +3015,8 @@ def QuittingBattle():
     右上角就是当前名次，那里的读数才是权威。
     """
     print_out()
+    # 对局结束的安全点：记一行内存读数（必要时重建 OCR 引擎回收内存，见 R18F）。
+    _note_memory_at_game_end()
 
     time.sleep(5)
 

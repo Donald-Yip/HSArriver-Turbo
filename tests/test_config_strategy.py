@@ -71,7 +71,7 @@ class StrategyConfigTests(unittest.TestCase):
             "log_root": "D:\\HearthstoneLogs",
             "strategy": "hsbox",
             "max_search": 42,
-            "delays": {"pre_action_delay_seconds": 1.5},
+            "delays": {"post_action_delay_seconds": 1.5},
             "human_like": {"enabled": True},
         }
         self._write(original)

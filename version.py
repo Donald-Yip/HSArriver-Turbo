@@ -23,7 +23,7 @@ from pathlib import Path
 NAME = "HSLegendArriver"
 
 #: 版本号 = 发布日期，格式 ``YYYY.MM.DD``。**每次发版改成当天日期。**
-VERSION = "2026.10.27"
+VERSION = "2026.11.01"
 
 ROOT = Path(__file__).resolve().parent
 

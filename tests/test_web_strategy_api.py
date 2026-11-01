@@ -102,6 +102,36 @@ class StrategyApiTests(unittest.TestCase):
         self.assertFalse(bad["ok"])
         self.assertIn("整数", bad["error"])
 
+    # ---------------------------------------------------------------- 盒子兜底
+    def test_save_box_fallback_round_trip(self):
+        result = web_ui.api_save_box_fallback({
+            "enabled": True,
+            "strategy": "通用",
+            "fail_streak": 4,
+            "stall_seconds": 5,
+            "mulligan_fail_streak": 3,
+        })
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["box_fallback"]["enabled"])
+        self.assertEqual("通用", result["box_fallback"]["strategy"])
+        self.assertEqual(4, result["box_fallback"]["fail_streak"])
+        self.assertEqual(5.0, result["box_fallback"]["stall_seconds"])
+        self.assertIn("下一局生效", result["message"])
+        data = self._read()
+        self.assertTrue(data["box_fallback"]["enabled"])
+        self.assertEqual("通用", data["box_fallback"]["strategy"])
+
+    def test_box_fallback_rejects_unknown_strategy_and_bad_numbers(self):
+        result = web_ui.api_save_box_fallback({"strategy": "hsbox"})
+        self.assertFalse(result["ok"])
+        self.assertIn("未知策略", result["error"])
+
+        result = web_ui.api_save_box_fallback({"fail_streak": 0})
+        self.assertFalse(result["ok"])
+
+        self.assertFalse(self.config_path.exists())
+
     # ---------------------------------------------------------------- 运行中保护
     def test_running_automation_is_refused_without_hot(self):
         self._running()
@@ -110,6 +140,7 @@ class StrategyApiTests(unittest.TestCase):
             web_ui.api_save_strategy({"strategy": "任务牧"}),
             web_ui.api_save_joint({"joint": True}),
             web_ui.api_save_max_search({"max_search": 100}),
+            web_ui.api_save_box_fallback({"enabled": True}),
         )
         for result in results:
             self.assertFalse(result["ok"])
@@ -125,17 +156,23 @@ class StrategyApiTests(unittest.TestCase):
             web_ui.api_save_joint({"hot": True, "joint": True})["ok"])
         self.assertTrue(
             web_ui.api_save_max_search({"hot": True, "max_search": 300})["ok"])
+        self.assertTrue(
+            web_ui.api_save_box_fallback(
+                {"hot": True, "enabled": True, "strategy": "通用"})["ok"])
 
         data = self._read()
         self.assertEqual("任务牧", data["strategy"])
         self.assertTrue(data["joint"])
         self.assertEqual(300, data["max_search"])
+        self.assertTrue(data["box_fallback"]["enabled"])
 
     # ---------------------------------------------------------------- status 载荷
     def test_status_snapshot_exposes_strategy_fields(self):
         web_ui.api_save_strategy({"strategy": "任务牧"})
         web_ui.api_save_joint({"joint": True})
         web_ui.api_save_max_search({"max_search": 800})
+        web_ui.api_save_box_fallback(
+            {"enabled": True, "strategy": "通用", "fail_streak": 3})
 
         with (
             patch.object(web_ui.CTRL, "fsm", None),
@@ -149,6 +186,10 @@ class StrategyApiTests(unittest.TestCase):
         self.assertEqual("任务牧", snapshot["strategy"]["label"])
         self.assertTrue(snapshot["joint"])
         self.assertEqual(800, snapshot["max_search"])
+        self.assertTrue(snapshot["box_fallback"]["enabled"])
+        self.assertEqual("通用", snapshot["box_fallback"]["strategy"])
+        self.assertEqual("通用", snapshot["box_fallback"]["strategy_label"])
+        self.assertEqual(3, snapshot["box_fallback"]["fail_streak"])
 
         option_keys = {row["key"] for row in snapshot["strategy_options"]}
         self.assertIn("hsbox", option_keys)
@@ -168,15 +209,21 @@ class StrategyPageTests(unittest.TestCase):
             'id="chkJoint"',
             'id="inpMaxSearch"',
             'id="btnSaveStrategy"',
+            'id="chkBoxFallback"',
+            'id="inpFallbackStrategy"',
+            'id="inpFallbackStall"',
+            'id="inpFallbackFailStreak"',
             'post("/api/strategy"',
             'post("/api/joint"',
             'post("/api/max_search"',
+            'post("/api/box_fallback"',
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.html)
 
     def test_page_hints_explain_the_modes(self):
         self.assertIn("盒子AI", self.html)
+        self.assertIn("盒子推荐失效", self.html)
         self.assertIn("改策略下一局生效", self.html)
 
 

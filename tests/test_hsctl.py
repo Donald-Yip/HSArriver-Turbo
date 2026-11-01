@@ -64,19 +64,11 @@ STATUS_FIXTURE = {
         "post_delay_min": 0.5, "post_delay_max": 3.0, "hover_min": 0.5,
         "hover_max": 1.0, "minion_hover_min": 4.0, "minion_hover_max": 5.0,
     },
-    "liveness": {"enabled": True, "status": "ok", "process": "running",
-                 "log_age": 40, "alert": None,
-                 "process_grace_seconds": 6.0,
-                 "log_stale_warn_seconds": 120.0,
-                 "log_stale_stop_seconds": 300.0},
-    "liveness_alert": None,
     "name_match": {"config": "Priscilla#51346", "players": {}, "matched": True},
     "delays": {
         "mulligan_ready_delay_seconds": 20.0,
         "mulligan_post_ocr_delay_seconds": 1.0,
         "mulligan_retry_delay_seconds": 5.0,
-        "first_turn_per_card_delay_seconds": 3.5,
-        "pre_action_delay_seconds": 7.0,
         "post_action_delay_seconds": 0.2,
         "draw_extra_delay_per_card_seconds": 1.0,
         "discover_target_delay_seconds": 2.0,
@@ -246,27 +238,28 @@ class CliTests(unittest.TestCase):
     def test_delays_set_sends_numbers_and_hot_flag(self):
         self.console.httpd.routes["/api/delays"] = {
             "ok": True, "message": "延时配置已保存",
-            "effects": {"pre_action_delay_seconds": "live"}}
+            "effects": {"mulligan_retry_delay_seconds": "live"}}
         code, _, _ = run_cli([*self._base(), "delays", "set",
-                              "pre_action_delay_seconds=5",
+                              "mulligan_retry_delay_seconds=5",
                               "post_action_delay_seconds=0.2"])
         self.assertEqual(code, hsctl.EXIT_OK)
         body = self.console.posts()[-1][2]
         self.assertIs(body["hot"], True)
-        self.assertEqual(body["pre_action_delay_seconds"], 5.0)
+        self.assertEqual(body["mulligan_retry_delay_seconds"], 5.0)
         self.assertEqual(body["post_action_delay_seconds"], 0.2)
 
         with self.subTest(no_hot=True):
             self.console.httpd.routes["/api/delays"] = {"ok": True,
                                                         "message": "ok"}
             run_cli([*self._base(), "delays", "set", "--no-hot",
-                     "pre_action_delay_seconds=1"])
+                     "mulligan_retry_delay_seconds=1"])
             self.assertIs(self.console.posts()[-1][2]["hot"], False)
 
     def test_delays_set_rejects_invalid_fields_before_sending(self):
         cases = (
-            ("nope=1", ("未知延时字段", "pre_action_delay_seconds")),
-            ("pre_action_delay_seconds=abc", ("必须是数字",)),
+            ("nope=1", ("未知延时字段",
+                        "mulligan_ready_delay_seconds")),
+            ("mulligan_retry_delay_seconds=abc", ("必须是数字",)),
         )
         for value, expected_messages in cases:
             with self.subTest(value=value):
@@ -303,12 +296,6 @@ class CliTests(unittest.TestCase):
         self.assertEqual(self.console.posts()[-1][2],
                          {"hot": True, "enabled": True,
                           "mode": "legend_number", "legend_number": 500})
-
-    def test_liveness_shows_current_thresholds(self):
-        code, out, _ = run_cli([*self._base(), "liveness"])
-        self.assertEqual(code, hsctl.EXIT_OK)
-        self.assertIn("120", out)
-        self.assertIn("300", out)
 
     # ------------------------------------------------ 浮窗 / 定时 / 校准
     def test_overlay_actions_on_off_and_toggle(self):
@@ -1064,8 +1051,6 @@ class CliDelayAndScreenshotContractTests(unittest.TestCase):
     DELAY_EFFECTS = (
         ("mulligan_ready_delay_seconds", "立即生效"),
         ("mulligan_retry_delay_seconds", "立即生效"),
-        ("pre_action_delay_seconds", "立即生效"),
-        ("first_turn_per_card_delay_seconds", "立即生效"),
         ("discover_target_delay_seconds", "立即生效"),
         ("mulligan_post_ocr_delay_seconds", "下次「开始对战」生效"),
         ("post_action_delay_seconds", "下次「开始对战」生效"),

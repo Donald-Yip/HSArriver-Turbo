@@ -245,6 +245,27 @@ Web UI / hsctl
   -> battle_entry.py / log_state.py / click.py / src/parser / src/ocr
 ```
 
+Diagnostics added on top of that path (R18D):
+
+```text
+src/ocr/paddle_adapter.recognize()  每次识别后写一条 -> src/ocr/status.py
+src/ocr/status.py                   旁路记录：区域 tag / 尺寸 / 逐行文本 / 置信度（最近 8 个区域）
+web_ui._overlay_ocr()               snapshot() 转发给浮窗（注入式回调 ocr_callback）
+log_overlay.py                      日志区下方「OCR 扫描」框：按区域分块（标题 + 完整原文逐行），
+                                    TTL 12s 过期隐藏，2~8 行自适应 + 滚动，可折叠
+FSM_action._player_turn_ready()     「尚未检测到结束回合」诊断行带上 OCR 读到的原文
+FSM_action._scan_tick()             我方回合内扫描心跳（≤2s 一次，含所有等待；R18H）
+FSM_action.automation_phase_state() 浮窗空状态：当前诊断码中文标签 + Power.log 静默秒数
+FSM_action.QuittingBattle()         每局结束调 memory_watch.note_game_end()（RSS 一行 + 超阈值重建 OCR 引擎）
+src/ocr/stable_reader.py            识别证据缓存有界（OrderedDict LRU，MAX_CACHE_ENTRIES=64）+ clear_cache()
+memory_watch.py                     进程 RSS 基线/峰值、每局一行日志、900/1400MB 阈值回收与告警
+action_feed.py                      浮窗分块流：日志行 → 「OCR → 执行」块，新块置顶（R18J）
+adapters/legacy/recommendation.py   AdaptedAction.description / describe_adapted()：执行了什么（R18J）
+```
+
+These are legacy-shell diagnostics only: `src/hslegend` must not import
+`src.ocr.status`, and the module must stay out of the layered package.
+
 Key caution:
 
 - `FSM_action.py` is not a battlegrounds engine.

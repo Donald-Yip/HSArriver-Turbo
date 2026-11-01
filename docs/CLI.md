@@ -107,7 +107,7 @@ JSON 模式下：
 
 | 命令 | 说明 |
 | --- | --- |
-| `status` | 状态总览：阶段、账号是否匹配、战绩、存活检测、自动投降、卡组投降、段位目标、活人感、延时、自检、最后错误 |
+| `status` | 状态总览：阶段、账号是否匹配、战绩、守护、自动投降、卡组投降、段位目标、活人感、延时、自检、最后错误 |
 | `status --watch 2` | 每 2 秒刷一行（Ctrl+C 退出） |
 | `log [-n 50] [-f] [--interval 1]` | `-n` 先打最近 N 行；`-f` 持续跟随（走 `/api/logs?seq=` 增量接口，不重复） |
 | `selfcheck [--refresh]` | 环境自检（Python/依赖/分辨率/管理员） |
@@ -249,8 +249,7 @@ uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡�
 | --- | --- |
 | `delays` / `delays set 键=值 [键=值 …]` | 延时；`delays` 会逐条标出**生效时机** |
 | `human-like [set …]` | 活人感：`--enabled/--no-enabled`、`--hand-hover/--no-hand-hover`、`--minion-hover/--no-minion-hover`、`--post-delay-min/-max`、`--hover-min/-max`、`--minion-hover-min/-max` |
-| `liveness [set …]` | 存活检测：`--enabled/--no-enabled`、`--warn`（秒）、`--stop`（秒） |
-| `watchdog on\|off\|status\|set` | **中断重启**：自动化运行中 `Power.log` 停滞超阈值就重启炉石并重新进入对战。`set` 参数：`--stale`（秒，默认 300=5 分钟）、`--max-restarts`（默认 3）、`--window`（秒，默认 600）。默认**关**；打开后接管 `liveness` 的日志停滞判定（不再自动停止，改为重启） |
+| `resident on\|off\|status\|set` | **守护（无人值守自愈；原「常驻模式」）**：一张卡统一负责 ①炉石进程消失 ②自动化停摆 ③日志停滞（**对局中** `stale_in_game` 默认 180s、**其它界面** `stale_other` 默认 300s）→ 自动重启炉石 → 重进对战 → 重新开局；10 分钟内最多 3 次，超限暂停并告警（控制台不退出）。**提前告警** `--warn N`（`resident.warn_seconds`，默认 120，0=关；`hsctl resident status` 会显示）：日志停滞到它但没到处理阈值时只告警、不动作。按配置的 `--mode`（`wild`/`standard`/`casual`，也认 狂野/标准/休闲）+ `--deck`（1–9，`0`/留空=不点卡组）进入对战并持续挂机。手动停止 = **暂停**守护。`set` 参数：`--mode`、`--deck`、`--warn`、`--stale`、`--other-stale`、`--max-restarts`、`--window`、`--start-delay`、`--dry-run on\|off`（只判定不点击）。默认**关**；**关闭时保留最小安全网**：进程消失 / 对局中日志卡死 → 告警 + 停止自动化（不再自动重启）。**与定时任务**：定时任务作为守护时间窗——窗口外守护待机（`waiting_schedule`，状态显示「等待定时窗口」），到点由守护装配并开局，窗口结束按「打完本局」停并暂停守护；守护内部启动 `keep_schedule=True`，不会清掉定时计划；手动停止优先（被手动暂停的守护到点也不启动）。守护管事时炉石进程消失交由守护重启；手动「重启炉石」后守护自动恢复。**手动退出 ≠ 错误**：手动停止/急停/退出脚本会落盘「手动停止」标记，重启控制台后守护保持暂停等手动开始；只有崩溃/被杀才按「错误后自动开始」自动接管 |
 | `concede [set …]` | 自动投降：`--enabled/--no-enabled`、`--threshold`（%）、`--rounds` |
 | `concede now` | **手动投降**：立刻点「齿轮 → 认输」。对战中随时可用，**不需要先停自动化**（自动打的时候想立刻认输用它） |
 | `surrender [show\|on\|off\|check\|set\|clear]` | **卡组识别投降**（只判对方）：认出对手是某套有特征牌的卡组就立刻投。`show`=看配置（条件译成中文）、`on/off`=总开关（保留卡组）、`check`=看这一局的实时判定（对方职业 / 每个条件是否满足）、`set --file rules.json`（`-` 读 stdin，`--rules '{…}'` 直接给 JSON，`--yes` 跳过「当场会命中」的二次确认）、`clear`=清空 |
@@ -264,8 +263,6 @@ uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡�
 | --- | --- |
 | `mulligan_ready_delay_seconds` | 立即生效 |
 | `mulligan_retry_delay_seconds` | 立即生效 |
-| `pre_action_delay_seconds` | 立即生效 |
-| `first_turn_per_card_delay_seconds` | 立即生效 |
 | `discover_target_delay_seconds` | 立即生效（调用方每次都新建配置、重新读盘） |
 | `mulligan_post_ocr_delay_seconds` | 下次「开始对战」生效 |
 | `post_action_delay_seconds` | 下次「开始对战」生效 |
@@ -275,6 +272,12 @@ uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡�
 「立即生效」是**就地改写**正在运行的那个 `RecommendationConfig`（它是 frozen dataclass，
 所以实现上刻意用 `object.__setattr__` 绕过冻结）—— 这样所有共享同一实例的流程对象
 当场就能看到新值。`hsctl delays set` 的回话里会带 `effects` 字段说明每项的实际时机。
+
+> 旧版固定回合开始延时 `first_turn_per_card_delay_seconds`（每张开局卡）与
+> `pre_action_delay_seconds`（每回合前）**已废弃**：回合就绪改判右侧「结束回合」
+> 按钮的 OCR（`turn_start_probe_interval_seconds`，每 2s 复查）。这两个字段不再
+> 出现在 `delays show` / `delays set` 的可用字段里；旧 `ui_config.json` 里残留的
+> 值会被忽略，并在下一次保存延时配置时清掉。
 
 ### 4.4 浮窗 / 校准 / 定时 / 高风险
 
@@ -293,14 +296,17 @@ uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡�
 | 命令 | 说明 |
 | --- | --- |
 | `serve status` | 控制台是否在运行（含端口文件里的 pid / 启动时间 / 解释器） |
-| `serve start [--browser] [--wait 60]` | 用 `--no-browser` 后台拉起 `web_ui.py`，等 `/api/status` 通了才返回；输出写 `log\cli_serve.log`；起不来会回显日志尾部 |
+| `serve start [--browser] [--wait 60] [--auto]` | 用 `--no-browser` 后台拉起 `web_ui.py`，等 `/api/status` 通了才返回；输出写 `log\cli_serve.log`；起不来会回显日志尾部。`--auto` = 看门狗/自启用：上次是**手动退出整个控制台**（`log/resident_intent.json` 且 scope=console）时直接跳过；普通 `serve start` 不检查该标记（只停自动化不挡看门狗） |
 | `serve start --elevate` | **请求提权**启动：弹 UAC 同意框（需要有人在电脑前点「是」） |
 | `serve start --via-task` | 通过已注册的「最高权限」计划任务启动：**不弹 UAC**，可无人值守 |
-| `serve stop [--force] [--hard]` | **先**请求停止自动化，**再**让控制台**自己退出**（HTTP 自停通道，不需要提权）；自停不可用时才退回结束进程。`--hard` = 跳过自停直接 taskkill；pid 的映像名不是 Python 时拒绝（`--force` 覆盖） |
-| `serve restart [--browser] [--elevate\|--via-task]` | stop → start |
+| `serve stop [--force] [--hard]` | **先**请求停止自动化，**再**让控制台**自己退出**（HTTP 自停通道，不需要提权）；自停不可用时才退回结束进程。`--hard` = 跳过自停直接 taskkill；pid 的映像名不是 Python 时拒绝（`--force` 覆盖）。真正停掉后会写「手动停止」标记，看门狗以后不自动拉起 |
+| `serve restart [--browser] [--force] [--wait 60] [--elevate\|--via-task]` | stop → start。**重启不算「手动退出」**：停自动化走内部标记、自停不写「手动停止」标记，重启后守护按原配置自动接管（`serve stop` 才会写标记） |
 | `serve install-task [--force]` | 注册「最高权限」计划任务（**需要管理员跑一次**） |
 | `serve task-status` | 看任务是否存在、是否真的勾了最高权限 |
 | `serve uninstall-task` | 删除该计划任务 |
+| `serve install-watchdog [--force]` | 注册**控制台进程自启**计划任务 `HSLegendArriver_watchdog`：每 5 分钟隐藏执行 `serve start --auto`，控制台脚本没在跑、且上次不是手动退出时自动拉起（**需要管理员跑一次**）。**这是控制台进程看门狗，不是「守护」**：它只管控制台脚本自己的生死，不重启炉石、不管对局/日志（那些归 `hsctl resident` 的「守护」） |
+| `serve watchdog-status` | 看门狗任务是否存在/最高权限/间隔，以及当前是否有「手动停止」标记（手动退出时看门狗会跳过） |
+| `serve uninstall-watchdog` | 删除看门狗计划任务 |
 
 `--elevate` 与 `--via-task` 互斥；不指定就是普通的非提权后台启动。
 
@@ -310,6 +316,18 @@ uv run python hsctl.py deck --clear           # 清掉本机旧的自动选卡�
 
 安全性：**端口上没人监听时，`serve stop` 只清理残留的端口文件，绝不去 kill 它记下的
 pid**（那个 pid 可能已被系统复用给别的进程）。
+
+**手动退出 vs 错误**：手动停止自动化 / Ctrl+Q / 浮窗「退出脚本」/ 关控制台窗口 /
+`serve stop` 都会把「手动停止」意图写进 `log/resident_intent.json`；下次启动控制台时
+守护保持暂停（`/api/status.resident.manual_stop=true`），不自动装配、不点鼠标，等用户
+点「开始对战」或显式开启守护；只有上次崩溃/被杀（无标记）才按「错误后自动开始」接管
+（装配日志写「守护自启接管」）。`serve install-watchdog` 注册的是**控制台进程自启**，
+每 5 分钟跑一次 `serve start --auto`：**只有「退出整个控制台」类的手动停止**才让它跳过；
+只是停了自动化（控制台还开着）时，控制台崩了看门狗仍会拉起（守护自己保持暂停）。
+它不负责重启炉石/重进对战——那些归 `hsctl resident` 的「守护」。
+`serve restart` 不写标记（重启不是退出）。看门狗任务默认沿用 Windows 计划任务策略：
+**电池供电时不会触发**、只在用户登录后运行；笔记本挂机请插电，或在「任务计划程序 →
+HSLegendArriver_watchdog → 条件」里取消电池限制。
 
 ### 4.6 交互模式
 
@@ -518,7 +536,7 @@ uv run python hsctl.py --json doctor      # 复验到 env_ok
 3. 检查 name_match.matched        → false 就用 hsctl config set --name 纠正
 4. hsctl prepare                  → 确认浮窗/前台就绪，再 hsctl start
 5. hsctl log -f                   → 跟随日志观察；或 hsctl --json status --watch 2
-6. 需要时热改：hsctl delays set … / hsctl liveness set … / hsctl watchdog set …
+6. 需要时热改：hsctl delays set … / hsctl resident set --warn 120 … / hsctl resident set --mode …
 7. 收工：hsctl stop --after-game（打完本局）或 hsctl stop
 ```
 

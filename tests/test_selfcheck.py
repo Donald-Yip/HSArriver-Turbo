@@ -50,8 +50,9 @@ class DependencyManifestTests(unittest.TestCase):
                   for spec in selfcheck.DEPENDENCIES for dist in spec["dist"]}
 
         self.assertEqual(set(), set(pins) - listed)
-        # opencv-python 是 opencv-python-headless 的合法替代实现，额外允许。
-        self.assertEqual({"opencv-python"}, listed - set(pins))
+        # opencv 三件套（headless / opencv-python / contrib）都在自检清单里，
+        # 且 requirements.txt 已全部钉版本 —— 允许清单比 pin 多出它们。
+        self.assertEqual(set(), listed - set(pins))
 
     def test_python_312_specific_packages_are_checked(self):
         keys = {selfcheck._normalize(spec["dist"][0])
