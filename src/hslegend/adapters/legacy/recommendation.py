@@ -6,7 +6,8 @@ import re
 from hslegend.adapters.legacy.actions import (
     AssembleChoiceAction, AttackAction, DiscoverChoiceAction, EndTurnAction,
     HeroPowerAction,
-    LaunchStarshipAction, PlayCardAction, SelectTargetAction, Target,
+    LaunchStarshipAction, PlayCardAction, RefreshAction, SelectTargetAction,
+    Target,
     TimelineAction, TradeCardAction, UseAbilityAction, UseLocationAction,
 )
 from hslegend.adapters.legacy.card_queries import (
@@ -50,6 +51,143 @@ class AdaptedAction:
     source_entity_id: str | None
     target_entity_id: str | None
     postcondition: str
+    # 执行日志用的一句话中文（``describe_adapted`` 生成）：应用层只读这个纯
+    # 数据字段，不 import 适配层的动作 DTO（分层约束）。默认空串，旧构造
+    # （含测试里的 AdaptedAction(...)）不受影响。
+    description: str = ""
+
+
+# 卡牌类型的中文说法（执行日志用；认不出时写“卡牌”）。
+_CARDTYPE_ZH = {
+    "SPELL": "法术",
+    "MINION": "随从",
+    "WEAPON": "武器",
+    "LOCATION": "地标",
+    "HERO": "英雄",
+}
+
+
+def _name_of(card_id):
+    """卡名：卡表认得出就用中文名，认不出退回 card_id 本身。"""
+    text = str(card_id or "")
+    if not text:
+        return ""
+    try:
+        return card_name(text) or text
+    except Exception:
+        return text
+
+
+def _entity_name(entity):
+    """实体（场上随从/英雄/手牌）的中文名：优先日志实体名，再查卡表。"""
+    name = str(getattr(entity, "name", "") or "")
+    if name:
+        return name
+    return _name_of(getattr(entity, "card_id", None))
+
+
+def _state_entity_name(state, entity_id):
+    """按实体 id 在 state 里找卡名（找不到返回空串，绝不影响日志）。"""
+    if state is None or not entity_id:
+        return ""
+    wanted = str(entity_id)
+    try:
+        for attr in ("my_hand_cards", "my_minions", "my_locations",
+                     "oppo_minions", "oppo_locations"):
+            for entity in getattr(state, attr, ()) or ():
+                if str(getattr(entity, "entity_id", "")) == wanted:
+                    return _entity_name(entity)
+        for attr in ("my_hero", "oppo_hero"):
+            entity = getattr(state, attr, None)
+            if (entity is not None
+                    and str(getattr(entity, "entity_id", "")) == wanted):
+                return _entity_name(entity)
+    except Exception:
+        return ""
+    return ""
+
+
+def _target_text(target):
+    """Target → 报告里的中文说法（对方英雄 / 我方N号位随从 …）。"""
+    if target is None:
+        return ""
+    side = "对方" if getattr(target, "side", "") == "enemy" else "我方"
+    kind = getattr(target, "kind", "")
+    index = getattr(target, "index", None)
+    if kind == "hero":
+        return f"{side}英雄"
+    if index is None:
+        return f"{side}随从" if kind == "minion" else f"{side}目标"
+    if kind == "minion":
+        return f"{side}{index + 1}号位随从"
+    if kind == "hand":
+        return f"{side}{index + 1}号位手牌"
+    return f"{side}{index + 1}号位"
+
+
+def _with_target(text, target):
+    """有目标时在动作描述后面补「→ 对方英雄 / 我方N号位随从」。"""
+    target_text = _target_text(target)
+    return f"{text} → {target_text}" if target_text else text
+
+
+def describe_adapted(adapted, proposed=None, state=None):
+    """把适配后的点击动作写成一句中文（执行日志用）。
+
+    ``proposed`` 用于兜底（认不出动作时退回推荐原文）；``state`` 可选：能按
+    实体 id 从日志状态里取到卡名时优先用实体名，取不到退回 card_id。任何字段
+    缺失都不抛异常——描述只是日志，绝不能影响执行。
+    """
+    manual = getattr(adapted, "manual_action", None)
+    if isinstance(manual, PlayCardAction):
+        label = _CARDTYPE_ZH.get(str(manual.cardtype or ""), "卡牌")
+        text = (f"打出{manual.hand_index + 1}号位{label}"
+                f"「{_name_of(manual.card_id)}」")
+        if manual.gap_index is not None:
+            text += f"→ 我方{manual.gap_index + 1}号位"
+        return _with_target(text, manual.target)
+    if isinstance(manual, AttackAction):
+        attacker = manual.attacker
+        if getattr(attacker, "kind", "") == "hero":
+            source = "我方英雄"
+        else:
+            source = f"{attacker.index + 1}号位随从"
+            name = _state_entity_name(state, adapted.source_entity_id)
+            if name:
+                source += f"「{name}」"
+        return f"{source}攻击 → {_target_text(manual.target)}"
+    if isinstance(manual, HeroPowerAction):
+        name = (_name_of(manual.card_id)
+                or str(getattr(proposed, "source_name", "") or ""))
+        text = f"使用英雄技能「{name}」"
+        return _with_target(text, manual.target)
+    if isinstance(manual, EndTurnAction):
+        return "结束回合（点右侧按钮）"
+    if isinstance(manual, DiscoverChoiceAction):
+        return _with_target(
+            f"选择第{manual.choice_index + 1}个选项", manual.target)
+    if isinstance(manual, AssembleChoiceAction):
+        return f"拼装：选第{manual.choice_index + 1}个部件"
+    if isinstance(manual, UseAbilityAction):
+        name = str(manual.choice_name or "") or _name_of(manual.card_id)
+        source = (f"{manual.source.index + 1}号位随从"
+                  if manual.source is not None else "随从")
+        text = f"{source}发动技能「{name}」"
+        return _with_target(text, manual.target)
+    if isinstance(manual, SelectTargetAction):
+        return f"选择{_target_text(manual.target)}"
+    if isinstance(manual, UseLocationAction):
+        text = f"使用{manual.location_index + 1}号位地标"
+        return _with_target(text, manual.target)
+    if isinstance(manual, LaunchStarshipAction):
+        return "发射星舰"
+    if isinstance(manual, TradeCardAction):
+        return f"交易{manual.hand_index + 1}号位手牌"
+    if isinstance(manual, TimelineAction):
+        return "回溯" if manual.choice == "undo" else "维持"
+    if isinstance(manual, RefreshAction):
+        return "刷新酒馆"
+    return str(getattr(proposed, "normalized_instruction", "") or "")
 
 
 def _entity_order_key(entry):
@@ -1088,7 +1226,15 @@ class RecommendationAdapter:
 
     def __call__(self, proposed, state):
         """Compatibility callable used by the production RecommendationFlow."""
-        return adapt_action(proposed, state)
+        adapted = adapt_action(proposed, state)
+        # 描述在适配全部完成（含抉择/换牌等 replace 分支）之后再算，保证日志
+        # 写的就是最终要点的那个动作；replace 也不会丢掉其它字段。描述只是
+        # 日志，生成失败一律退回空串，绝不打断执行。
+        try:
+            description = describe_adapted(adapted, proposed, state)
+        except Exception:
+            description = ""
+        return replace(adapted, description=description)
 
     def adapt(self, intent, context):
         proposed = intent

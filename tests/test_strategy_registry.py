@@ -3,9 +3,9 @@
 
 覆盖 ``ai/deck_strategy.py`` 的对外接口：
 
-* ``strategy_folders()`` 返回 ai/ 下三套卡组（按名称排序，不含 outofdate）；
+* ``strategy_folders()`` 返回 ai/ 下的卡组（按名称排序，不含 outofdate；含「通用」）；
 * ``strategy_labels()`` / ``strategy_class()`` / ``deck_strategy()`` 的约定；
-* ``config.strategy_choices()`` 内置「盒子AI」+ 三套卡组，默认走盒子；
+* ``config.strategy_choices()`` 内置「盒子AI」+ 本地卡组，默认走盒子；
 * 某个卡组文件夹加载失败时只跳过该卡组，不把异常抛给主流程。
 """
 
@@ -21,7 +21,7 @@ import ai.deck_strategy as deck_strategy_module
 import config
 
 
-EXPECTED_FOLDERS = ["任务牧", "动物园术", "强化学习动物园术"]
+EXPECTED_FOLDERS = ["任务牧", "动物园术", "强化学习动物园术", "通用"]
 EXCLUDED_FOLDER = "outofdate"
 
 

@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""R18 本地搜索：黄金回放样例 + 三套卡组的空场面最小状态。
+"""R18 本地搜索：黄金回放样例 + 本地策略的空场面最小状态。
 
 * 黄金样例 ``tests/fixtures/strategy/zoo_turn4.json``：动物园术 2 费回合，
   手牌 6 号位 TIME_025（暮光时空跃迁者）首步必须是 ``play_card``。
-* 合成空状态：无手牌/无场面/无法力时，三套卡组都要给出合法的
+* 合成空状态：无手牌/无场面/无法力时，全部本地策略（含通用）都要给出合法的
   （至少一个 END_TURN）动作序列，且搜索不修改传入的真实战局。
 """
 
@@ -16,7 +16,7 @@ from hslegend.domain import ActionKind
 from tests.support.strategy_fixtures import load_fixture, state_from_dict
 
 
-EXPECTED_FOLDERS = ["任务牧", "动物园术", "强化学习动物园术"]
+EXPECTED_FOLDERS = ["任务牧", "动物园术", "强化学习动物园术", "通用"]
 ZOO_FIXTURE = "zoo_turn4.json"
 
 
@@ -130,7 +130,7 @@ class ZooTurn4GoldenTests(unittest.TestCase):
 
 
 class EmptyStateStrategyTests(unittest.TestCase):
-    """三套卡组在无手牌/无场面/0 法力时都必须给出可执行序列。"""
+    """全部本地策略在无手牌/无场面/0 法力时都必须给出可执行序列。"""
 
     def test_every_deck_returns_legal_actions_on_empty_state(self):
         for key in EXPECTED_FOLDERS:

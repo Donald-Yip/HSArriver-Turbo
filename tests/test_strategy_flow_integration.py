@@ -84,6 +84,23 @@ class StrategyFlowIntegrationTests(unittest.TestCase):
         self.assertIn("暮光时空跃迁者", flow.last_plan["steps"][0])
         self.assertIn(result.status.value, ("observe", "executed"))
 
+    def test_planner_with_explicit_strategy_key_does_not_need_global_selection(self):
+        # 盒子失效兜底：全局策略仍是 hsbox，规划器必须自己 override 指定策略。
+        _data, state = load_fixture("zoo_turn4.json")
+        planner = LegacyStrategyPlanner(strategy_key="动物园术", time_limit=5.0)
+
+        actions, score = planner.plan(state, state.my_last_mana)
+
+        self.assertTrue(actions)
+        self.assertIsNotNone(score)
+        self.assertIn("暮光时空跃迁者", actions[0].normalized_instruction)
+
+    def test_planner_with_unknown_strategy_key_raises(self):
+        _data, state = load_fixture("zoo_turn4.json")
+        planner = LegacyStrategyPlanner(strategy_key="不存在的卡组")
+        with self.assertRaises(RuntimeError):
+            planner.plan(state, state.my_last_mana)
+
 
 if __name__ == "__main__":
     unittest.main()

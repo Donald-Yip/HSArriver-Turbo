@@ -29,6 +29,35 @@ class MulliganResult:
 CLICKABLE_STARTING_CARDS = {3: 3, 5: 4}
 
 
+class MulliganFallbackTracker:
+    """换牌阶段：盒子 OCR 连续失败计数 → 是否改走本地兜底策略。
+
+    纯逻辑（不碰 UI/鼠标），供 FSM_action 的换牌循环使用；也便于单测。
+    一旦触发，本次换牌内不再切回盒子（换牌提交后马上进入对局，没有必要）。
+    """
+
+    def __init__(self, fail_streak=2):
+        self.fail_streak = max(1, int(fail_streak or 1))
+        self._failures = 0
+        self.active = False
+
+    def note_box_failure(self) -> bool:
+        """记一次盒子失败；返回 tracker 是否已进入兜底状态。"""
+        self._failures += 1
+        if self._failures >= self.fail_streak:
+            self.active = True
+        return self.active
+
+    def note_box_success(self) -> None:
+        """盒子成功读到并执行：清零失败计数（本次换牌内一般用不到）。"""
+        self._failures = 0
+
+    def reset(self) -> None:
+        """每局换牌开始时重置。"""
+        self._failures = 0
+        self.active = False
+
+
 class MulliganFlow:
     def __init__(self, executor, action_supplier, state_supplier,
                  action_context=None, stopped=lambda: False,
@@ -242,6 +271,14 @@ class MulliganFlow:
     def reset_delay(self):
         """每局换牌开始时调用：首次用 ready_delay，重试用 retry_delay。"""
         self._delay_done = False
+
+    def mark_panel_ready(self):
+        """换牌就绪延时已经等过：后续执行不再重复等 first_delay。
+
+        盒子换牌 OCR 连续失败、改走本地兜底 run_local 时用：FSM 在进入换牌
+        循环前已经等过 ready 延时，兜底执行不应再等一次（默认 20s）。
+        """
+        self._delay_done = True
 
     @staticmethod
     def _identity(state):

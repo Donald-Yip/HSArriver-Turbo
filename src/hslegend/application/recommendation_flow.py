@@ -19,6 +19,27 @@ _UNSET_TURN = object()
 # 只防盒子面板卡死（一直给同一行）时无限重复点同一个动作。
 _MAX_IDENTICAL_REPEATS = 6
 
+# 重试前刷新的等待上限（秒）：日志/状态类重试先等日志 revision 前进，避免拿
+# 上一步的旧场面重算动作（用户 2026-10-31：「重试前要刷新各个信息再重试」）。
+RETRY_REFRESH_TIMEOUT = 1.5
+
+# 刷新轮询间隔（秒）：每次睡这么久再问一次状态，直到 revision 前进或超时。
+_RETRY_REFRESH_INTERVAL = 0.2
+
+# “状态类”重试码：说明日志/场面已经变了，重试前必须先刷新日志状态，并清掉
+# OCR 帧缓存强制下一次重读面板；其它失败码（如 recommendation_not_stable）
+# 不等待、不清缓存，保持原有节奏。
+_RETRY_REFRESH_CODES = frozenset({
+    "revision_changed",
+    "duplicate_board_position",
+    "turn_changed",
+})
+
+# 这些 OBSERVE 码说明盒子面板没有给出下一步可执行推荐（常见于盒子停止刷新）。
+# 只有它们参与“超时无进展”兜底；正常的等待动作确认/回合未就绪不在此列。
+_FALLBACK_STALL_CODES = frozenset({
+    "waiting_recommendation_update",
+})
 
 
 def _accepts_action_kind(hook) -> bool:
@@ -92,7 +113,12 @@ class RecommendationFlow:
                  box_ai=True,
                  planner=None,
                  joint=False,
-                 strategy_name=""):
+                 strategy_name="",
+                 fallback_planner=None,
+                 fallback_enabled=None,
+                 fallback_fail_streak=6,
+                 fallback_stall_seconds=8.0,
+                 fallback_strategy_name=""):
         self.capture = capture
         self.reader = reader
         self.parser = parser
@@ -154,6 +180,9 @@ class RecommendationFlow:
         # 最近一次已经打到日志里的 OCR 原文：同一段原文只留一次，
         # 重试几十次时不再刷屏（见 _log_ocr_raw）。
         self._last_logged_ocr_text = None
+        # 本次 run_player_turn_step 入口读到的日志 revision：状态类重试
+        # （revision_changed/turn_changed/…）要用来判断日志有没有前进。
+        self._last_revision = None
         # ------------------------------------------------------------ 决策源
         # box_ai=True：现有 OCR 路径；False：本地卡组策略（planner）。
         # planner 缺失时强制回退盒子，避免“选了本地却没有搜索器”把流程带崩。
@@ -164,6 +193,31 @@ class RecommendationFlow:
         # 联合模式：本地卡组时读盒子首步，与本地整回合最优比较。
         self.joint = bool(joint) and not self.box_ai and planner is not None
         self.strategy_name = str(strategy_name or "")
+        # ------------------------------------------------------------ 盒子失效兜底
+        # 盒子AI 路径连续失败/长时间无进展时，用 fallback_planner（显式策略）
+        # 接管一步；盒子恢复可执行推荐后自动切回。默认不启用。
+        self.fallback_planner = fallback_planner
+        self.fallback_enabled = (
+            bool(fallback_enabled) if fallback_enabled is not None
+            else fallback_planner is not None)
+        if self.fallback_enabled and fallback_planner is None:
+            self.fallback_enabled = False
+        self.fallback_fail_streak = max(1, int(fallback_fail_streak or 1))
+        self.fallback_stall_seconds = max(
+            0.0, float(fallback_stall_seconds or 0.0))
+        self.fallback_strategy_name = str(fallback_strategy_name or "")
+        # 兜底计数/状态：每个我方回合重置；pending 动作期间绝不触发。
+        self._box_fail_streak = 0
+        self._box_progress_at = 0.0
+        self._box_progress_turn = _UNSET_TURN
+        self._box_was_my_turn = False
+        self._fallback_active = False
+        self._fallback_failures = 0
+        self._fallback_disabled_turn = None
+        # 兜底需要一份最新快照；入口/等待手牌动画/重试刷新时顺手记录，避免
+        # 每轮多读一次 StrategyState。
+        self._latest_state = None
+        self._latest_revision = None
         # 浮窗「推荐打法」：最近一次本地搜索的最高分 + 最佳动作序列。
         self.last_plan = None
         # 本回合同一动作的失败计数/拉黑（本地路径，6 次后跳过该动作）。
@@ -183,15 +237,59 @@ class RecommendationFlow:
         """A readable recommendation starts a new raw-evidence episode."""
         self._last_logged_ocr_text = None
 
-    @staticmethod
-    def _retry(code):
+    def _retry(self, code):
         """Keep retrying until the next read becomes executable.
 
         Turn-transition animations can leave a stale recommendation visible for
         many seconds.  Failure counts are therefore not interpreted as a stuck
         recommendation and never suppress later retries.
+
+        状态类失败（日志 revision / 场面 / 回合已经变了）说明手里这份信息已过期：
+        先等日志 revision 前进并清掉 OCR 帧缓存，让上层重读，而不是拿旧场面
+        重算动作（用户 2026-10-31：「每次操作重试前都要刷新各个信息」）。
         """
+        if code in _RETRY_REFRESH_CODES:
+            self._refresh_before_retry(self._last_revision, timeout=0.8)
+            clear_cache = getattr(self.reader, "clear_cache", None)
+            if clear_cache is not None:
+                try:
+                    clear_cache()
+                except Exception:
+                    pass
         return FlowStepResult(FlowStepStatus.RETRY, code)
+
+    def _remember_state(self, state, revision):
+        """记录最近一次拿到的战局快照（只给兜底用，不改 `_last_revision` 语义）。"""
+        self._latest_state = state
+        self._latest_revision = revision
+
+    def _refresh_before_retry(self, min_revision, timeout=None):
+        """重试前先刷新日志状态，最多等 ``timeout`` 秒让 revision 前进。
+
+        先取一次 ``(state, revision)``；revision 还没超过 ``min_revision`` 时
+        sleep ``_RETRY_REFRESH_INTERVAL`` 再取，直到 revision 前进 / 等待超过
+        上限 / ``stopped()``；返回最新的 ``(state, revision)``。真的等待过才打
+        一行诊断（A→B + 等待时长），让日志能区分“刷新过”和“还在用旧信息”。
+
+        等待时长按实际 sleep 累加，不依赖注入的 clock：测试里冻结的假时钟也
+        不会让这里空转。
+        """
+        limit = (RETRY_REFRESH_TIMEOUT if timeout is None
+                 else max(0.0, float(timeout)))
+        state, revision = self.state_supplier()
+        waited = 0.0
+        advanced_from = revision if min_revision is None else min_revision
+        while (revision <= advanced_from and waited < limit
+               and not self.stopped()):
+            self.sleep(_RETRY_REFRESH_INTERVAL)
+            waited += _RETRY_REFRESH_INTERVAL
+            state, revision = self.state_supplier()
+        if waited > 0:
+            self._announce(
+                f"[SYS] 重试前刷新：日志 revision {advanced_from}→{revision}"
+                f"（等待 {waited:.1f}s）")
+        self._remember_state(state, revision)
+        return state, revision
 
     def _log_ocr_raw(self, text):
         """把这一次读到的盒子面板原文留痕（失败时用）。
@@ -222,10 +320,17 @@ class RecommendationFlow:
                 break
 
     def run_player_turn_step(self, allowed_action_kinds=None):
+        """走一次决策源；盒子路径失败时按阈值切本地兜底（R18K）。"""
+        result = self._run_decision_source(allowed_action_kinds)
+        return self._maybe_box_fallback(result, allowed_action_kinds)
+
+    def _run_decision_source(self, allowed_action_kinds=None):
         try:
             if self.stopped():
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             state, revision = self.state_supplier()
+            self._last_revision = revision
+            self._remember_state(state, revision)
             self.hand_animation_delay.observe(
                 getattr(state, "hand_entry_count", 0))
             # 回合开始的常规抽 1 张不算；这里处理“抽了 2 张以上”和上一步动作
@@ -287,21 +392,28 @@ class RecommendationFlow:
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE, "turn_not_ready")
             next_attempts = 0
+            # 先刷新状态再构造动作：以前盒子路径用入口时读到的旧 state 调
+            # adapter，实体 id/坐标/postcondition 与随后校验用的 state 不是
+            # 同一份（本地策略路径一直是先 fresh_state 再 adapter）。用户
+            # 2026-10-31：「每次操作重试前都要刷新各个信息再重试」。
+            fresh_state, fresh_revision = self._wait_for_hand_animation()
+            if self.stopped():
+                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             if pending is not None:
                 if not same_pending:
                     self._clear_pending()
                 else:
                     confirmed = (
-                        revision > pending.before_revision
+                        fresh_revision > pending.before_revision
                         and self._postcondition(
                             pending.postcondition,
                             pending.before_state,
-                            state,
+                            fresh_state,
                             pending.source_entity_id,
                             pending.target_entity_id,
                         )
                     )
-                    if confirmed and self._repeat_allowed(proposed, state):
+                    if confirmed and self._repeat_allowed(proposed, fresh_state):
                         # 盒子又把同一条推荐给了一遍，而且上一步确实生效：
                         # 这是「再做一次」（风怒第二击、连续打同一号位），不是
                         # 「已完成」。解除消费标记后立刻再执行，不等盒子更新
@@ -317,8 +429,30 @@ class RecommendationFlow:
                     elif (self.pending_timeout > 0
                             and self.clock() >= pending.deadline
                             and pending.attempts < self.max_pending_retries):
-                        # 点击没被客户端处理（动画期 InputManager 会直接丢弃）：
-                        # 解除消费标记后按同一条推荐重新执行一次。
+                        # 点击没被客户端处理（动画期 InputManager 会丢弃）。但
+                        # 也可能只是 Power.log 写得慢、动作其实已经生效：先刷新
+                        # 日志状态并重判后置条件，真的已生效就不再点第二次。
+                        fresh_state, fresh_revision = (
+                            self._refresh_before_retry(
+                                pending.before_revision))
+                        retried_confirmed = (
+                            fresh_revision > pending.before_revision
+                            and self._postcondition(
+                                pending.postcondition,
+                                pending.before_state,
+                                fresh_state,
+                                pending.source_entity_id,
+                                pending.target_entity_id,
+                            )
+                        )
+                        if retried_confirmed:
+                            # 动作其实已经生效：标记已消费并等盒子更新推荐。
+                            self.consumed.mark_consumed(
+                                self._pending_consumed_key(pending))
+                            self._clear_pending()
+                            return FlowStepResult(
+                                FlowStepStatus.OBSERVE,
+                                "waiting_recommendation_update")
                         next_attempts = pending.attempts + 1
                         self.consumed.discard(
                             self._pending_consumed_key(pending))
@@ -330,18 +464,15 @@ class RecommendationFlow:
                         return FlowStepResult(
                             FlowStepStatus.OBSERVE,
                             "awaiting_action_confirmation")
-            adapted = self.adapter(proposed, state)
+            adapted = self.adapter(proposed, fresh_state)
             consumed_key = self.consumed.key_for(proposed, adapted)
             if (self.consumed.contains(consumed_key)
                     and proposed.action == ActionKind.ATTACK
-                    and self._repeat_allowed(proposed, state)):
+                    and self._repeat_allowed(proposed, fresh_state)):
                 # 没留下 pending（上一步被判定为完成）但盒子还在给同一击：
                 # 风怒第二击同样是合法动作，解除消费标记后照常执行。
                 self._note_repeat(proposed)
                 self.consumed.discard(consumed_key)
-            fresh_state, fresh_revision = self._wait_for_hand_animation()
-            if self.stopped():
-                return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
             current_frame = self.capture.capture(ocr_panel_ok=True)
             current_evidence = self.reader.read_frame(
                 current_frame, self.capture.crop_recommendation)
@@ -356,7 +487,9 @@ class RecommendationFlow:
             if not validation.accepted:
                 return self._retry(validation.code)
             adapted, key = validation.value
-            print("[执行] 开始点击。")
+            # 执行日志写清楚“执行了什么”：适配层把描述放在纯数据字段
+            # description 里（应用层不 import 适配层，只 getattr 读字符串）。
+            print(f"[执行] {self._execution_text(adapted, proposed)}")
             result = self.controller.execute(adapted.manual_action, fresh_state)
             if getattr(result, "cancelled", False):
                 return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
@@ -374,6 +507,7 @@ class RecommendationFlow:
                                   attempts=next_attempts)
                 return FlowStepResult(
                     FlowStepStatus.OBSERVE, "awaiting_action_confirmation")
+            self._print_execution_result(result)
             # 本回合已经动过手：之后再出现的手牌增加都是“操作触发的抽牌”，
             # 不能再当成回合开始那张免费的。
             self._acted_this_turn = True
@@ -454,9 +588,120 @@ class RecommendationFlow:
         except Exception as exc:
             return self._retry(f"{type(exc).__name__}:{exc}")
 
+    # ------------------------------------------------------------ 盒子失效兜底
+    def _maybe_box_fallback(self, result, allowed_action_kinds=None):
+        """盒子路径失败时，按阈值切本地兜底策略；盒子恢复后自动切回。
+
+        触发条件（只看当前我方回合）：
+          * 连续 RETRY 达到 fallback_fail_streak（兜底中只需 2 次，给盒子
+            更新面板留一次机会）；
+          * 或连续 fallback_stall_seconds 秒没有成功执行动作，且当前结果是
+            RETRY / waiting_recommendation_update。
+
+        绝不触发：本地模式、兜底关闭、对手回合、待确认动作、已停止、本回合
+        本地兜底已连续失败 3 次。
+        """
+        if not (self.box_ai and self.fallback_enabled
+                and self.fallback_planner is not None):
+            return result
+        if self.stopped():
+            return result
+        state = self._latest_state
+        if state is None:
+            return result
+        if not getattr(state, "is_my_turn", False):
+            self._box_was_my_turn = False
+            return result
+
+        turn = getattr(state, "game_num_turns_in_play", None)
+        if (not self._box_was_my_turn
+                or self._box_progress_turn is _UNSET_TURN
+                or turn != self._box_progress_turn):
+            # 新我方回合：清零所有兜底计数，重新给盒子机会。
+            self._box_was_my_turn = True
+            self._box_progress_turn = turn
+            self._box_progress_at = self.clock()
+            self._box_fail_streak = 0
+            self._fallback_active = False
+            self._fallback_failures = 0
+        if result.status is FlowStepStatus.EXECUTED:
+            self._box_fail_streak = 0
+            self._box_progress_at = self.clock()
+            if self._fallback_active:
+                self._fallback_active = False
+                self._announce("[兜底] 盒子推荐恢复，切回盒子AI。")
+            return result
+        if (self._fallback_disabled_turn == turn
+                and not (self._fallback_active
+                         and self.pending_action is not None)):
+            return result
+        if self.pending_action is not None:
+            # 盒子自己执行的动作在待确认时继续等盒子，不抢。
+            # 但兜底动作的待确认在盒子 OCR 失败时必须交给本地路径确认：
+            # 盒子路径先读 OCR 再判 pending，OCR 失败时永远走不到确认逻辑，
+            # 不接管的话本地动作会一直挂在 pending 上。
+            if not (self._fallback_active
+                    and result.status is FlowStepStatus.RETRY):
+                return result
+            reason = "本地兜底动作待确认，盒子仍不可用"
+        else:
+            reason = None
+            if (result.status is FlowStepStatus.RETRY
+                    and result.diagnostics != "stopped"):
+                self._box_fail_streak += 1
+                threshold = (2 if self._fallback_active
+                             else self.fallback_fail_streak)
+                if self._box_fail_streak >= threshold:
+                    reason = f"连续 {self._box_fail_streak} 次未读到可执行推荐"
+
+            stalled_seconds = self.clock() - self._box_progress_at
+            stalled = (self.fallback_stall_seconds > 0
+                       and stalled_seconds >= self.fallback_stall_seconds)
+            if reason is None and stalled and (
+                    result.status is FlowStepStatus.RETRY
+                    or (result.status is FlowStepStatus.OBSERVE
+                        and result.diagnostics in _FALLBACK_STALL_CODES)):
+                reason = f"{stalled_seconds:.0f}s 没有成功执行盒子推荐"
+        if reason is None:
+            return result
+
+        self._fallback_active = True
+        self._announce(
+            f"[兜底] 盒子推荐失效（{reason}）→ 改用本地「"
+            f"{self.fallback_strategy_name or '通用'}」策略。")
+        try:
+            fallback_state, fallback_revision = self.state_supplier()
+        except Exception as exc:
+            self._announce(
+                "[兜底] 读取最新战局失败，继续等盒子："
+                f"{type(exc).__name__}: {exc}")
+            return result
+        self._remember_state(fallback_state, fallback_revision)
+        fallback = self._run_local_step(
+            fallback_state, fallback_revision, allowed_action_kinds,
+            planner=self.fallback_planner)
+        if fallback.status is FlowStepStatus.EXECUTED:
+            self._box_progress_at = self.clock()
+            self._box_fail_streak = 0
+        elif fallback.status is FlowStepStatus.RETRY:
+            self._fallback_failures += 1
+            if self._fallback_failures >= 3:
+                self._fallback_disabled_turn = turn
+                self._announce(
+                    "[兜底] 本地兜底连续失败，本回合不再接管，继续等盒子。")
+        return fallback
+
     # ------------------------------------------------------------ 本地策略路径
-    def _run_local_step(self, state, revision, allowed_action_kinds):
-        """本地卡组策略：search 出整回合最优，执行首步；不读推荐面板。"""
+    def _run_local_step(self, state, revision, allowed_action_kinds,
+                        planner=None):
+        """本地卡组策略：search 出整回合最优，执行首步；不读推荐面板。
+
+        `planner` 缺省用构造时的 planner（本地主模式）；兜底时显式传
+        fallback_planner，执行链路完全复用。
+        """
+        planner = planner or self.planner
+        if planner is None:
+            return self._retry("local_strategy_unavailable")
         # 1) 待确认动作：只读日志后置条件，不跑搜索（搜索很贵，不能每 0.3s 一次）。
         pending = self.pending_action
         if pending is not None:
@@ -496,7 +741,7 @@ class RecommendationFlow:
         if self.joint:
             box_note = self._capture_box_recommendation(state, revision)
         try:
-            actions, score = self.planner.plan(
+            actions, score = planner.plan(
                 state, getattr(state, "my_last_mana", 0),
                 stopped=self.stopped)
         except Exception as exc:
@@ -508,7 +753,7 @@ class RecommendationFlow:
         self.last_plan = {
             "turn": getattr(state, "game_num_turns_in_play", None),
             "score": score,
-            "steps": [self.planner.describe(item) for item in actions],
+            "steps": [planner.describe(item) for item in actions],
         }
         chosen = actions[0]
         if self.joint:
@@ -543,13 +788,14 @@ class RecommendationFlow:
         key = self.consumed.key_for(chosen, adapted)
         if self.consumed.contains(key):
             return FlowStepResult(FlowStepStatus.OBSERVE, "already_consumed")
-        print("[执行] 开始点击。")
+        print(f"[执行] {self._execution_text(adapted, chosen)}")
         result = self.controller.execute(adapted.manual_action, fresh_state)
         if getattr(result, "cancelled", False):
             return FlowStepResult(FlowStepStatus.OBSERVE, "stopped")
         if not result.executed and not result.recovery_needed:
             self._record_local_failure(chosen, adapted)
             return self._retry("execution_failed")
+        self._print_execution_result(result)
         self.consumed.mark_consumed(key)
         self._acted_this_turn = True
         if (chosen.action == ActionKind.TRADE_CARD
@@ -763,16 +1009,21 @@ class RecommendationFlow:
         stopped = getattr(self, "stopped", lambda: False)
         while True:
             if stopped():
-                return self.state_supplier()
+                state, revision = self.state_supplier()
+                self._remember_state(state, revision)
+                return state, revision
             state, revision = self.state_supplier()
             self.hand_animation_delay.observe(
                 getattr(state, "hand_entry_count", 0))
             remaining = self.hand_animation_delay.remaining()
             if remaining <= 0:
+                self._remember_state(state, revision)
                 return state, revision
             self.sleep(remaining)
             if stopped():
-                return self.state_supplier()
+                state, revision = self.state_supplier()
+                self._remember_state(state, revision)
+                return state, revision
 
     # -------------------------------------------------- 抽牌额外延时（回合内抽牌）
     @staticmethod
@@ -845,6 +1096,26 @@ class RecommendationFlow:
             print(text)
         except Exception:
             pass
+
+    @staticmethod
+    def _execution_text(adapted, proposed):
+        """执行日志里“执行了什么”：适配描述优先，缺失时退回推荐原文。
+
+        应用层不 import 适配层（分层约束），只 getattr 读纯数据字段；旧测试
+        注入的动作对象没有 description 时同样走兜底。
+        """
+        description = str(getattr(adapted, "description", "") or "")
+        return description or str(
+            getattr(proposed, "normalized_instruction", "") or "")
+
+    @staticmethod
+    def _print_execution_result(result):
+        """点击成功后补一行执行结果（``message`` 为空则不打印）。"""
+        if not getattr(result, "executed", False):
+            return
+        message = str(getattr(result, "message", "") or "")
+        if message:
+            print(f"[SYS] 执行结果：{message}")
 
     def _frame_for(self, frame_id):
         # Capture implementations may retain the stable reader's current frame.
