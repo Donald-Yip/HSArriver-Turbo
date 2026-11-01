@@ -15,7 +15,17 @@
    该信号，因为匹配对手/选职业阶段日志本来就安静，用它会误判。
 
 判定分两档：先告警（``fatal=False``，只提示），持续更久才判定退出
-（``fatal=True`` → 调用方自动停止自动化并醒目告警）。
+（``fatal=True``）。
+
+和「守护」（原常驻，2026-11-01 三卡合并）的关系
+------------------------------------------------------------------
+阈值来自**守护配置**（``resident.warn_seconds`` / ``resident.stale_in_game_seconds``），
+本模块只负责"发现信号"，处置由调用方决定（``FSM_action.check_hearthstone_liveness``）：
+
+* 守护会动手（``_guardian_takes_over()``）→ 致命信号交给守护自动重启恢复，
+  这里只写一条 [SYS] 说明，**不**告警、**不**停止自动化；
+* 守护关闭/暂停/配额耗尽/出错 → 本模块就是最小安全网：``fatal=True`` 时
+  告警并停止自动化（不再自动重启）。
 
 所有外部依赖（进程枚举、日志文件、时钟、配置）都可注入，便于单元测试。
 """
@@ -135,9 +145,27 @@ def _default_clock() -> float:
 
 
 def _default_settings() -> dict:
+    """存活检测的阈值来自**守护（resident）配置**（2026-11-01 三卡合并）。
+
+    「🩺 存活检测」卡已删除：它和「中断重启」「常驻模式」看的是同一个信号。
+    现在安全网与守护共用一套阈值，只是处置方式不同：
+    * 告警阈值 ← ``resident.warn_seconds``（0 = 关闭提前告警，直接用停止阈值）
+    * 停止阈值 ← ``resident.stale_in_game_seconds``（只在对局中参考日志）
+    * 进程消失宽限固定 6s；``enabled`` 恒为 True —— 守护关闭时的最小安全网
+      没有独立开关，否则又会出现「关了守护也不告警」的静默失效。
+    """
     try:
-        from config import liveness_settings
-        return liveness_settings()
+        from config import resident_settings
+
+        cfg = resident_settings()
+        warn = float(cfg.get("warn_seconds") or 0.0)
+        stop = max(60.0, float(cfg.get("stale_in_game_seconds") or 300.0))
+        return {
+            "enabled": True,
+            "process_grace_seconds": 6.0,
+            "log_stale_warn_seconds": warn if warn > 0.0 else stop,
+            "log_stale_stop_seconds": stop,
+        }
     except Exception:
         return {"enabled": True, "process_grace_seconds": 6.0,
                 "log_stale_warn_seconds": 120.0,
