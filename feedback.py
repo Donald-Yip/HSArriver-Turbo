@@ -67,6 +67,8 @@ CAPTURE_SKIPPED_NOT_IN_TURN = "not_in_turn"
 REPORT_TEXT_NAME = "错误报告.txt"
 REPORT_JSON_NAME = "errors.json"
 ENV_NAME = "环境.txt"
+# 浮窗两窗合并（识别轮播 + 日志流，按时间排序）：导出时一并塞进 zip。
+MERGED_UI_LOG_NAME = "浮窗合并日志.txt"
 
 _LOCK = threading.RLock()
 _INCIDENTS: list = []
@@ -720,6 +722,13 @@ def export_bundle(
                 json.dumps(build_errors_obj(items, meta), ensure_ascii=False, indent=2),
             )
             zf.writestr(ENV_NAME, _build_env_text())
+            try:
+                import merged_log
+                merged_ui_text = merged_log.timeline_text()
+            except Exception:
+                merged_ui_text = ""
+            if merged_ui_text:
+                zf.writestr(MERGED_UI_LOG_NAME, merged_ui_text)
             zf.writestr(
                 txt_name,
                 battle_record.render_text(
