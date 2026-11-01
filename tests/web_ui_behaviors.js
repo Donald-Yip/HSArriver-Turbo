@@ -120,8 +120,6 @@ const delays = {
   mulligan_ready_delay_seconds: 2,
   mulligan_post_ocr_delay_seconds: 1,
   mulligan_retry_delay_seconds: 1,
-  first_turn_per_card_delay_seconds: 1,
-  pre_action_delay_seconds: 1,
   post_action_delay_seconds: 1,
   draw_extra_delay_per_card_seconds: 1.5,
   discover_target_delay_seconds: 1,

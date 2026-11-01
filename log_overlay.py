@@ -2,9 +2,10 @@
 """Right-top live log overlay via tkinter (topmost, translucent, draggable).
 
 start() launches a background thread with a tkinter window pinned to the
-top-right corner. It streams the latest automation log lines; lines that mark
-the own-turn start are highlighted green. The window can be dragged by holding
-the left mouse button. Failures disable the overlay and never crash the caller.
+top-right corner. Its body is a **merged step feed**（「OCR / 执行」分块流，见
+action_feed.py）：每块 = 一步动作，块内先 OCR 内容、后执行内容，新块置顶。
+The window can be dragged by holding the left mouse button. Failures disable the
+overlay and never crash the caller.
 
 start() 返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING，调用方（web_ui）据此
 判断浮窗到底开没开；网页/浮窗重开在收尾竞争、上一轮线程超时等情况下都**不会
@@ -38,6 +39,11 @@ import threading
 import time
 from collections import deque
 
+# 浮窗正文的归块/渲染（一步动作一块，OCR → 执行）：纯 stdlib 的 legacy 展示模块。
+# 这里只负责把 action_feed.render() 画出来，不在浮窗里再写一套归块逻辑。
+import action_feed
+import merged_log
+
 # 脚本日志（对战日志 / 运行日志）的体积、命名与清理都在 script_logs.py 里；
 # 浮窗只用它的 format_size 与 new_battle_log_path，避免两份实现打架。
 import script_logs
@@ -46,6 +52,8 @@ import script_logs
 import version
 
 _LOCK = threading.Lock()
+# 旧版「日志正文」缓存：合并成分块流（action_feed）后不再参与渲染，
+# 只为既有用例/调试保留；浮窗正文现在来自 action_feed.render()。
 _LINES: deque = deque(maxlen=2000)
 _STARTED = [False]
 _REFRESH_MS = 350
@@ -75,20 +83,22 @@ _REPORTER = None
 _GENERATION = [0]
 
 # ---- flat dark palette ---------------------------------------------------
-BG = "#171b24"
-PANEL = "#202634"
-TITLE_BG = "#10141c"
-TEXT = "#e8ecf2"
-DIM = "#8b93a3"
-GREEN = "#5fd68a"
-ACCENT = "#4aa3ff"
-DANGER = "#e05e4b"
-WARN = "#d98a2e"
+BG = "#121722"
+PANEL = "#1a2130"
+PANEL2 = "#232b3c"
+LINE = "#2a3346"
+TITLE_BG = "#0c1017"
+TEXT = "#e9eef7"
+DIM = "#9aa5b8"
+GREEN = "#4fd18b"
+ACCENT = "#5b9dff"
+DANGER = "#ef6b6b"
+WARN = "#e3a63f"
 OK = "#2ea06b"
 GOLD = "#e8b93b"
 DISABLED = "#394050"
 # 「退出浮窗」用中性灰：它不是危险操作（脚本继续跑），别和红色的「退出脚本」混淆。
-NEUTRAL = "#4a5364"
+NEUTRAL = "#3a4356"
 
 # 浮窗整体不透明度（0.94 = 轻微半透明，既能看到底下的游戏，又不影响阅读）。
 # 单独提出来是为了可测/可调（截图脚本会临时设为 1.0 以免把桌面图标叠进图里）。
@@ -137,7 +147,10 @@ WINDOW_WIDTH = 263
 # 清理日志」按钮行；+30 给新增的「导出本次出错截屏与日志」按钮行，日志正文保持 9 行左右。
 # 再 +49 给新增的「炉石窗口宽度」滑条行（标题/数值 + 横向 Scale）。
 # 再 +30 给「装好没反应？」按钮行（点开是自查弹窗；不再占顶部红字的位置）。
-WINDOW_HEIGHT = 802
+# +78：日志正文与「OCR 扫描」框合并成一个「OCR / 执行」分块流（原来两个框
+# 各占一块高度，合并后面积要稍大一些）。开窗时高度还会按
+# min(设计值, 屏幕高 - 40px) 再夹一层，防止小屏/高缩放把底部按钮顶出屏幕。
+WINDOW_HEIGHT = 940
 # 炉石窗口宽度滑条（保持 16:9）。范围/步进的「真值」在 hs_window；这里的默认值
 # 只是它不可用时的兜底（见 `_run` 里的滑条构建）。
 SIZE_SLIDER_MIN = 960
@@ -180,6 +193,96 @@ MINIMIZED_HEIGHT = 34
 # 标题行右侧的小按钮：只用文字（拿块状字形当图标会像多了一个下划线）。
 MINIMIZE_TEXT = "最小化"
 RESTORE_TEXT = "展开"
+
+# ---- 「OCR / 执行」合并面板（日志正文 + OCR 扫描合成一个分块流） ----------
+# 每块 = 一步动作：块内先是 OCR 内容（OCR 快照 + 盒子推荐），再是执行内容；
+# 新块置顶，块间一条 ─ 分隔线。归块/渲染全在 action_feed.py，这里只负责画。
+FEED_PANEL_TITLE = "OCR / 执行"
+FEED_HIDE_TEXT = "隐藏"
+FEED_SHOW_TEXT = "显示"
+FEED_FONT_SIZE = 9
+# 卡片左侧竖条：bar = ┃ 字符（细线）；block = 底色方块（更粗）；none = 不画。
+# 三种都是真实可用的显示模式（用户 2026-11-01 要看实际 demo 选一个）。
+FEED_BAR_MODE = "block"
+FEED_BAR_GLYPH = "┃"
+FEED_BAR_GAP_PX = 1  # 竖线与文字之间留的像素（用户要求"紧贴左边"）
+# tag → 颜色（全部取自浮窗现有调色板；head/alert 另外加粗）。
+#   match/warn/text = OCR 原文的绿 / 橙 / 白；exec = 执行内容；dim = 次要信息。
+#   card_* = R19 卡片式排版：meta（时间·阶段）/ action（这一步做了什么）/
+#   note（次要）/ ocr（OCR 摘要）/ exp（可点「原文」）/ raw（展开的原文）。
+FEED_TAG_COLORS = {
+    "head": TEXT,  # 块头（HH:MM:SS · 阶段，加粗）
+    "match": GREEN,  # OCR 命中（结束回合框读到「结束回合」等）
+    "warn": WARN,  # OCR 警告（读到但不是想要的内容）
+    "text": TEXT,  # OCR 原文
+    "exec": TEXT,  # 执行内容
+    "dim": DIM,  # 次要信息 / 分隔线
+    "alert": DANGER,  # 告警 / 报错（红色加粗）
+    "card_meta": DIM,  # 卡片头（HH:MM · 阶段）
+    "card_action": TEXT,  # 动作（执行/推荐）
+    "card_note": DIM,  # 次要动作行
+    "card_alert": DANGER,  # 告警卡片（红色加粗）
+    "card_ocr": ACCENT,  # 【OCR】行（蓝，和白色的【执行】区分开）
+    "card_exp": ACCENT,  # 「原文 (N)」展开入口
+    "card_raw": DIM,  # 展开后的 OCR 原文
+    "card_more": DIM,  # 「＋N 行（滚动查看）」
+    "card_sep": LINE,  # 块与块之间的浅色虚线
+}
+# 卡片左侧竖条：action_feed 只给颜色名，这里映射到调色板（含 S1 新加的 LINE）。
+FEED_BAR_COLORS = {
+    "gold": GOLD,  # 我方出牌
+    "warn": WARN,  # 对手回合
+    "danger": DANGER,  # 告警
+    "accent": ACCENT,  # 换牌
+    "dim": LINE,  # 未知阶段 / 对局结束
+}
+# 加粗的 tag（其它只配前景色；FakeWidget 的 tag_config 是覆盖写，别分两次配）。
+FEED_BOLD_TAGS = ("head", "alert", "card_alert")
+# ocr_panel_lines() 仍然负责「OCR 段」的排版（区域块 + 完整原文），
+# 下面是它的排版常量（R18E 落地，合并面板后继续复用）。
+# 多久没再扫到就把这个区域藏起来（秒）。我方回合的探针是 2s 一次，12s = 连丢 6 次。
+OCR_PANEL_TTL_SECONDS = 12.0
+# 安全上限：真的出现几十行时只画前这么多行，末尾补一行提示（正常远用不到）。
+OCR_PANEL_RENDER_LIMIT = 60
+OCR_PANEL_EMPTY_TEMPLATE = "（最近 {ttl:g}s 没有 OCR 扫描）"
+# 空状态带上“当前卡在哪一步”（web_ui 注入的 phase_callback → FSM_action 诊断码）。
+OCR_PANEL_EMPTY_PHASE_TEMPLATE = "（最近 {ttl:g}s 没有 OCR 扫描 · 当前：{label}）"
+# 日志静默超过这个秒数（Power.log 没有新内容）＝真的可能卡住，空状态转橙色。
+OCR_PANEL_LOG_IDLE_WARN_SECONDS = 90.0
+OCR_PANEL_LOG_IDLE_TEMPLATE = " · 日志 {seconds:.0f}s 未更新（可能卡住）"
+OCR_PANEL_OVERFLOW_TEMPLATE = "…还有 {count} 行（可滚动查看）"
+OCR_PANEL_NO_TEXT = "（没读到字）"
+# 原文行的缩进（竖线当“引用”标记，和区域标题区分开）。
+OCR_PANEL_INDENT = "  ▏"
+# 固定顺序：结束回合框永远第一（我方回合就绪判据），其余按这个优先级排，
+# **不按时间跳动** —— 否则每 2s 一次扫描会让整块上下乱窜。
+OCR_PANEL_ORDER = ("结束回合框", "推荐", "胜率", "开始按钮", "段位", "换牌确认")
+# tag → 面板里显示的区域名（推荐的三套预处理变体合并成一块）。
+OCR_TAG_GROUP = {
+    "turn_end": "结束回合框",
+    "start": "开始按钮",
+    "rank": "段位",
+    "confirm": "换牌确认",
+    "winrate": "胜率",
+    "scaled_color_v1": "推荐",
+    "gray_clahe_v1": "推荐",
+    "light_text_binary_v1": "推荐",
+}
+# 颜色 tag → 色值（Text 里按 tag 上色；head 额外加粗）。
+OCR_LINE_TAGS = {"match": GREEN, "warn": WARN, "text": TEXT, "dim": DIM}
+
+# ---- 识别轮播窗口（用户 2026-11-01：结束回合/段位/开始按钮单独在上面轮播） ----
+DETECT_TITLE = "识别"
+DETECT_EMPTY_TEXT = "（暂无识别结果）"
+DETECT_ROTATE_SECONDS = 3.0
+# 这些区域只在「识别」轮播窗口显示，不再进下面的日志流。
+DETECT_TAG_LABELS = {
+    "turn_end": "结束回合",
+    "rank": "段位",
+    "start": "开始按钮",
+    "confirm": "换牌确认",
+}
+
 
 # ---- DPI 缩放 -------------------------------------------------------------
 # 上面这些宽高/行高/内边距都是按 96 DPI（100% 缩放）写死的「设计值」；字体却是
@@ -324,6 +427,256 @@ def logs_row(info, now=None) -> dict:
     }
 
 
+def ocr_panel_lines(entries, now=None, ttl=None, limit=None, phase=None) -> list:
+    """把 ``src.ocr.status.snapshot()`` 变成「OCR 扫描」框要画的行。
+
+    纯函数（不依赖 Tk，方便单测）。返回 ``[{"text", "tag", "head"}]``：
+
+    * ``tag``：颜色 tag 名（``match`` / ``warn`` / ``text`` / ``dim``，见
+      ``OCR_LINE_TAGS``）；``head=True`` 的区域标题行在浮窗里加粗；
+    * 每个区域一块：1 行标题 + 识别出的每一行原文各占一行（**不截断**，换行/滚动
+      交给 Text）；
+    * 只保留 ``ttl`` 秒内扫到的区域（过期区域不显示，换牌确认这类不会一直挂着）；
+    * 同一区域的多个预处理变体合并成一块，取有文字的最新一条；
+    * 顺序固定（``OCR_PANEL_ORDER``），不按时间跳动 —— 结束回合框永远第一行；
+    * 一条新鲜记录都没有时给一行“空状态”：带上 ``phase``（当前卡在哪一步）与
+      Power.log 静默时长，说明“为什么没在扫”（R18H，用户 2026-10-31 反馈
+      “卡住时没有 OCR 扫描”）。
+    """
+    ttl = OCR_PANEL_TTL_SECONDS if ttl is None else float(ttl)
+    limit = OCR_PANEL_RENDER_LIMIT if limit is None else int(limit)
+    current = time.time() if now is None else float(now)
+    items = [item for item in (entries or ()) if isinstance(item, dict)]
+    fresh = [item for item in items if _ocr_fresh(item, current, ttl)]
+    if not fresh:
+        return [_ocr_empty_row(phase, ttl)]
+    lines = []
+    for label, entry in _ocr_blocks(fresh):
+        lines.extend(_ocr_block_lines(label, entry))
+    if limit > 0 and len(lines) > limit:
+        hidden = len(lines) - (limit - 1)
+        lines = lines[: max(0, limit - 1)]
+        lines.append({"text": OCR_PANEL_OVERFLOW_TEMPLATE.format(count=hidden),
+                      "tag": "dim", "head": False})
+    return lines
+
+
+def _ocr_empty_row(phase, ttl: float = OCR_PANEL_TTL_SECONDS) -> dict:
+    """没有新鲜扫描时的空状态行：说明当前卡在哪一步、日志是否静默。
+
+    ``phase`` 来自 web_ui 注入的 ``phase_callback``（``FSM_action.
+    automation_phase_state()``）：``{"label", "log_idle_s"}``；缺失就退回原来的
+    文案。日志静默 ≥90s（超过对手烧绳）才转橙色 —— 那时才是“真的可能卡住”。
+    """
+    label = ""
+    idle = None
+    if isinstance(phase, dict):
+        label = str(phase.get("label") or "").strip()
+        try:
+            value = phase.get("log_idle_s")
+            idle = None if value is None else float(value)
+        except (TypeError, ValueError):
+            idle = None
+    if label:
+        text = OCR_PANEL_EMPTY_PHASE_TEMPLATE.format(ttl=ttl, label=label)
+    else:
+        text = OCR_PANEL_EMPTY_TEMPLATE.format(ttl=ttl)
+    tag = "dim"
+    if idle is not None and idle >= OCR_PANEL_LOG_IDLE_WARN_SECONDS:
+        text += OCR_PANEL_LOG_IDLE_TEMPLATE.format(seconds=idle)
+        tag = "warn"
+    return {"text": text, "tag": tag, "head": False}
+
+
+def detect_items(entries, now=None, ttl=None) -> list:
+    """识别轮播内容：``["结束回合 · 命中 · 最近 1s", "段位 · 传说 · 4s 前", ...]``。
+
+    只取 DETECT_TAG_LABELS 里的区域（结束回合 / 段位 / 开始按钮 / 换牌确认），
+    顺序固定、不随时间乱跳；过期记录显示「未见」。
+    """
+    ttl = OCR_PANEL_TTL_SECONDS if ttl is None else float(ttl)
+    current = time.time() if now is None else float(now)
+    fresh = {}
+    for item in entries or ():
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("tag") or "")
+        label = DETECT_TAG_LABELS.get(tag)
+        if label is None:
+            continue
+        try:
+            at = float(item.get("at") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at and current - at > ttl:
+            continue
+        if label not in fresh or at >= fresh[label][0]:
+            fresh[label] = (at, item)
+    rows = []
+    for tag, label in DETECT_TAG_LABELS.items():
+        if label not in fresh:
+            continue
+        at, item = fresh[label]
+        text = " ".join(
+            str(line[0] or "").strip()
+            for line in (item.get("lines") or ())
+            if str(line[0] or "").strip())
+        age = "刚刚" if not at or current - at < 1 else f"{current - at:.0f}s 前"
+        if tag == "turn_end":
+            status = "命中「结束回合」" if "结束回合" in text else ("未见「结束回合」" if text else "没读到字")
+        elif tag == "start":
+            status = "已出现" if ("开始" in text or text) else "未出现"
+        elif tag == "confirm":
+            status = text or "未见「确认」"
+        else:
+            status = text or "没读到字"
+        rows.append(f"{label} · {status} · {age}")
+    return rows
+
+
+def ocr_panel_status(entries, now=None, ttl=None) -> str:
+    """标题行右侧的新鲜度：「最近 2s 前」/「没有扫描」。
+
+    只显示一个数字（最新那次扫描距今几秒），每拍刷新；不参与正文指纹，
+    所以不会因为秒数变化把整个面板重建一遍。
+    """
+    ttl = OCR_PANEL_TTL_SECONDS if ttl is None else float(ttl)
+    current = time.time() if now is None else float(now)
+    ages = []
+    for item in entries or ():
+        if not isinstance(item, dict) or not _ocr_fresh(item, current, ttl):
+            continue
+        try:
+            ages.append(current - float(item.get("at") or current))
+        except (TypeError, ValueError):
+            continue
+    if not ages:
+        return "没有扫描"
+    age = max(0.0, min(ages))
+    if age < 1.0:
+        return "刚刚"
+    return f"最近 {age:.0f}s 前"
+
+
+def _ocr_snapshot_rows(entries=None, phase=None) -> list:
+    """OCR 快照提供器：把当刻 OCR 结果交给 action_feed（块建立时取一次）。
+
+    正常由 action_feed 回调，自己从 ``_OCR``/``_PHASE`` 读（web_ui 注入）；
+    两个参数只给单测直接调用时用（不传就读模块回调）。返回 ocr_panel_lines()
+    的原始行（``[{"text", "tag", "head"}]``），归块的 tag 转换在 action_feed 里。
+    """
+    if entries is None and phase is None:
+        entries = None
+        if _OCR is not None:
+            try:
+                entries = _OCR()
+            except Exception:
+                entries = None
+        if _PHASE is not None:
+            try:
+                phase = _PHASE()
+            except Exception:
+                phase = None
+    # 识别区域（结束回合/段位/开始按钮/换牌确认）只在「识别」轮播窗口显示。
+    if entries:
+        entries = [item for item in entries
+                   if DETECT_TAG_LABELS.get(str((item or {}).get("tag") or "")) is None]
+    return ocr_panel_lines(entries, phase=phase)
+
+
+def _ocr_fresh(entry: dict, now: float, ttl: float) -> bool:
+    """这条记录是不是 ttl 秒内扫到的（没有时间戳的记录按新鲜处理）。"""
+    try:
+        at = float(entry.get("at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    return at <= 0.0 or (now - at) <= ttl
+
+
+def _ocr_label(entry: dict) -> str:
+    """区域显示名：认识的 tag 用中文名，不认识的截断 tag 原样显示。"""
+    tag = str(entry.get("tag") or "?")
+    return OCR_TAG_GROUP.get(tag) or tag[:8]
+
+
+def _ocr_blocks(entries) -> list:
+    """按显示区域合并后排序，返回 ``[(label, entry)]``。"""
+    chosen = {}
+    for entry in entries:
+        label = _ocr_label(entry)
+        previous = chosen.get(label)
+        if previous is None or _ocr_better(entry, previous):
+            chosen[label] = entry
+    return sorted(chosen.items(), key=lambda item: _ocr_order_key(*item))
+
+
+def _ocr_better(candidate: dict, previous: dict) -> bool:
+    """同一区域取哪条：有文字的优先，其次更新的。"""
+    candidate_has = int(candidate.get("line_count") or 0) > 0
+    previous_has = int(previous.get("line_count") or 0) > 0
+    if candidate_has != previous_has:
+        return candidate_has
+    try:
+        return float(candidate.get("at") or 0.0) >= float(previous.get("at") or 0.0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _ocr_order_key(label: str, entry: dict):
+    """固定优先级（OCR_PANEL_ORDER）在前，同优先级按最近扫描时间倒序。"""
+    try:
+        index = OCR_PANEL_ORDER.index(label)
+    except ValueError:
+        index = len(OCR_PANEL_ORDER)
+    try:
+        at = float(entry.get("at") or 0.0)
+    except (TypeError, ValueError):
+        at = 0.0
+    return (index, -at)
+
+
+def _ocr_block_lines(label: str, entry: dict) -> list:
+    """一个区域块：1 行标题 + 每条原文 1 行（完整文本，不截断）。"""
+    try:
+        count = int(entry.get("line_count") or 0)
+        confidence = float(entry.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        count, confidence = 0, 0.0
+    try:
+        repeat = int(entry.get("count") or 1)
+    except (TypeError, ValueError):
+        repeat = 1
+    header = f"● {label} {count}行 {confidence:.2f}"
+    if repeat > 1:
+        header += f" ×{repeat}"
+    lines = [{"text": header, "tag": _ocr_block_tag(entry, count), "head": True}]
+    texts = []
+    for item in entry.get("lines") or ():
+        try:
+            text = str(item[0] or "").strip()
+        except (TypeError, IndexError, ValueError):
+            text = ""
+        if text:
+            texts.append(text)
+    if not texts:
+        lines.append({"text": OCR_PANEL_INDENT + OCR_PANEL_NO_TEXT,
+                      "tag": "dim", "head": False})
+        return lines
+    for text in texts:
+        lines.append({"text": OCR_PANEL_INDENT + text,
+                      "tag": "text", "head": False})
+    return lines
+
+
+def _ocr_block_tag(entry: dict, count: int) -> str:
+    """标题行颜色：结束回合框读到/没读到「结束回合」分开，其余白色/灰色。"""
+    if count <= 0:
+        return "dim"
+    if _ocr_label(entry) == "结束回合框":
+        return "match" if "结束回合" in str(entry.get("text") or "") else "warn"
+    return "text"
+
+
 def fit_text(text, max_px: int, measure, ellipsis: str = "…") -> str:
     """把说明文字裁进给定位宽（超出加省略号，不再被窗口边缘切掉）。
 
@@ -444,45 +797,10 @@ def _is_alert_line(line: str) -> bool:
     return any(marker in line for marker in _ALERT_MARKERS)
 
 
-# ---- 日志正文按标签着色 ------------------------------------------------
-# 只用浮窗现有调色板里的颜色（GREEN/ACCENT/GOLD/WARN/DANGER/TEXT/DIM），
-# 不引入新颜色：一眼看出这一行是“盒子意见 / 实际操作 / 系统提示 / 警告 / 报错”。
-# 注：ERROR 级日志走 alert（红色加粗），所以这里不再单列 error。
-LOG_TAG_COLORS = {
-    "alert": DANGER,  # ⚠️ 告警 / [ERROR] 报错（加粗，优先级最高）
-    "warn": WARN,  # [WARN] 警告
-    "turn": GREEN,  # 我方回合开始
-    "reco": ACCENT,  # [推荐] 盒子建议
-    "exec": GOLD,  # [执行] 实际操作
-    "sys": TEXT,  # [SYS] 系统/阶段/延时
-    "dim": DIM,  # 等待对手、INFO 等次要信息
-}
-
-
-def log_line_tag(line: str) -> str:
-    """给一条日志行挑显示标签（对应 LOG_TAG_COLORS 里的键）。
-
-    优先级：告警/报错 > WARN > 我方回合 > [推荐] > [执行] > [SYS] > 次要。
-    ERROR 与 ⚠️ 都归到 alert（红色加粗），因为这两类都是“必须马上看见”。
-    """
-    text = str(line)
-    if _is_alert_line(text):
-        return "alert"
-    if "WARN]" in text or text.startswith("[WARN"):
-        return "warn"
-    if _turn_start(text):
-        return "turn"
-    if text.lstrip().startswith("[推荐]"):
-        return "reco"
-    if text.lstrip().startswith("[执行]"):
-        return "exec"
-    if "[SYS]" in text or "SYS]" in text:
-        return "sys"
-    return "dim"
-
-
 _DELAY = None
-# 浮窗只显示最近 _MAX_LINES 行（超出丢弃最旧行，仅影响显示）。
+# 旧版「日志正文」的滑动窗口缓存：合并成分块流（action_feed）后**不再参与渲染**，
+# 只为兼容既有用例/调试查看保留（_window_fingerprint 同理）。
+# 浮窗正文现在显示的是 action_feed 的块流，完整日志仍看网页 / ui_log_last.txt。
 _MAX_LINES = 500
 # 完整正文日志缓存：不做行数丢弃，供“保存日志”写出全部历史。
 _FULL_LINES = []
@@ -542,6 +860,12 @@ def _window_fingerprint(lines):
 
 
 def push(line: str, _level: str = "INFO") -> None:
+    """浮窗侧收行：保存日志 / 延时进度条 / 我方回合切前台。
+
+    浮窗正文的「OCR / 执行」分块流由 ``web_ui._log()`` 直接喂给 action_feed
+    （在浮窗过滤之前），所以这里**不再把行塞进正文渲染**；保留 `_FULL_LINES`
+    （保存完整日志）、延时进度条与「轮到己方」时把炉石切前台这几件事。
+    """
     if not _STARTED[0]:
         return
     line = str(line).rstrip()
@@ -553,12 +877,12 @@ def push(line: str, _level: str = "INFO") -> None:
         # 完整日志缓存：所有日志行（含延时行）都保留，供保存完整写出。
         _FULL_LINES.append(line)
         if delay_only:
-            return  # 延时行只驱动进度条，不写浮窗正文
-        # _LINES 只保留最近 _MAX_LINES 行供浮窗显示（不影响完整缓存）。
+            return  # 延时行只驱动进度条，不进正文
+        # _LINES 只为兼容旧用例/调试保留（合并面板后不再参与渲染）。
         _LINES.append((line, _turn_start(line)))
         if len(_LINES) > _MAX_LINES:
             # _LINES 是 deque，不支持切片删除，改用 popleft 丢弃最旧行。
-            # 仅影响浮窗显示；保存仍用 _FULL_LINES 完整写出。
+            # 仅影响这份兼容缓存；保存仍用 _FULL_LINES 完整写出。
             while len(_LINES) > _MAX_LINES:
                 _LINES.popleft()
     if is_turn_start:
@@ -659,6 +983,11 @@ _ON_CALIBRATE_CLOSE = None
 _ON_RESTART = None
 # 「日志」状态行：脚本日志的体积/个数（web_ui 传入，带缓存）。
 _LOGS = None
+# 「OCR 扫描」框：各区域最近一次 OCR 结果（web_ui 传入 → src.ocr.status.snapshot()）。
+_OCR = None
+# 「OCR 扫描」框空状态用：当前卡在哪一步 + 日志静默多久（web_ui 传入
+# → FSM_action.automation_phase_state()）。没有就退回原文案。
+_PHASE = None
 # 「打开日志」/「清理日志」按钮（web_ui 传入；清理前浮窗先弹确认）。
 _ON_OPEN_LOGS = None
 _ON_CLEAR_LOGS = None
@@ -670,6 +999,190 @@ _ON_EXIT_OVERLAY = None
 _WINDOW_WIDTH = None
 # 滑条拖动结束：按 16:9 设炉石客户区宽度（web_ui 传入；返回 [w, h] 或 None）。
 _ON_RESIZE_WINDOW = None
+# ---- 常驻模式（R3 页签） ----------------------------------------------
+# 与 web_ui 的三个约定（都必须异常安全；web_ui 未升级时用下面的安全默认值，
+# 保证浮窗照常能开，只是常驻页显示「未接入控制台」）：
+#   _RESIDENT            () -> dict                 常驻状态（/api/status 的 resident 段）
+#   _ON_RESIDENT_TOGGLE  () -> str|None             暂停/开启常驻，返回一条提示
+#   _ON_RESIDENT_APPLY   (dict) -> {"ok","message"} 保存常驻设置
+_RESIDENT = None
+_ON_RESIDENT_TOGGLE = None
+_ON_RESIDENT_APPLY = None
+# 页签标题（纯文字，不用 tk.Button —— 现有按钮集合/网格测试钉死了按钮集合）。
+STATUS_PAGE_TITLE = "状态"
+RESIDENT_PAGE_TITLE = "常驻"
+# 共享标题行（「自动化日志」+ 最小化）随页签切换文案：状态页保留原名，
+# 常驻页改成「常驻设置」，否则切过去还写着“自动化日志”很别扭。
+STATUS_HEADER_TEXT = "自动化日志"
+RESIDENT_HEADER_TEXT = "常驻设置"
+# 监督器处于这些状态时算“正在干活”：按钮显示「暂停常驻」；其余（disabled /
+# paused / paused_exhausted / error / cancelled）显示「开启常驻」并允许一键恢复。
+# waiting_schedule（等待定时窗口）也算“正在干活”：常驻在值守，只是还没到窗口。
+RESIDENT_ACTIVE_STATES = (
+    "countdown", "starting", "running", "recovering", "waiting_schedule",
+)
+
+
+def _resident_unavailable() -> dict:
+    return {}
+
+
+def _resident_toggle_unavailable():
+    return None
+
+
+def _resident_apply_unavailable(_body=None) -> dict:
+    return {"ok": False, "message": "常驻模式未接入控制台（web_ui.py 可能是旧版本）"}
+
+
+# ---- 常驻页文本（纯函数，便于单测；不依赖 Tk） --------------------------
+RESIDENT_MODE_LABELS = {"standard": "标准", "wild": "狂野", "casual": "休闲"}
+# 状态卡 10 种状态的（文案, 颜色, 是否显示「暂停常驻」）：
+#   只有正在干活（等待定时窗口/倒计时/启动/运行/恢复）才允许“暂停”；暂停/耗尽/出错
+#   显示「开启常驻」，点击一次恢复。
+_RESIDENT_STATE_VIEW = {
+    "disabled": ("未开启", DIM, False),
+    "waiting_schedule": ("等待定时窗口", ACCENT, True),
+    "countdown": (None, ACCENT, True),  # 文案带剩余秒数，见 resident_status_view
+    "starting": ("启动中", ACCENT, True),
+    "running": ("运行中", GREEN, True),
+    "recovering": ("恢复中…", ACCENT, True),
+    "paused": ("已暂停", DIM, False),
+    "paused_exhausted": ("配额耗尽", DANGER, False),
+    "error": ("出错", DANGER, False),
+    "cancelled": ("已取消", DIM, False),
+}
+
+
+def _resident_int(value, default=0) -> int:
+    try:
+        return int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def resident_status_view(rs) -> dict:
+    """常驻状态卡：``{dot, state_text, fg, can_pause}``（10 种状态 + 未开启）。"""
+    rs = rs if isinstance(rs, dict) else {}
+    if not bool(rs.get("enabled")):
+        return {"dot": DIM, "state_text": "未开启", "fg": DIM, "can_pause": False}
+    state = str(rs.get("state") or "")
+    text, fg, can_pause = _RESIDENT_STATE_VIEW.get(
+        state, (state or "—", DIM, False)
+    )
+    if state == "countdown":
+        # 监督器没有单独的剩余秒数字段：优先用前端算好的 countdown_left，
+        # 否则退回配置的启动延迟（展示一档即可，不参与判定）。
+        left = rs.get("countdown_left")
+        if left is None:
+            left = rs.get("start_delay_seconds")
+        text = f"倒计时 {max(0, _resident_int(left))}s"
+    elif state == "waiting_schedule":
+        # 等待定时窗口：状态行第二行显示控制台带的原因（如「等待定时 23:00 开始」）。
+        reason = " ".join(str(rs.get("waiting_reason") or "").split())
+        if reason:
+            text = f"{text}\n{reason}"
+    return {"dot": fg, "state_text": text, "fg": fg, "can_pause": can_pause}
+
+
+def resident_quota_text(rs) -> str:
+    """配额：``已用 / 上限``（例如 ``0 / 3``）。"""
+    rs = rs if isinstance(rs, dict) else {}
+    used = max(0, _resident_int(rs.get("restarts_in_window")))
+    limit = max(0, _resident_int(rs.get("max_restarts")))
+    return f"{used} / {limit}"
+
+
+def resident_target_text(rs) -> str:
+    """目标：``狂野 · 卡组 2`` / ``标准 · 卡组 未指定``。"""
+    rs = rs if isinstance(rs, dict) else {}
+    mode = str(rs.get("mode") or "standard")
+    label = RESIDENT_MODE_LABELS.get(mode, mode)
+    deck = rs.get("deck_index")
+    deck_text = f"卡组 {_resident_int(deck)}" if deck else "卡组 未指定"
+    return f"{label} · {deck_text}"
+
+
+def resident_log_text(rs) -> str:
+    """日志：``8s 前 · 对局中``（没有日志时间就 ``—``）。"""
+    rs = rs if isinstance(rs, dict) else {}
+    age = rs.get("log_age")
+    if age is None:
+        age_text = "—"
+    else:
+        age_text = f"{max(0.0, float(age)):.0f}s 前"
+    scene = "对局中" if rs.get("in_game") else "其他界面"
+    return f"{age_text} · {scene}"
+
+
+def _resident_hhmm(value) -> str:
+    """把 ``last_restart_at``（ISO 串或 epoch 秒）转成 ``HH:MM``；坏值返回空串。"""
+    if value in (None, ""):
+        return ""
+    try:
+        if isinstance(value, (int, float)):
+            stamp = datetime.datetime.fromtimestamp(float(value))
+        else:
+            text = str(value).strip().replace("Z", "+00:00")
+            stamp = datetime.datetime.fromisoformat(text)
+        return stamp.strftime("%H:%M")
+    except Exception:
+        return ""
+
+
+def resident_event_text(rs, limit: int = 18) -> str:
+    """最近事件：``HH:MM``（有 last_restart_at 时）+ message/paused_reason。
+
+    压成单行并截断到约 ``limit`` 字符（默认 18，避免出现“…重新…”这种半截）；
+    画到固定宽度时 UI 还会再用 ``fit_text`` 按真实字体像素宽度截一次。
+    """
+    rs = rs if isinstance(rs, dict) else {}
+    text = rs.get("message") or rs.get("paused_reason") or "—"
+    text = " ".join(str(text).split())
+    stamp = _resident_hhmm(rs.get("last_restart_at"))
+    if stamp:
+        text = f"{stamp} {text}"
+    limit = _resident_int(limit, 0)
+    if limit > 0 and len(text) > limit:
+        text = text[: max(0, limit - 1)].rstrip() + "…"
+    return text
+
+
+def resident_rule_lines(rs) -> list:
+    """「自动恢复规则」大卡的 6 行说明（数值随当前设置变化）。"""
+    rs = rs if isinstance(rs, dict) else {}
+    game = max(1, _resident_int(rs.get("stale_in_game_seconds"), 180))
+    other = max(1, _resident_int(rs.get("stale_other_seconds"), 300))
+    window = max(1, _resident_int(rs.get("window_seconds"), 600) // 60)
+    limit = max(1, _resident_int(rs.get("max_restarts"), 3))
+    return [
+        f"· 对局中日志 {game}s 不动 → 重启炉石",
+        f"· 其它界面 {other}s 不动 → 重启炉石",
+        "· 能重连就续打，否则重选模式+卡组",
+        "· 选模式/卡组失败 → 停住并告警，不盲开局",
+        "· 手动停止（stop/Ctrl+Q）＝ 暂停常驻",
+        f"· {window} 分钟最多 {limit} 次，超限停并告警",
+    ]
+
+
+RESIDENT_PAGE_MIN_HEIGHT = 560
+
+
+def resident_window_height(needed, max_height, min_height=RESIDENT_PAGE_MIN_HEIGHT):
+    """常驻页窗口高度：按内容需要多高就多高（夹在 [min_height, max_height]）。
+
+    状态页内容多、需要整窗 940；常驻页是设置面板，若固定 940 会在下半屏留
+    一大片空黑。切页时按内容收放窗口，视觉上更紧凑。
+    """
+    try:
+        target = int(float(needed))
+        top = int(float(max_height))
+        bottom = int(float(min_height))
+    except (TypeError, ValueError):
+        return max_height
+    if bottom > top:
+        bottom = top
+    return max(bottom, min(top, target))
 
 
 def account_visible() -> bool:
@@ -992,6 +1505,8 @@ def start(
     human_like_callback=None,
     concede_callback=None,
     liveness_callback=None,
+    ocr_callback=None,
+    phase_callback=None,
     account_callback=None,
     account_visible_setting=None,
     on_toggle_account=None,
@@ -1006,6 +1521,9 @@ def start(
     window_width_callback=None,
     on_resize_window=None,
     version_callback=None,
+    resident_callback=_resident_unavailable,
+    on_resident_toggle=_resident_toggle_unavailable,
+    on_resident_apply=_resident_apply_unavailable,
 ) -> str:
     """开（或重开）浮窗，返回 OPEN_ALREADY / OPEN_STARTED / OPEN_PENDING。
 
@@ -1018,7 +1536,10 @@ def start(
     global _LIVENESS, _ACCOUNT, _ON_TOGGLE_ACCOUNT, _ON_CALIBRATE
     global _ON_CALIBRATE_CLOSE, _ON_RESTART, _ON_EXIT_OVERLAY, _THREAD
     global _LOGS, _ON_OPEN_LOGS, _ON_CLEAR_LOGS, _ON_EXPORT_FEEDBACK
+    global _OCR
+    global _PHASE
     global _WINDOW_WIDTH, _ON_RESIZE_WINDOW, _VERSION_INFO
+    global _RESIDENT, _ON_RESIDENT_TOGGLE, _ON_RESIDENT_APPLY
     # 排队重开时要原样复用这一轮的绑定（start() 会重写全部回调，不能只重开窗口）。
     args = {
         "on_start": on_start,
@@ -1033,6 +1554,8 @@ def start(
         "human_like_callback": human_like_callback,
         "concede_callback": concede_callback,
         "liveness_callback": liveness_callback,
+        "ocr_callback": ocr_callback,
+        "phase_callback": phase_callback,
         "account_callback": account_callback,
         "account_visible_setting": account_visible_setting,
         "on_toggle_account": on_toggle_account,
@@ -1047,6 +1570,9 @@ def start(
         "window_width_callback": window_width_callback,
         "on_resize_window": on_resize_window,
         "version_callback": version_callback,
+        "resident_callback": resident_callback,
+        "on_resident_toggle": on_resident_toggle,
+        "on_resident_apply": on_resident_apply,
     }
     with _START_LOCK:
         if _STARTED[0] and not _STOP.is_set() and not _CLOSING.is_set():
@@ -1079,6 +1605,8 @@ def start(
         _ON_CALIBRATE_CLOSE = on_calibrate_close
         _ON_RESTART = on_restart
         _LOGS = logs_callback
+        _OCR = ocr_callback
+        _PHASE = phase_callback
         _ON_OPEN_LOGS = on_open_logs
         _ON_CLEAR_LOGS = on_clear_logs
         _ON_EXPORT_FEEDBACK = on_export_feedback
@@ -1086,6 +1614,9 @@ def start(
         _WINDOW_WIDTH = window_width_callback
         _ON_RESIZE_WINDOW = on_resize_window
         _VERSION_INFO = version_callback
+        _RESIDENT = resident_callback
+        _ON_RESIDENT_TOGGLE = on_resident_toggle
+        _ON_RESIDENT_APPLY = on_resident_apply
         if account_visible_setting is not None:
             _ACCOUNT_VISIBLE[0] = bool(account_visible_setting)
         _STOP.clear()
@@ -1099,6 +1630,12 @@ def start(
         )
         _THREAD = thread
         thread.start()
+    # 合并面板：把「块建立时取一次 OCR 快照」的提供器接上（_run 里还会再设一次，
+    # 因为浮窗测试直接调 _run 而不走 start()）。
+    try:
+        action_feed.set_ocr_provider(_ocr_snapshot_rows)
+    except Exception:
+        pass
     return OPEN_STARTED
 
 
@@ -1106,6 +1643,11 @@ def stop() -> None:
     """Signal the overlay thread to close its window."""
     _CLOSING.set()
     _STOP.set()
+    # 浮窗关了就把分块流清空：下次开窗从新的一局/新的步骤开始看。
+    try:
+        action_feed.clear()
+    except Exception:
+        pass
     # 屏幕上还叠着「校准」区域框时一并收掉，别让框留在桌面上。
     try:
         import region_overlay
@@ -1490,6 +2032,12 @@ def _run() -> None:
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.attributes("-alpha", ALPHA)
+        # 合并面板的 OCR 快照提供器：块建立时 action_feed 回调它取当刻扫描结果。
+        # （start() 里也设一次；测试直接调 _run 时不走 start，所以这里必须设。）
+        try:
+            action_feed.set_ocr_provider(_ocr_snapshot_rows)
+        except Exception:
+            pass
         # 几何随 DPI 缩放（96 DPI = 1.0）：字体 Tk 本来就按 DPI 放大，几何不跟
         # 的话高缩放屏下内容会被压扁（用户反馈的浮窗压缩）。100% 屏 = 旧行为。
         global UI_SCALE
@@ -1502,9 +2050,11 @@ def _run() -> None:
             pass
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
-        # 高度：品牌行 + 状态面板（5 行）+ 六行按钮都要放得下，日志区还要有
-        # 9 行左右（删掉副标题、加日志行/按钮行后的尺寸见 WINDOW_HEIGHT 注释）。
-        W, H = px(WINDOW_WIDTH), px(WINDOW_HEIGHT)
+        # 高度：品牌行 + 状态面板（5 行）+ 六行按钮都要放得下，剩下全部留给
+        # 「OCR / 执行」分块流（见 WINDOW_HEIGHT 注释）。设计高度还要夹到
+        # 屏幕内：小屏 / 高缩放下浮窗不能被顶出屏幕（底部按钮会点不到）。
+        W = px(WINDOW_WIDTH)
+        H = min(px(WINDOW_HEIGHT), sh - px(40))
         x = sw - W - px(12)
         y = px(12)
         root.geometry(f"{W}x{H}+{x}+{y}")
@@ -1547,6 +2097,24 @@ def _run() -> None:
             mini_bar, text=VERSION_TEXT, bg=TITLE_BG, fg=DIM, font=VERSION_FONT
         ).pack(side="right", padx=(0, px(8)))
 
+        def _fit_page_height(name):
+            """按当前页内容高度调整窗口（常驻页比状态页矮，避免下半屏空黑）。"""
+            if collapsed[0]:
+                return
+            measure = getattr(content, "winfo_reqheight", None)
+            if measure is None:  # fake harness / 非 Tk 环境
+                return
+            try:
+                root.update_idletasks()
+                needed = int(measure()) + px(2)
+            except Exception:
+                return
+            try:
+                target = resident_window_height(needed, H) if name == "resident" else H
+                root.geometry(f"{W}x{int(target)}+{root.winfo_x()}+{root.winfo_y()}")
+            except Exception:
+                pass
+
         def _set_collapsed(flag):
             """折叠/展开浮窗（同时把窗口几何改成标题条那么高）。"""
             collapsed[0] = bool(flag)
@@ -1568,6 +2136,11 @@ def _run() -> None:
                     min_height=px(MINIMIZED_HEIGHT),
                 )
             )
+            if not collapsed[0]:
+                try:
+                    _fit_page_height(tabs_state["active"])
+                except Exception:
+                    pass
 
         def _on_minimize(_event=None):
             _set_collapsed(not collapsed[0])
@@ -1639,14 +2212,40 @@ def _run() -> None:
         tk.Frame(content, bg=GOLD, height=1).pack(fill="x", padx=px(10))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
-        # ---- header ----------------------------------------------------
+        # ---- 页签：状态 / 常驻 ------------------------------------------
+        # 浮窗高度按行精算，页签行会吃掉约 24px；状态页内容整体装进 page_status，
+        # 默认页的控件与行为保持原样（现有测试钉死了按钮集合/网格/状态行）。
+        # 「常驻」页**首次点开才创建控件**：默认页的控件树与数量不变。
+        tabs = tk.Frame(content, bg=TITLE_BG)
+        tabs.pack(fill="x")
+        tabs_state = {"active": "status"}
+        page_resident = [None]  # 惰性创建；None = 还没点开过
+
+        def _tab_label(text_, active=False):
+            lab = tk.Label(
+                tabs,
+                text=text_,
+                bg=PANEL if active else TITLE_BG,
+                fg=TEXT if active else DIM,
+                font=("Microsoft YaHei", 9, "bold"),
+                cursor="hand2",
+                padx=px(10),
+                pady=px(2),
+            )
+            lab.pack(side="left", padx=(px(8), 0), pady=(px(4), px(2)))
+            return lab
+
+        status_tab = _tab_label(STATUS_PAGE_TITLE, active=True)
+        resident_tab = _tab_label(RESIDENT_PAGE_TITLE)
+
+        # ---- header（共享行：页签之下、两页之上） ------------------------
         head = tk.Frame(content, bg=TITLE_BG)
         head.pack(fill="x")
         dot = tk.Label(head, text="●", bg=TITLE_BG, fg=GREEN, font=("Segoe UI", 10))
         dot.pack(side="left", padx=(px(10), px(4)), pady=px(8))
         title = tk.Label(
             head,
-            text="自动化日志",
+            text=STATUS_HEADER_TEXT,
             bg=TITLE_BG,
             fg=TEXT,
             font=("Microsoft YaHei", 10, "bold"),
@@ -1670,9 +2269,58 @@ def _run() -> None:
         mini_btn.bind("<Leave>", lambda _e: mini_btn.config(fg=DIM, bg=PANEL))
         tk.Frame(content, bg=PANEL, height=1).pack(fill="x")
 
+        # 两个页面都直接挂在 content 下（不套中间容器）：折叠时整块 content
+        # 被 pack_forget，页面自然跟着消失；也保持「标题行 → 上两级 = content」
+        # 的既有控件层级（测试按这个层级找 content）。
+        page_status = tk.Frame(content, bg=TITLE_BG)
+        page_status.pack(fill="both", expand=True)
+
+        def _show_page(name):
+            """切换页签：状态页原样保留，常驻页首次点开时才建控件。"""
+            if name == tabs_state["active"]:
+                return
+            if name == "resident" and page_resident[0] is None:
+                page_resident[0] = _build_resident_page()
+            page_status.pack_forget()
+            if page_resident[0] is not None:
+                page_resident[0].pack_forget()
+            tabs_state["active"] = name
+            if name == "resident" and page_resident[0] is not None:
+                page_resident[0].pack(fill="both", expand=True)
+                _refresh_resident()
+            else:
+                page_status.pack(fill="both", expand=True)
+            _set(
+                status_tab,
+                fg=TEXT if name == "status" else DIM,
+                bg=PANEL if name == "status" else TITLE_BG,
+            )
+            _set(
+                resident_tab,
+                fg=TEXT if name == "resident" else DIM,
+                bg=PANEL if name == "resident" else TITLE_BG,
+            )
+            # 标题行跟着页签改文案（层级/最小化按钮都不动）。
+            _set(
+                title,
+                text=RESIDENT_HEADER_TEXT if name == "resident" else STATUS_HEADER_TEXT,
+            )
+            if name == "status":
+                # 常驻页的圆点会被刷成状态色；切回状态页恢复绿色。
+                _set(dot, fg=GREEN)
+            # 常驻页是设置面板、内容比状态页矮：切页后按内容收放窗口高度，
+            # 避免固定 940 时下半屏留一大片空黑（真机截图反馈）。
+            try:
+                _fit_page_height(name)
+            except Exception:
+                pass
+
+        status_tab.bind("<Button-1>", lambda _e: _show_page("status"))
+        resident_tab.bind("<Button-1>", lambda _e: _show_page("resident"))
+
         # ---- 战绩行 -------------------------------------------------
         score_label = tk.Label(
-            content,
+            page_status,
             text="战绩： —",
             bg=TITLE_BG,
             fg=DIM,
@@ -1685,7 +2333,7 @@ def _run() -> None:
         # 最宽的那个单元格"定宽，于是「投降检测」那行的长说明会把「账号」行的
         # 昵称一起顶出窗口（用户反馈：投降检测/炉石后面的字显示不全）。行内用
         # pack，说明列配 wraplength：宽度不够就换行，绝不裁字。
-        status = tk.Frame(content, bg=PANEL)
+        status = tk.Frame(page_status, bg=PANEL)
         status.pack(fill="x")
         # 文字宽度都按真实字体量（中文和数字差很多，缩放不同也不怕）。
         detail_font = tkfont.Font(family="Microsoft YaHei", size=8)
@@ -1791,7 +2439,7 @@ def _run() -> None:
             return "break"
 
         eye_btn.bind("<Button-1>", _on_eye)
-        tk.Frame(content, bg=TITLE_BG, height=1).pack(fill="x")
+        tk.Frame(page_status, bg=TITLE_BG, height=1).pack(fill="x")
 
         # ---- 炉石窗口宽度滑条（保持 16:9）-----------------------------
         # 拖动过程中只更新数值文字，**松开鼠标**才真正调 Win32 改窗口
@@ -1809,7 +2457,7 @@ def _run() -> None:
                 SIZE_SLIDER_STEP,
             )
 
-        size_head = tk.Frame(content, bg=PANEL)
+        size_head = tk.Frame(page_status, bg=PANEL)
         size_head.pack(fill="x", padx=px(10), pady=(px(5), 0))
         tk.Label(
             size_head,
@@ -1827,7 +2475,7 @@ def _run() -> None:
         )
         size_value.pack(side="right")
 
-        size_row = tk.Frame(content, bg=PANEL)
+        size_row = tk.Frame(page_status, bg=PANEL)
         size_row.pack(fill="x", padx=px(10), pady=(0, px(4)))
 
         def _fmt_size(width):
@@ -1988,7 +2636,7 @@ def _run() -> None:
         # ---- buttons ---------------------------------------------------
         # 一行两个，「本局结束后停止」单独一行；字号/内边距都比原来小，
         # 省下的高度全部留给日志区（见 BTN_LAYOUT / BTN_FONT_SIZE）。
-        btn_frame = tk.Frame(content, bg=BG)
+        btn_frame = tk.Frame(page_status, bg=BG)
         btn_frame.pack(fill="x", padx=px(8), pady=(px(8), 0))
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
@@ -2245,7 +2893,7 @@ def _run() -> None:
         _place(self_check_btn, "self_check")
 
         # ---- delay progress (bottom; 先占底部，日志区填剩余空间) ------
-        delay_frame = tk.Frame(content, bg=BG)
+        delay_frame = tk.Frame(page_status, bg=BG)
         delay_frame.pack(side="bottom", fill="x", padx=px(8), pady=(0, px(8)))
         delay_canvas = tk.Canvas(
             delay_frame, height=px(8), bg=PANEL, highlightthickness=0
@@ -2261,40 +2909,628 @@ def _run() -> None:
         )
         delay_label.pack(fill="x")
 
-        # ---- log body --------------------------------------------------
-        body = tk.Frame(content, bg=BG)
-        body.pack(fill="both", expand=True, padx=px(8), pady=(px(6), px(8)))
-        text = tk.Text(
-            body,
+        # ---- 「OCR / 执行」合并面板（分块流，只读，实时刷新） -------------
+        # 用户 2026-10-31 要求：把「日志正文」和「OCR 扫描」两个框合并成一个，
+        # 块内顺序【OCR 内容 → 执行内容】，新块置顶。归块/渲染在 action_feed.py，
+        # 这里只负责把 action_feed.render() 画出来（一个 Text + 滚动条）。
+        # ---- 识别轮播（结束回合 / 段位 / 开始按钮）：只在上面显示，不进日志流 ----
+        detect_frame = tk.Frame(page_status, bg=BG)
+        detect_frame.pack(fill="x", padx=px(8), pady=(px(2), 0))
+        tk.Label(detect_frame, text=DETECT_TITLE, bg=BG, fg=DIM,
+                 font=("Microsoft YaHei", 8, "bold"), anchor="w").pack(side="left")
+        detect_value = tk.Label(
+            detect_frame, text=DETECT_EMPTY_TEXT, bg=BG, fg=TEXT,
+            font=("Microsoft YaHei", FEED_FONT_SIZE), anchor="w")
+        detect_value.pack(side="left", fill="x", expand=True, padx=(px(6), 0))
+        detect_pos = tk.Label(detect_frame, text="", bg=BG, fg=DIM,
+                              font=("Microsoft YaHei", 8), anchor="e")
+        detect_pos.pack(side="right")
+        detect_frame.pack(fill="x", padx=px(8), pady=(px(4), px(6)))
+        feed_frame = tk.Frame(page_status, bg=BG)
+        feed_frame.pack(fill="both", expand=True, padx=px(8), pady=(px(6), px(8)))
+        feed_head = tk.Frame(feed_frame, bg=BG)
+        feed_head.pack(fill="x")
+        tk.Label(
+            feed_head,
+            text=FEED_PANEL_TITLE,
+            bg=BG,
+            fg=DIM,
+            font=("Microsoft YaHei", 8, "bold"),
+            anchor="w",
+        ).pack(side="left")
+        # 标题行右侧「隐藏/显示」：只折叠正文，标题和按钮留着。
+        feed_toggle = tk.Label(
+            feed_head,
+            text=FEED_HIDE_TEXT,
+            bg=PANEL,
+            fg=DIM,
+            font=("Microsoft YaHei", 8),
+            cursor="hand2",
+            padx=px(6),
+            pady=px(1),
+        )
+        feed_toggle.pack(side="right")
+        tk.Frame(feed_frame, bg=PANEL, height=1).pack(fill="x", pady=(px(2), 0))
+        feed_body = tk.Frame(feed_frame, bg=BG)
+        feed_body.pack(fill="both", expand=True, pady=(px(2), 0))
+        # wrap="char"：中文长句按字符换行，不被窗口边缘裁掉。
+        feed_text = tk.Text(
+            feed_body,
             bg=BG,
             fg=TEXT,
-            font=("Microsoft YaHei", 9),
+            font=("Microsoft YaHei", FEED_FONT_SIZE),
             bd=0,
             highlightthickness=0,
-            wrap="word",
-            height=12,
-            padx=px(2),
+            wrap="char",
+            width=1,
+            padx=px(1),
             pady=px(2),
-            spacing1=px(2),
-            spacing3=px(2),
+            spacing1=px(1),
+            spacing3=px(1),
+            state="disabled",
         )
-        text.pack(side="left", fill="both", expand=True)
-        scroll = tk.Scrollbar(body, orient="vertical", command=text.yview, width=px(10))
-        scroll.pack(side="right", fill="y")
-        text.config(yscrollcommand=scroll.set)
-        # 正文按标签着色：盒子意见、实际操作、系统提示、警告、报错各一色，
-        # 颜色全部取自浮窗现有调色板（见 LOG_TAG_COLORS / log_line_tag）。
-        for tag_name, color in LOG_TAG_COLORS.items():
-            if tag_name == "alert":
+        feed_text.pack(side="left", fill="both", expand=True)
+        # 滚动条：默认白条太丑（用户 2026-11-01），改成细窄深色条。
+        feed_scroll = tk.Scrollbar(
+            feed_body,
+            orient="vertical",
+            command=feed_text.yview,
+            width=px(7),
+            bg=NEUTRAL,
+            troughcolor=BG,
+            activebackground=DIM,
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+            elementborderwidth=0,
+        )
+        feed_scroll.pack(side="right", fill="y", padx=(px(2), 0))
+        feed_text.config(yscrollcommand=feed_scroll.set)
+        feed_regular_font = tkfont.Font(family="Microsoft YaHei", size=FEED_FONT_SIZE)
+        feed_bold_font = tkfont.Font(
+            family="Microsoft YaHei", size=FEED_FONT_SIZE, weight="bold")
+        # 颜色全部取自浮窗现有调色板（见 FEED_TAG_COLORS）；块头 / 告警加粗。
+        # （加粗 tag 一次配好 foreground + font：FakeWidget 的 tag_config
+        # 是覆盖写而不是合并，分两次配会把颜色丢掉。）
+        # 每块（一个【标签】行）单独一段竖条，块与块之间留 2px 空隙；
+        # 时间行上面留 9px，把三张卡片分开。
+        spacing = {
+            "card_meta": {"spacing1": px(10)},
+            "card_ocr": {"spacing1": px(4)},
+            "card_action": {"spacing1": px(4)},
+            "card_note": {"spacing1": px(4)},
+            "card_alert": {"spacing1": px(4)},
+            "card_raw": {"spacing1": px(2)},
+            "card_more": {"spacing1": px(4)},
+            "card_exp": {"spacing1": px(6), "spacing3": px(4)},
+            "card_sep": {"spacing1": px(2), "spacing3": px(3)},
+        }
+        for tag_name, color in FEED_TAG_COLORS.items():
+            if tag_name in FEED_BOLD_TAGS:
                 continue
-            text.tag_config(tag_name, foreground=color)
-        # 存活检测/昵称不匹配这类“必须马上看见”的告警行：红色加粗。
-        text.tag_config(
-            "alert",
-            foreground=LOG_TAG_COLORS["alert"],
-            font=("Microsoft YaHei", 9, "bold"),
+            feed_text.tag_config(tag_name, foreground=color,
+                                 **spacing.get(tag_name, {}))
+        for tag_name in FEED_BOLD_TAGS:
+            feed_text.tag_config(
+                tag_name,
+                foreground=FEED_TAG_COLORS[tag_name],
+                font=("Microsoft YaHei", FEED_FONT_SIZE, "bold"),
+                **spacing.get(tag_name, {}),
+            )
+        # 卡片左侧竖条（一个 ┃ 字符按阶段上色）与卡片间距。
+        for bar_name, color in FEED_BAR_COLORS.items():
+            feed_text.tag_config("bar_" + bar_name, foreground=color)
+            feed_text.tag_config(
+                "bar_block_" + bar_name, background=color, foreground=color)
+        # 阶段分隔：居中金色加粗（用户 2026-11-01 要求「对局回合开始居中金标」）。
+        feed_text.tag_config(
+            "card_stage",
+            foreground=GOLD,
+            font=("Microsoft YaHei", FEED_FONT_SIZE, "bold"),
+            justify="center",
+            spacing1=px(9),
+            spacing3=px(3),
         )
+        feed_expanded = [True]
+        feed_shown = [None]  # 已渲染块流的内容指纹
+        bound_exp = set()  # 已绑过点击的「原文」tag（避免每次重建重复 tag_bind）
+        # 布局自检只做一次：内容请求高度超过窗口高度时正文会被压缩/重叠，
+        # 以后有人再加行就能在运行日志里看到（R18H）。
+        layout_checked = [False]
 
+        def _toggle_feed(_event=None):
+            """折叠/展开合并面板（只藏正文，标题行和「显示」按钮留着）。"""
+            feed_expanded[0] = not feed_expanded[0]
+            if feed_expanded[0]:
+                feed_body.pack(fill="both", expand=True, pady=(px(2), 0))
+                _set(feed_toggle, text=FEED_HIDE_TEXT, fg=DIM)
+                # 折叠期间没有重建：展开后强制重画一次。
+                feed_shown[0] = None
+            else:
+                feed_body.pack_forget()
+                _set(feed_toggle, text=FEED_SHOW_TEXT, fg=TEXT)
+            return "break"
+
+        feed_toggle.bind("<Button-1>", _toggle_feed)
+        feed_toggle.bind("<Enter>", lambda _e: _set(feed_toggle, bg=_hover(PANEL)))
+        feed_toggle.bind("<Leave>", lambda _e: _set(feed_toggle, bg=PANEL))
+
+        def _toggle_card_expand(block_id):
+            """点卡片里的「原文 (N)」→ 展开/收起这一块的 OCR 原文。"""
+            try:
+                action_feed.toggle_expand(block_id)
+            except Exception:
+                return "break"
+            # 下一次刷新按新指纹整体重建（展开状态存在 action_feed 里）。
+            feed_shown[0] = None
+            return "break"
+
+        # ---- 常驻页（首次点「常驻」页签才创建控件） ----------------------
+        # 视觉重排（R3-ui2）：状态卡 →「对战设置」分区 → 三段式模式控件 →
+        # 3 个 stepper → 按钮行 → 单行提示。所有值都单行 + 省略号，绝不折行。
+        # 控件值先存在 resident_values 里，点「保存设置」时一次性交给
+        # _ON_RESIDENT_APPLY；轮询只在用户没改动（!resident_dirty）时回填。
+        resident_widgets = {}
+        resident_values = {
+            "mode": "standard",
+            "deck": 0,
+            "stale_game": 180,
+            "stale_other": 300,
+            "toggle_bg": ACCENT,
+        }
+        resident_dirty = [False]
+        resident_mode_labels = {}
+        resident_value_font = tkfont.Font(family="Microsoft YaHei", size=9)
+        resident_state_font = tkfont.Font(
+            family="Microsoft YaHei", size=10, weight="bold"
+        )
+        resident_hint_font = tkfont.Font(family="Microsoft YaHei", size=8)
+
+        def _resident_fit(text, max_px):
+            return fit_text(str(text), max_px, resident_value_font.measure)
+
+        def _set_resident_hint(message, fg=DIM):
+            widget = resident_widgets.get("hint")
+            if widget is None:
+                return
+            _set(
+                widget,
+                text=fit_text(
+                    str(message), px(WINDOW_WIDTH - 24), resident_hint_font.measure
+                ),
+                fg=fg,
+            )
+
+        def _refresh_rule_lines(rs):
+            """说明卡 4 行小字随当前设置更新（单行 + fit_text 截断）。"""
+            for label, line in zip(
+                resident_widgets.get("rules") or [], resident_rule_lines(rs)
+            ):
+                _set(
+                    label,
+                    text=fit_text(
+                        line, px(WINDOW_WIDTH - 44), resident_hint_font.measure
+                    ),
+                )
+
+        def _render_number(key):
+            widget = resident_widgets.get(key + "_value")
+            if widget is None:
+                return
+            value = int(resident_values.get(key) or 0)
+            if key == "deck":
+                text = f"第 {value} 套" if value else "未指定"
+            else:
+                # 数值与单位连在一起（"180s"），不再拆成两段。
+                text = f"{value}s"
+            _set(widget, text=text)
+
+        def _highlight_mode(mode):
+            for key, lab in resident_mode_labels.items():
+                active = key == mode
+                _set(lab, bg=ACCENT if active else PANEL, fg=BG if active else DIM)
+
+        def _select_mode(key):
+            if key not in RESIDENT_MODE_LABELS:
+                return
+            resident_values["mode"] = key
+            resident_dirty[0] = True
+            _highlight_mode(key)
+
+        def _build_number_row(parent, title, key, step, low, high):
+            """一行 stepper：左标签 + 右侧固定宽簇 [−][数值][+]。
+
+            −/+ 是 PANEL2 底色的可见方钮（悬停提亮），数值区固定 66×24px、
+            居中，文本连续（"180s" / "第 2 套" / "未指定"）。
+            """
+            row = tk.Frame(parent, bg=TITLE_BG)
+            row.pack(fill="x", pady=px(4))
+            tk.Label(
+                row,
+                text=title,
+                bg=TITLE_BG,
+                fg=DIM,
+                font=("Microsoft YaHei", 9),
+                width=6,
+                anchor="w",
+            ).pack(side="left")
+            cluster = tk.Frame(row, bg=TITLE_BG)
+            cluster.pack(side="right")
+
+            def _square_button(text_):
+                btn = tk.Label(
+                    cluster,
+                    text=text_,
+                    bg=PANEL2,
+                    fg=DIM,
+                    cursor="hand2",
+                    font=("Microsoft YaHei", 10, "bold"),
+                    width=2,
+                    pady=px(1),
+                )
+                btn.bind(
+                    "<Enter>", lambda _e, b=btn: _set(b, bg=_hover(PANEL2), fg=TEXT)
+                )
+                btn.bind("<Leave>", lambda _e, b=btn: _set(b, bg=PANEL2, fg=DIM))
+                return btn
+
+            minus = _square_button("−")
+            minus.pack(side="left", padx=(0, px(3)))
+            value_box = tk.Frame(cluster, bg=PANEL2, width=px(66), height=px(24))
+            value_box.pack_propagate(False)
+            value_box.pack(side="left")
+            value_widget = tk.Label(
+                value_box,
+                text="",
+                bg=PANEL2,
+                fg=TEXT,
+                font=("Microsoft YaHei", 9, "bold"),
+                anchor="center",
+            )
+            value_widget.pack(fill="both", expand=True)
+            plus = _square_button("+")
+            plus.pack(side="left", padx=(px(3), 0))
+
+            resident_widgets[key + "_value"] = value_widget
+            resident_widgets[key + "_minus"] = minus
+            resident_widgets[key + "_plus"] = plus
+
+            def _nudge(delta, k=key, lo=low, hi=high):
+                current = int(resident_values.get(k) or 0)
+                resident_values[k] = max(lo, min(hi, current + delta))
+                resident_dirty[0] = True
+                _render_number(k)
+
+            plus.bind("<Button-1>", lambda _e: _nudge(step))
+            minus.bind("<Button-1>", lambda _e: _nudge(-step))
+            return value_widget
+        def _call_resident_apply():
+            body = {
+                "mode": resident_values["mode"],
+                "deck_index": resident_values["deck"] or None,
+                "stale_in_game_seconds": resident_values["stale_game"],
+                "stale_other_seconds": resident_values["stale_other"],
+            }
+            result = None
+            try:
+                if _ON_RESIDENT_APPLY is not None:
+                    result = _ON_RESIDENT_APPLY(dict(body))
+            except Exception as exc:
+                result = {"ok": False, "message": f"保存失败：{exc}"}
+            if isinstance(result, dict):
+                ok = bool(result.get("ok", True))
+                message = result.get("message") or (
+                    "常驻设置已保存" if ok else "保存失败"
+                )
+                _set_resident_hint(message, GREEN if ok else DANGER)
+                if ok:
+                    resident_dirty[0] = False
+            else:
+                _set_resident_hint("常驻设置已保存", GREEN)
+                resident_dirty[0] = False
+            _refresh_resident()
+            _raise_hearthstone()
+
+        def _call_resident_toggle():
+            """暂停/恢复常驻；**已暂停/出错时一次点击直接恢复**。
+
+            背景：监督器暂停时配置里的 enabled 仍是 True，而 web_ui 注入的
+            on_resident_toggle 是“按 enabled 取反”。暂停态直接调它只会先「关闭」，
+            用户得点两次才回来（R5 nit11b）。所以恢复方向改走同样已注入的
+            apply 回调（body ``{"enabled": True}``）：仍是一次点击、一次后端调用，
+            接口无需新增。
+            """
+            rs = resident_values.get("last_state") or {}
+            state = str(rs.get("state") or "")
+            resume = bool(rs.get("enabled")) and state not in RESIDENT_ACTIVE_STATES
+            message = None
+            try:
+                if resume:
+                    if _ON_RESIDENT_APPLY is not None:
+                        result = _ON_RESIDENT_APPLY({"enabled": True})
+                        if isinstance(result, dict):
+                            ok = bool(result.get("ok"))
+                            message = result.get("message") or (
+                                "已恢复常驻" if ok else "恢复常驻失败"
+                            )
+                        else:
+                            message = "已恢复常驻"
+                elif _ON_RESIDENT_TOGGLE is not None:
+                    message = _ON_RESIDENT_TOGGLE()
+            except Exception as exc:
+                message = f"操作失败：{exc}"
+            if message:
+                _set_resident_hint(message, TEXT)
+            _refresh_resident()
+            _raise_hearthstone()
+
+        def _refresh_resident():
+            """把 _RESIDENT() 的状态画到常驻页（只在页签可见时更新）。
+
+            文本全部来自模块级纯函数（resident_status_view / quota / target /
+            log / event），这里只负责 fit_text 截断与控件赋值。
+            """
+            if page_resident[0] is None or tabs_state["active"] != "resident":
+                return
+            try:
+                rs = _RESIDENT() if _RESIDENT is not None else None
+            except Exception:
+                rs = None
+            if not isinstance(rs, dict):
+                rs = {}
+            if not rs:
+                # 控制台没提供状态：只更新状态卡/按钮，不清空用户正在编辑的值。
+                _set(
+                    resident_widgets["state"],
+                    text="（控制台未提供常驻状态）",
+                    fg=DIM,
+                )
+                _set(resident_widgets["quota"], text="— / —")
+                for key in ("target", "log", "event"):
+                    _set(resident_widgets[key], text="—")
+                _set(resident_widgets["state_dot"], fg=DIM)
+                _set(resident_widgets["head_dot"], fg=DIM)
+                resident_values["toggle_bg"] = ACCENT
+                _set(
+                    resident_widgets["toggle"],
+                    text="开启常驻",
+                    bg=ACCENT,
+                    activebackground=ACCENT,
+                )
+                _refresh_rule_lines({})
+                return
+            view = resident_status_view(rs)
+            # 状态文案可能有两行（waiting_schedule 第二行是等待原因）：逐行裁宽，
+            # 避免把换行符当成普通字符裁掉。
+            _set(
+                resident_widgets["state"],
+                text="\n".join(
+                    fit_text(line, px(130), resident_state_font.measure)
+                    for line in str(view["state_text"]).splitlines()
+                ),
+                fg=view["fg"],
+            )
+            _set(resident_widgets["quota"], text=resident_quota_text(rs))
+            _set(
+                resident_widgets["target"],
+                text=_resident_fit(resident_target_text(rs), px(180)),
+            )
+            _set(
+                resident_widgets["log"],
+                text=_resident_fit(resident_log_text(rs), px(180)),
+            )
+            _set(
+                resident_widgets["event"],
+                text=_resident_fit(resident_event_text(rs), px(180)),
+            )
+            _set(resident_widgets["state_dot"], fg=view["dot"])
+            _set(resident_widgets["head_dot"], fg=view["dot"])
+            _refresh_rule_lines(rs)
+            # 只有“正在干活”（倒计时/启动/运行/恢复）才给「暂停常驻」；
+            # 暂停/耗尽/出错时显示「开启常驻」——点击一次即恢复（见 toggle 回调）。
+            resident_values["last_state"] = dict(rs)
+            can_pause = bool(view["can_pause"])
+            toggle_bg = DANGER if can_pause else ACCENT
+            resident_values["toggle_bg"] = toggle_bg
+            _set(
+                resident_widgets["toggle"],
+                text="暂停常驻" if can_pause else "开启常驻",
+                bg=toggle_bg,
+                activebackground=toggle_bg,
+            )
+            if resident_dirty[0]:
+                return
+            mode = str(rs.get("mode") or "standard")
+            deck = rs.get("deck_index")
+            resident_values["mode"] = mode
+            resident_values["deck"] = int(deck) if deck else 0
+            resident_values["stale_game"] = max(
+                60, min(3600, _resident_int(rs.get("stale_in_game_seconds"), 180))
+            )
+            resident_values["stale_other"] = max(
+                60, min(3600, _resident_int(rs.get("stale_other_seconds"), 300))
+            )
+            _highlight_mode(mode)
+            _render_number("deck")
+            _render_number("stale_game")
+            _render_number("stale_other")
+
+        def _section_title(parent, title):
+            row = tk.Frame(parent, bg=TITLE_BG)
+            row.pack(fill="x", padx=px(12), pady=(px(6), px(5)))
+            tk.Label(
+                row,
+                text=title,
+                bg=TITLE_BG,
+                fg=DIM,
+                font=("Microsoft YaHei", 8, "bold"),
+                anchor="w",
+            ).pack(side="left")
+            tk.Frame(parent, bg=LINE, height=1).pack(fill="x")
+
+        def _build_resident_page():
+            page = tk.Frame(content, bg=TITLE_BG)
+            body = tk.Frame(page, bg=TITLE_BG)
+            body.pack(fill="both", expand=True, padx=px(12))
+
+            # ---- 状态卡：hero（● 状态 + 配额）+ 目标/日志/最近事件 ----------
+            card = tk.Frame(body, bg=PANEL)
+            card.pack(fill="x", pady=(px(10), px(12)))
+            hero = tk.Frame(card, bg=PANEL)
+            hero.pack(fill="x", padx=px(12), pady=(px(11), px(1)))
+            state_dot = tk.Label(
+                hero, text="●", bg=PANEL, fg=DIM, font=("Segoe UI", 10)
+            )
+            state_dot.pack(side="left")
+            state_value = tk.Label(
+                hero,
+                text="未开启",
+                bg=PANEL,
+                fg=DIM,
+                font=("Microsoft YaHei", 11, "bold"),
+                anchor="w",
+            )
+            state_value.pack(side="left", padx=(px(7), 0))
+            quota = tk.Label(
+                hero,
+                text="0 / 0",
+                bg=PANEL2,
+                fg=DIM,
+                font=("Microsoft YaHei", 9),
+                padx=px(7),
+                pady=px(1),
+            )
+            quota.pack(side="right")
+            resident_widgets["state"] = state_value
+            resident_widgets["state_dot"] = state_dot
+            resident_widgets["quota"] = quota
+            # 共享标题行的 ●：切到常驻页时随状态变色（状态页仍保持绿色）。
+            resident_widgets["head_dot"] = dot
+            for key, title in (
+                ("target", "目标"),
+                ("log", "日志"),
+                ("event", "最近事件"),
+            ):
+                row = tk.Frame(card, bg=PANEL)
+                row.pack(fill="x", padx=px(12), pady=px(3))
+                tk.Label(
+                    row,
+                    text=title,
+                    bg=PANEL,
+                    fg=DIM,
+                    font=("Microsoft YaHei", 8),
+                    width=5,
+                    anchor="w",
+                ).pack(side="left")
+                value = tk.Label(
+                    row,
+                    text="—",
+                    bg=PANEL,
+                    fg=TEXT,
+                    font=("Microsoft YaHei", 9),
+                    anchor="w",
+                    justify="left",
+                )
+                value.pack(side="left", fill="x", expand=True)
+                resident_widgets[key] = value
+            tk.Frame(card, bg=PANEL, height=px(8)).pack(fill="x")
+
+            # ---- 对战设置 -------------------------------------------------
+            _section_title(body, "对战设置")
+            mode_box = tk.Frame(body, bg=LINE)
+            mode_box.pack(fill="x")
+            for column, (key, text_) in enumerate(
+                (("standard", "标准"), ("wild", "狂野"), ("casual", "休闲"))
+            ):
+                lab = tk.Label(
+                    mode_box,
+                    text=text_,
+                    bg=PANEL,
+                    fg=DIM,
+                    cursor="hand2",
+                    font=("Microsoft YaHei", 9, "bold"),
+                    pady=px(6),
+                )
+                lab.grid(
+                    row=0,
+                    column=column,
+                    sticky="ew",
+                    padx=(px(1) if column else 0, 0),
+                )
+                lab.bind("<Button-1>", lambda _e, k=key: _select_mode(k))
+                mode_box.columnconfigure(column, weight=1)
+                resident_mode_labels[key] = lab
+
+            steppers = tk.Frame(body, bg=TITLE_BG)
+            steppers.pack(fill="x", padx=px(12), pady=(px(8), px(2)))
+            _build_number_row(steppers, "卡组", "deck", 1, 0, 9)
+            _build_number_row(steppers, "对局中", "stale_game", 30, 60, 3600)
+            _build_number_row(steppers, "其他界面", "stale_other", 60, 60, 3600)
+
+            # ---- 自动恢复说明（紧凑列表，不再是大块空卡） ------------------
+            _section_title(body, "自动恢复")
+            rules = tk.Frame(body, bg=TITLE_BG)
+            rules.pack(fill="x", padx=px(12))
+            rule_labels = []
+            for line in resident_rule_lines({}):
+                lab = tk.Label(
+                    rules,
+                    text=line,
+                    bg=TITLE_BG,
+                    fg=DIM,
+                    font=("Microsoft YaHei", 8),
+                    anchor="w",
+                    justify="left",
+                )
+                lab.pack(fill="x", pady=px(2))
+                rule_labels.append(lab)
+            resident_widgets["rules"] = rule_labels
+
+            # ---- 底部按钮行 + 提示行 ---------------------------------------
+            tk.Frame(body, bg=TITLE_BG).pack(fill="both", expand=True)
+            btn_row = tk.Frame(body, bg=TITLE_BG)
+            btn_row.pack(fill="x", pady=(px(12), 0))
+            btn_row.columnconfigure(0, weight=1)
+            btn_row.columnconfigure(1, weight=1)
+            apply_btn = _make_btn(btn_row, "保存设置", PANEL2, _call_resident_apply)
+            apply_btn.config(fg=TEXT)
+            apply_btn.grid(row=0, column=0, sticky="ew", padx=(0, px(4)))
+            toggle_btn = _make_btn(btn_row, "开启常驻", ACCENT, _call_resident_toggle)
+            toggle_btn.grid(row=0, column=1, sticky="ew", padx=(px(4), 0))
+            # _make_btn 的悬停色绑的是创建时的颜色；开关按钮颜色会随状态变，
+            # 这里覆盖一次让悬停/离开跟随当前 bg。
+            toggle_btn.bind(
+                "<Enter>",
+                lambda _e: _set(
+                    toggle_btn,
+                    bg=_hover(resident_values.get("toggle_bg") or ACCENT),
+                ),
+            )
+            toggle_btn.bind(
+                "<Leave>",
+                lambda _e: _set(
+                    toggle_btn, bg=resident_values.get("toggle_bg") or ACCENT
+                ),
+            )
+            resident_widgets["apply"] = apply_btn
+            resident_widgets["toggle"] = toggle_btn
+
+            hint = tk.Label(
+                body,
+                text="保存后立即生效",
+                bg=TITLE_BG,
+                fg=DIM,
+                font=("Microsoft YaHei", 8),
+                anchor="w",
+            )
+            hint.pack(fill="x", padx=px(12), pady=(px(8), px(8)))
+            resident_widgets["hint"] = hint
+
+            _highlight_mode(resident_values["mode"])
+            _render_number("deck")
+            _render_number("stale_game")
+            _render_number("stale_other")
+            return page
         # ---- drag ------------------------------------------------------
         # 整窗拖动绑在 root 上；但点滑条时事件会冒泡到这里，若不排除就会「按滑钮
         # 整个浮窗跟着动」。滑条自己在 widget 级绑定里 return "break" 已经吃掉事件，
@@ -2321,8 +3557,43 @@ def _run() -> None:
         root.bind("<Button-1>", _start_drag)
         root.bind("<B1-Motion>", _on_drag)
 
-        shown = [None]  # (条数, 首行, 末行) —— 当前已渲染窗口的指纹
         delay_bar = [None]  # 已画出的进度条比例（None = 当前没画）
+
+        def _feed_content_width() -> int:
+            """正文可用宽度（px）：真 Tk 量控件，伪 Tk/未布局时按窗口设计宽兜底。"""
+            try:
+                width = int(feed_text.winfo_width())
+            except Exception:
+                width = 0
+            if width < 60:
+                width = px(WINDOW_WIDTH - 46)
+            return max(px(40), width - px(3))
+
+        def _wrap_measured(text, font, width: int) -> list:
+            """按像素折行：比 Text 的 wrap="char" 精确，保证每个视觉行都能挂竖条。
+
+            末行只剩 1 个字时，从上一行借 1 个字过来 —— 中文不会出现「位」孤零零
+            占一行的观感（用户 2026-11-01 反馈的缩进/折行问题）。
+            """
+            lines, cur, cur_w = [], [], 0.0
+            for char in str(text):
+                advance = float(font.measure(char))
+                if cur and cur_w + advance > width:
+                    lines.append("".join(cur))
+                    cur, cur_w = [], 0.0
+                cur.append(char)
+                cur_w += advance
+            lines.append("".join(cur))
+            if len(lines) > 1 and len(lines[-1]) == 1 and len(lines[-2]) > 2:
+                lines[-1] = lines[-2][-1] + lines[-1]
+                lines[-2] = lines[-2][:-1]
+            # 行首禁则：标点不收行首（挂到上一行行尾，允许 1 字溢出）。
+            for index in range(1, len(lines)):
+                if lines[index] and lines[index][0] in "，。、；：！？）」』】,.;:!?)":
+                    lines[index - 1] += lines[index][0]
+                    lines[index] = lines[index][1:]
+            lines = [line for line in lines if line]
+            return lines
 
         def _refresh():
             global _DELAY
@@ -2331,27 +3602,120 @@ def _run() -> None:
                 _STARTED[0] = False
                 return
             if collapsed[0]:
-                # 最小化时正文看不见：不重画（省 CPU），展开后靠 shown[0]=None
-                # 整体重建，中间进来的日志一行都不会丢。
-                shown[0] = None
+                # 最小化时正文看不见：不重画（省 CPU），展开后靠
+                # feed_shown[0]=None 整体重建，中间进来的块一行都不会丢。
+                feed_shown[0] = None
                 root.after(_REFRESH_MS, _update)
                 return
-            with _LOCK:
-                lines = list(_LINES)
             _sync_size_slider()
-            pos = text.yview()
-            at_bottom = pos[1] >= 0.999
-            # 增量渲染的坑：_LINES 满 _MAX_LINES 后每进一行就从头部滑出一行，
-            # 长度恒为 500；用“已插入计数”当下标会让新行永远落在已渲染区间内，
-            # 一旦超过 500 行浮窗就再也不刷新。改为按“窗口内容指纹”判断：
-            # 只要条数或首/末行任一变了（有新行入、或有旧行被滑出），就整体重建。
-            fp = _window_fingerprint(lines)
-            changed = fp != shown[0]
-            if changed:
-                text.delete("1.0", "end")
-                for ln, _turn in lines:
-                    text.insert("end", ln + "\n", log_line_tag(ln))
-                shown[0] = fp
+            if not layout_checked[0]:
+                layout_checked[0] = True
+                # 只在真 Tk 下能量（fake harness 没有 winfo_reqheight）。
+                measure = getattr(root, "winfo_reqheight", None)
+                if measure is not None:
+                    try:
+                        needed = int(measure())
+                        if needed > H + 4:
+                            _report(
+                                f"浮窗内容超出窗口高度（需要 {needed}px > {H}px），"
+                                "正文区会被压缩；请减小 action_feed 的块行数上限"
+                                "或加高窗口。")
+                    except Exception:
+                        pass
+            # 识别轮播：每 DETECT_ROTATE_SECONDS 换一条（结束回合/段位/开始按钮）。
+            try:
+                detect_entries = _OCR() if _OCR is not None else None
+                detect_rows = detect_items(detect_entries)
+            except Exception:
+                detect_rows = []
+            if detect_rows:
+                try:
+                    merged_log.record_detect_rows(detect_rows)
+                except Exception:
+                    pass
+                detect_index = int(time.time() / DETECT_ROTATE_SECONDS) % len(detect_rows)
+                _set(detect_value, text=detect_rows[detect_index])
+                _set(detect_pos, text=(f"{detect_index + 1}/{len(detect_rows)}"
+                                       if len(detect_rows) > 1 else ""))
+            else:
+                _set(detect_value, text=DETECT_EMPTY_TEXT)
+                _set(detect_pos, text="")
+            # 分块流：归块/渲染都在 action_feed，这里只按内容指纹整体重建，
+            # 重建前后保存/恢复滚动位置（新块在最前，默认 0.0 = 贴顶看最新块）。
+            if feed_expanded[0]:
+                rows = action_feed.render()
+                feed_fp = tuple(rows)
+                if feed_fp != feed_shown[0]:
+                    try:
+                        position = feed_text.yview()[0]
+                    except Exception:
+                        position = 0.0
+                    feed_text.config(state="normal")
+                    feed_text.delete("1.0", "end")
+                    exp_tags = set()
+                    bar_mode = str(FEED_BAR_MODE or "bar")
+                    content_w = _feed_content_width()
+                    for row in rows:
+                        row_text, row_tag = row[0], row[1]
+                        bar_name = row[2] if len(row) > 2 else None
+                        if isinstance(row_tag, tuple):
+                            tags = row_tag
+                            exp_tags.add(row_tag[1])
+                        else:
+                            tags = (row_tag,)
+                        if row_tag == "card_sep":
+                            dash_w = float(feed_regular_font.measure("┈")) or 8.0
+                            count = max(1, int(content_w / dash_w))
+                            feed_text.insert("end", "┈" * count + "\n", tags)
+                            continue
+                        if row_tag == "card_stage":
+                            # 阶段行：居中金色，不带竖条。
+                            feed_text.insert("end", row_text + "\n", tags)
+                            continue
+                        font = (feed_bold_font
+                                if isinstance(row_tag, str) and row_tag in FEED_BOLD_TAGS
+                                else feed_regular_font)
+                        bar_px = 0
+                        if bar_name and bar_mode != "none":
+                            bar_px = int(font.measure(FEED_BAR_GLYPH)) + px(FEED_BAR_GAP_PX)
+                        width = max(px(40), content_w - bar_px)
+                        # 自己按像素折行：每个**视觉行**都画竖条，长日志的竖线才连贯。
+                        for segment in _wrap_measured(row_text, font, width):
+                            if bar_px:
+                                if bar_mode == "block":
+                                    feed_text.insert(
+                                        "end", " ", (f"bar_block_{bar_name}",))
+                                else:
+                                    feed_text.insert(
+                                        "end", FEED_BAR_GLYPH, (f"bar_{bar_name}",))
+                                if FEED_BAR_GAP_PX:
+                                    feed_text.insert("end", " ", tags)
+                            feed_text.insert("end", segment + "\n", tags)
+                    feed_text.config(state="disabled")
+                    # 展开入口只绑一次：tag_bind 每绑一次都会新建 CallWrapper，
+                    # 全表重绑会让 tag/回调随「重建次数 × 历史块数」无界增长。
+                    try:
+                        for tag_name in exp_tags - bound_exp:
+                            try:
+                                block_id = int(str(tag_name)[4:])
+                            except ValueError:
+                                continue
+                            feed_text.tag_bind(
+                                tag_name,
+                                "<Button-1>",
+                                lambda _e, bid=block_id: _toggle_card_expand(bid),
+                            )
+                        for tag_name in bound_exp - exp_tags:
+                            feed_text.tag_delete(tag_name)
+                    except Exception:
+                        pass
+                    bound_exp.clear()
+                    bound_exp.update(exp_tags)
+                    try:
+                        feed_text.yview_moveto(position)
+                    except Exception:
+                        pass
+                    feed_shown[0] = feed_fp
             if _IS_RUNNING is not None:
                 if _IS_RUNNING():
                     _set(halt_btn, text="中止", bg=DANGER, activebackground=DANGER)
@@ -2503,8 +3867,7 @@ def _run() -> None:
                     delay_canvas.delete("all")
                     delay_bar[0] = None
             _set_stop_after_state()
-            if at_bottom and changed and lines:
-                text.see("end")
+            _refresh_resident()
             root.after(_REFRESH_MS, _update)
 
         def _update():

@@ -11,7 +11,7 @@ import unittest
 
 import action_feed
 
-_TIME_HEAD_RE = re.compile(r"^\d{2}:\d{2}:\d{2}( · .+)?$")
+_TIME_HEAD_RE = re.compile(r"^\d{2}:\d{2}( · .+)?$")
 
 
 def _snapshot_row(text, tag="text", head=False):
@@ -20,7 +20,12 @@ def _snapshot_row(text, tag="text", head=False):
 
 
 def _texts(rows):
-    return [text for text, _tag in rows]
+    """只取可读行（跳过块间虚线分隔行）。"""
+    return [row[0] for row in rows if row[1] != action_feed.SEPARATOR_TAG]
+
+
+def _tags(rows):
+    return [row[1] for row in rows]
 
 
 class ActionFeedCase(unittest.TestCase):
@@ -214,9 +219,23 @@ class OcrSnapshotTests(ActionFeedCase):
 
         self.assertEqual(4, len(block["ocr"]))  # 快照 2 行 + 推荐 / 续行各 1 行
         self.assertEqual("● 结束回合框 1行 0.99", block["ocr"][0][0])
-        self.assertEqual("head", block["ocr"][0][1])
+        # 标题行保留 OCR 的命中/告警语义（决定卡片竖条颜色），不一律改成 head。
+        self.assertEqual("match", block["ocr"][0][1])
         self.assertEqual("text", block["ocr"][1][1])
         self.assertEqual(1, len(calls))
+
+    def test_warn_head_keeps_its_tag_so_the_card_can_turn_red(self):
+        action_feed.set_ocr_provider(lambda: [
+            _snapshot_row("● 结束回合框 12行 0.90", "warn", head=True),
+            _snapshot_row("  ▏对手回合", "text"),
+        ])
+        action_feed.push("[执行] 打出1号位随从")
+
+        rows = action_feed.render()
+        ocr_rows = [row for row in rows if row[1] == "card_ocr"]
+
+        self.assertEqual(1, len(ocr_rows))
+        self.assertEqual("danger", ocr_rows[0][2])  # 没读到「结束回合」= 红条
 
         def boom():
             raise RuntimeError("boom")
@@ -232,62 +251,139 @@ class OcrSnapshotTests(ActionFeedCase):
 
 
 class RenderTests(ActionFeedCase):
-    def test_block_header_has_a_clock_and_a_phase(self):
+    """R19 卡片式：行 = (text, tag, bar_color)，OCR 原文默认折叠。"""
+
+    def test_card_header_has_a_clock_and_a_phase(self):
         action_feed.push("-----我方出牌阶段-----")
         action_feed.push("[推荐] 打出1号位随从")
 
-        head = action_feed.render()[0]
+        rows = action_feed.render()
+        stage, head = rows[0], rows[1]
 
-        self.assertEqual("head", head[1])
-        self.assertRegex(head[0], _TIME_HEAD_RE)
-        self.assertIn("· 我方出牌", head[0])
+        # 阶段变化：一条居中金色的阶段行（用户 2026-11-01 要求），
+        # 卡头只留 HH:MM，不再重复阶段名。
+        self.assertEqual(("我方出牌", "card_stage"), (stage[0], stage[1]))
+        self.assertEqual("card_meta", head[1])
+        self.assertRegex(head[0], r"^\d{2}:\d{2}$")
+        self.assertIsNone(head[2])  # 时间行不带竖条
+        self.assertEqual("gold", rows[2][2])  # 我方出牌 = 金条（[OCR]行）
 
-    def test_segments_use_prefixes_and_blocks_are_separated(self):
+    def test_action_lines_lose_their_tag_prefixes(self):
         action_feed.push("-----我方出牌阶段-----")
         action_feed.push("[推荐] 打出1号位随从")
-        action_feed.push("[推荐] 原文：PlayCard")
-        action_feed.push("[执行] 打出1号位随从")
+        action_feed.push("[执行] 打出1号位随从「鱼人招潮者」")
         action_feed.push("操作结束，延时 0.5s 后继续。")
-
-        texts = _texts(action_feed.render())
-
-        self.assertTrue(texts[1].startswith("  OCR   "))
-        self.assertTrue(texts[2].startswith(" " * 8))
-        self.assertTrue(texts[3].startswith("  执行  "))
-        self.assertTrue(texts[4].startswith(" " * 8))
-
-        action_feed.clear()
-        action_feed.push("[推荐] 第一步")
-        action_feed.push("[执行] 第一步")
-        action_feed.push("[推荐] 第二步")
 
         rows = action_feed.render()
         texts = _texts(rows)
 
-        self.assertEqual(action_feed.SEPARATOR, "─" * 46)
-        self.assertIn(action_feed.SEPARATOR, texts)
-        separator_index = texts.index(action_feed.SEPARATOR)
-        self.assertLess(texts.index("  OCR   [推荐] 第二步"), separator_index)
-        self.assertGreater(
-            texts.index("  执行  [执行] 第一步"), separator_index)
-        self.assertEqual("dim", rows[separator_index][1])
+        self.assertIn("[OCR]打出1号位随从", texts)
+        self.assertIn("[执行]打出1号位随从「鱼人招潮者」", texts)
+        self.assertFalse(any(text.startswith("[推荐]") for text in texts))
+        self.assertIn("card_action", _tags(rows))
+
+    def test_delay_and_human_like_rows_do_not_show_up(self):
+        action_feed.push("[执行] 结束回合")
+        action_feed.push("[SYS] 活人感 延时 1.4s 后（手牌区随机悬停等待）")
+        action_feed.push("[SYS] 延时结束")
+
+        texts = _texts(action_feed.render())
+
+        self.assertEqual(["[执行]结束回合"], texts[1:])
+        self.assertFalse(any("延时" in text for text in texts[1:]))
+        self.assertFalse(any("活人感" in text for text in texts[1:]))
+
+    def test_duplicate_layer_prefixes_and_inline_timestamps_are_stripped(self):
+        action_feed.push("[SYS] [SYS] 已检测到「结束回合」，开始本轮推荐读取。")
+        action_feed.push("[INFO] [23:54:11 INFO] 收到立即停止指令，正在终止自动化……")
+
+        texts = _texts(action_feed.render())
+
+        # 识别结果（结束回合）不再进日志流，交给上方识别轮播窗口。
+        self.assertFalse(any("已检测到「结束回合」" in text for text in texts))
+        self.assertIn("[提示]收到立即停止指令，正在终止自动化……", texts)
+
+    def test_consecutive_alerts_merge_into_one_row_with_a_count(self):
+        for _ in range(3):
+            action_feed.push("[WARN] Ctrl+Q —— 已取消：自动化（立即停）")
+
+        rows = action_feed.render()
+        alerts = [row for row in rows if row[1] == "card_alert"]
+
+        self.assertEqual(1, len(alerts))
+        self.assertIn("×3", alerts[0][0])
+        self.assertEqual("danger", alerts[0][2])
+
+    def test_ocr_snapshot_folds_into_one_summary_and_raw_stays_collapsed(self):
+        rows = [
+            _snapshot_row("● 结束回合框 12行 0.90", tag="warn", head=True),
+            _snapshot_row("  ▏00:36"),
+            _snapshot_row("  ▏对手回合"),
+        ]
+        action_feed.set_ocr_provider(lambda: rows)
+        action_feed.push("[执行] 打出1号位随从")
+
+        rendered = action_feed.render()
+        texts = _texts(action_feed.render())
+
+        self.assertIn("[OCR]对手回合", texts)  # 主行取区域原文，不是「2 行 1.00」统计
+        self.assertNotIn("  ▏00:36", texts)  # 原文默认不出现在卡片里
+        expanders = [row for row in rendered if isinstance(row[1], tuple)]
+        self.assertEqual(1, len(expanders))
+        self.assertIn("原文 (2)", expanders[0][0])
+
+        block_id = action_feed.snapshot()[0]["id"]
+        expanders = [row for row in rendered if isinstance(row[1], tuple)]
+        self.assertEqual(("card_exp", f"exp_{block_id}"), expanders[0][1])
+        action_feed.toggle_expand(block_id)
+        expanded = _texts(action_feed.render())
+
+        self.assertIn(" 00:36", expanded)
+        self.assertIn(" 对手回合", expanded)
+        self.assertTrue(any("收起原文" in text for text in expanded))
+
+    def test_blocks_are_separated_by_a_dashed_line(self):
+        action_feed.push("[推荐] 打出1号位随从")
+        action_feed.push("[执行] 打出1号位随从")
+
+        tags = [row[1] for row in action_feed.render()]
+
+        # 每块后面跟一条虚线分隔（用户 2026-11-01：竖线不能连成一条）。
+        self.assertIn(action_feed.SEPARATOR_TAG, tags)
+        self.assertEqual(2, tags.count(action_feed.SEPARATOR_TAG))
+
+    def test_newest_block_is_rendered_on_top_without_separator_rows(self):
+        action_feed.push("[推荐] 第一步")
+        action_feed.push("[执行] 点击第一次")
+        action_feed.push("[推荐] 第二步")
+        action_feed.push("[执行] 点击第二次")
+
+        texts = _texts(action_feed.render())
+
+        self.assertLess(texts.index("[OCR]第二步"), texts.index("[OCR]第一步"))
+        self.assertNotIn(action_feed.SEPARATOR, texts)
 
 
 class LimitTests(ActionFeedCase):
-    def test_ocr_and_exec_segments_are_capped_with_an_overflow_hint(self):
-        rows = [_snapshot_row(f"OCR 行 {index}") for index in range(20)]
+    def test_ocr_snapshot_is_capped_and_overflow_is_counted_in_the_expander(self):
+        rows = [_snapshot_row("● 结束回合框 20行 0.90", tag="warn", head=True)]
+        rows += [_snapshot_row(f"  ▏OCR 行 {index}") for index in range(19)]
         action_feed.set_ocr_provider(lambda: rows)
 
-        # 只执行、不推荐：块建立时取 20 行快照，保留 12 行、藏掉 8 行。
         action_feed.push("[执行] 打出1号位随从")
+        block = action_feed.snapshot()[0]
         rendered = _texts(action_feed.render())
 
-        ocr_rows = [text for text in rendered if "OCR 行" in text]
-        self.assertEqual(action_feed.MAX_OCR_LINES, len(ocr_rows))
-        self.assertTrue(any("还有 8 行" in text for text in rendered))
+        # 每块 OCR 段上限 12 行（含标题行），其余记进「＋N 行」。
+        self.assertEqual(action_feed.MAX_OCR_LINES, len(block["ocr"]))
+        self.assertIn("› 原文 (19)", rendered)
 
-        action_feed.clear()
-        action_feed.set_ocr_provider(None)
+        action_feed.toggle_expand(block["id"])
+        expanded = _texts(action_feed.render())
+        self.assertIn(" OCR 行 0", expanded)
+        self.assertTrue(any("滚动查看" in text for text in expanded))
+
+    def test_exec_segment_is_capped_with_an_overflow_hint(self):
         for index in range(20):
             action_feed.push(f"[执行] 第{index}次点击")
 

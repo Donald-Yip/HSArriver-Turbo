@@ -1,8 +1,14 @@
 """Require a stable, high-confidence recommendation before parsing."""
 
 import time
+from collections import OrderedDict
 
 from src.ocr.preprocess import iter_preprocess_recommendation
+
+# 帧缓存上限。缓存只为“同一次读取里同一帧不用重复推理”（一次 read 最多
+# max_attempts 帧），不需要跨局保留：reader 是模块级单例，面板每变一次就是
+# 一个新哈希，无界缓存会随运行时长线性增长（实测每帧约 4.2KB，2 万帧 80MB）。
+MAX_CACHE_ENTRIES = 64
 
 
 class OcrRejectedError(RuntimeError):
@@ -29,6 +35,7 @@ class StableRecommendationReader:
         required_headers=(),
         cache=None,
         stability_key=None,
+        max_cache_entries=None,
     ):
         self.config = config
         self.backend = backend
@@ -41,8 +48,18 @@ class StableRecommendationReader:
         self.stability_key = stability_key
         # Panel-pixel -> OCR evidence cache. Identical pixels always produce
         # identical OCR output, so a frame whose exact hash was already
-        # recognized can skip the (expensive) inference entirely.
-        self._cache = {} if cache is None else cache
+        # recognized can skip the (expensive) inference entirely. 缓存有界：
+        # 命中把 key 移到队尾，写新证据后超限从队头淘汰最久未用的（见
+        # MAX_CACHE_ENTRIES），避免长跑进程按帧数线性吃内存。
+        if cache is None:
+            self._cache = OrderedDict()
+        elif isinstance(cache, OrderedDict):
+            self._cache = cache
+        else:
+            self._cache = OrderedDict(cache)
+        self.max_cache_entries = (
+            MAX_CACHE_ENTRIES if max_cache_entries is None
+            else max(0, int(max_cache_entries)))
         # 最近一帧“读到了但没过门槛”的证据（只用于失败诊断）。
         self._last_rejected = None
 
@@ -54,6 +71,8 @@ class StableRecommendationReader:
         evidence = self._cache.get(frame_hash)
         if evidence is None:
             return None
+        # LRU：这一帧刚被用到，下次淘汰时排到最后。
+        self._cache.move_to_end(frame_hash)
         return type(evidence)(
             frame.frame_id,
             time.time(),
@@ -63,6 +82,17 @@ class StableRecommendationReader:
             evidence.backend,
             evidence.preprocessing,
         )
+
+    def _remember(self, frame_hash, evidence):
+        """写入新证据并维持有界 LRU（超限淘汰最久未用的队头）。"""
+        self._cache[frame_hash] = evidence
+        self._cache.move_to_end(frame_hash)
+        if len(self._cache) > self.max_cache_entries:
+            self._cache.popitem(last=False)
+
+    def clear_cache(self):
+        """清空帧缓存（跨局/换配置时回收已缓存证据占用的内存）。"""
+        self._cache.clear()
 
     def read(self, frame_supplier, roi_supplier):
         previous_key = None
@@ -82,7 +112,7 @@ class StableRecommendationReader:
                 )
                 frame_hash = getattr(frame, "exact_hash", None)
                 if evidence is not None and frame_hash:
-                    self._cache[frame_hash] = evidence
+                    self._remember(frame_hash, evidence)
             if evidence is None:
                 # 这一帧没给出合格证据：把“读到了但不够格”的原文也记下来，
                 # 失败信息才能区分“没读到字”和“字读到了但置信度低”。
@@ -145,7 +175,7 @@ class StableRecommendationReader:
             )
             frame_hash = getattr(frame, "exact_hash", None)
             if evidence is not None and frame_hash:
-                self._cache[frame_hash] = evidence
+                self._remember(frame_hash, evidence)
         if evidence is None:
             raise OcrRejectedError("recommendation_not_confident")
         return evidence

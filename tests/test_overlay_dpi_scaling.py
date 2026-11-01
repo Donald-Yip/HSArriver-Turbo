@@ -122,7 +122,13 @@ class WindowWiringTests(unittest.TestCase):
             self.assertIn(("tk", "scaling", 2.0), ui.root.calls)
             width, height, _x, _y = ui.root.geometries[0].replace("+", "x").split("x")
             self.assertEqual(str(log_overlay.px(log_overlay.WINDOW_WIDTH)), width)
-            self.assertEqual(str(log_overlay.px(log_overlay.WINDOW_HEIGHT)), height)
+            # 880 设计高度还要夹到「屏幕高 - 40px」以内（R18J 合并面板）：
+            # 150% 缩放下 1320 > 1080 - 60，实际开窗高度是 1020。
+            expected_height = min(
+                log_overlay.px(log_overlay.WINDOW_HEIGHT),
+                ui.root.winfo_screenheight() - log_overlay.px(40),
+            )
+            self.assertEqual(str(expected_height), height)
 
     def test_window_and_minimized_bar_use_scaled_geometry(self):
         with overlay_harness(dpi=144, _IS_RUNNING=lambda: False) as ui:
@@ -178,10 +184,11 @@ class WindowWiringTests(unittest.TestCase):
             self.assertGreater(scaled[name], base[name], name)
 
     def test_base_constants_keep_the_design_values(self):
-        # 263/802/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
-        # （723 → 772：新增「炉石窗口宽度」滑条行；772 → 802：「装好没反应？」按钮行。）
+        # 263/940/34 是 100% 缩放下的设计值，测试与文档都按这个口径锁住。
+        # （723 → 772：新增「炉石窗口宽度」滑条行；772 → 802：「装好没反应？」
+        # 按钮行；802 → 940：「日志正文 + OCR 扫描」合并成一个分块流面板。）
         self.assertEqual(263, log_overlay.WINDOW_WIDTH)
-        self.assertEqual(802, log_overlay.WINDOW_HEIGHT)
+        self.assertEqual(940, log_overlay.WINDOW_HEIGHT)
         self.assertEqual(34, log_overlay.MINIMIZED_HEIGHT)
         self.assertEqual(1.0, log_overlay.UI_SCALE)
 

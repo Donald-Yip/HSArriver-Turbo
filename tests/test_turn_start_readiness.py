@@ -42,14 +42,17 @@ class EndTurnButtonProbeTests(unittest.TestCase):
     def setUp(self):
         self.saved_config = FSM_action.recommendation_config
         self.saved_text = FSM_action._turn_end_last_text
+        self.saved_lines = FSM_action._turn_end_last_lines
         FSM_action.recommendation_config = SimpleNamespace(
             turn_end_button_roi=(1390, 430, 1710, 570),
         )
         FSM_action._turn_end_last_text = ""
+        FSM_action._turn_end_last_lines = []
 
     def tearDown(self):
         FSM_action.recommendation_config = self.saved_config
         FSM_action._turn_end_last_text = self.saved_text
+        FSM_action._turn_end_last_lines = self.saved_lines
 
     def _probe(self, lines):
         with patch.object(FSM_action, "_ocr_lines", return_value=lines):
@@ -79,18 +82,42 @@ class EndTurnButtonProbeTests(unittest.TestCase):
 
     def test_fallback_box_is_tried_when_the_main_box_misses(self):
         boxes = []
+        main = FSM_action._turn_end_button_box()
+        fallback = FSM_action._turn_end_fallback_box()
 
         def fake_ocr(box, _scale, _tag):
             boxes.append(box)
-            if box == FSM_action._TURN_END_FALLBACK_ROI:
+            if box == fallback:
                 return [OcrLine("结束回合", 0.92)]
             return [OcrLine("对手回合", 0.90)]
 
         with patch.object(FSM_action, "_ocr_lines", side_effect=fake_ocr):
             self.assertTrue(FSM_action.end_turn_button_present())
 
-        self.assertEqual(2, len(boxes))
-        self.assertEqual(FSM_action._TURN_END_FALLBACK_ROI, boxes[1])
+        self.assertEqual([main, fallback], boxes)
+        # 兜底框是「主框四周外扩」：只补最后一个字被裁，不能把场面一起扫进来。
+        self.assertLess(fallback[0], main[0])
+        self.assertLess(fallback[1], main[1])
+        self.assertGreater(fallback[2], main[2])
+        self.assertGreater(fallback[3], main[3])
+        main_area = (main[2] - main[0]) * (main[3] - main[1])
+        fallback_area = (fallback[2] - fallback[0]) * (fallback[3] - fallback[1])
+        self.assertGreater(fallback_area, main_area)
+        self.assertLess(fallback_area, main_area * 2.5)
+
+    def test_fallback_box_expands_by_fixed_margin_and_clamps_to_the_client(self):
+        with patch.object(FSM_action, "_turn_end_button_box",
+                          return_value=(1380, 430, 1600, 570)):
+            self.assertEqual(
+                (1364, 414, 1616, 586),
+                FSM_action._turn_end_fallback_box())
+
+        # 贴着客户区边界时要夹回 0..1920 / 0..1080，不能截到屏幕外。
+        with patch.object(FSM_action, "_turn_end_button_box",
+                          return_value=(5, 10, 1910, 1075)):
+            self.assertEqual(
+                (0, 0, 1920, 1080),
+                FSM_action._turn_end_fallback_box())
 
     def test_main_box_success_skips_the_fallback(self):
         boxes = []
@@ -108,6 +135,7 @@ class EndTurnButtonProbeTests(unittest.TestCase):
         self.assertFalse(self._probe([OcrLine("对手回合", 0.90)]))
 
         self.assertIn("对手回合", FSM_action._turn_end_last_text)
+        self.assertIn("对手回合", FSM_action._turn_end_last_lines)
 
 
 class _TurnGateFixture(unittest.TestCase):
@@ -127,6 +155,10 @@ class _TurnGateFixture(unittest.TestCase):
             getattr(FSM_action, "last_automation_diagnostic", None),
         )
         self.saved_choice = self._choice_fields()
+        self.saved_turn_text = (
+            FSM_action._turn_end_last_text, FSM_action._turn_end_last_lines)
+        FSM_action._turn_end_last_text = ""
+        FSM_action._turn_end_last_lines = []
         self.flow = RecordingFlow(box_ai=self.box_ai)
         FSM_action.recommendation_flow = self.flow
         FSM_action.recommendation_config = SimpleNamespace(
@@ -151,6 +183,8 @@ class _TurnGateFixture(unittest.TestCase):
          FSM_action._modal_choice_next_probe_at,
          FSM_action.last_automation_diagnostic) = self.saved
         self._restore_choice_fields(self.saved_choice)
+        (FSM_action._turn_end_last_text,
+         FSM_action._turn_end_last_lines) = self.saved_turn_text
 
     @staticmethod
     def _choice_fields():
@@ -253,15 +287,43 @@ class TurnStartGateTests(_TurnGateFixture):
             self.flow.allowed_actions[0],
         )
 
-    def test_waiting_diagnostic_includes_the_text_ocr_read(self):
+    def test_waiting_diagnostic_keeps_line_count_and_first_two_lines(self):
         def probe():
-            FSM_action._turn_end_last_text = "对手回合 / 01:07"
+            # 旧兜底框实测会读到 12 行卡名/倒计时：诊断只留行数 + 前 2 行。
+            FSM_action._turn_end_last_lines = [
+                "空降", "心能", "南", "3", "00:36", "对手回合", "突牙", "狂暴"]
+            FSM_action._turn_end_last_text = (
+                "空降 / 心能 / 南 / 3 / 00:36 / 对手回合 / 突牙 / 狂暴")
             return False
 
         self._step(probe, 0.0, report_diagnostics=True)
 
-        self.assertTrue(any("OCR 读到：对手回合 / 01:07" in message
-                            for message in self.outputs))
+        message = next(m for m in self.outputs
+                       if "尚未检测到「结束回合」" in m)
+        self.assertIn("OCR 读到：8 行", message)
+        self.assertIn("前 2 行：空降 / 心能", message)
+        self.assertIn("…", message)
+        # 第 3 行以后（场面卡名）不再进诊断行。
+        self.assertNotIn("对手回合", message)
+
+    def test_waiting_diagnostic_without_ellipsis_when_two_lines(self):
+        def probe():
+            FSM_action._turn_end_last_lines = ["对手回合", "01:07"]
+            return False
+
+        self._step(probe, 0.0, report_diagnostics=True)
+
+        message = next(m for m in self.outputs
+                       if "尚未检测到「结束回合」" in m)
+        self.assertIn("OCR 读到：2 行：对手回合 / 01:07", message)
+        self.assertNotIn("…", message)
+
+    def test_waiting_diagnostic_with_no_text_read(self):
+        self._step(Mock(return_value=False), 0.0, report_diagnostics=True)
+
+        message = next(m for m in self.outputs
+                       if "尚未检测到「结束回合」" in m)
+        self.assertIn("OCR 读到：没读到文字", message)
 
 
 class ChoicePanelGateTests(_TurnGateFixture):

@@ -38,6 +38,7 @@ class FakeWidget:
         self.place_calls = []
         self.operations = []
         self.tag_configs = {}
+        self.tag_bindings = {}
         self.children = []
         self.packed = False
         self.placed = False
@@ -104,6 +105,11 @@ class FakeWidget:
     def yview(self):
         return (0.0, 1.0)
 
+    def yview_moveto(self, fraction):
+        """记录滚动位置（OCR 扫描框重建后要保持用户滚动位置）。"""
+        self.operations.append(("yview_moveto", float(fraction)))
+        return None
+
     def see(self, _index):
         return self
 
@@ -112,6 +118,27 @@ class FakeWidget:
 
     def tag_config(self, tag, **options):
         self.tag_configs[tag] = dict(options)
+
+    def tag_names(self, *_args):
+        """真 Tk：不带 index 时返回控件已定义的全部 tag 名。"""
+        return tuple(self.tag_configs)
+
+    def tag_bind(self, tag, sequence, func):
+        """记录 tag 点击绑定（真 Tk 对同一 tag+sequence 是替换语义）。"""
+        self.tag_bindings[(tag, sequence)] = func
+
+    def tag_delete(self, tag):
+        """删 tag 时一起丢掉它的绑定（对应真 Tk 的 tag_delete 语义）。"""
+        self.tag_configs.pop(tag, None)
+        for key in [key for key in self.tag_bindings if key[0] == tag]:
+            self.tag_bindings.pop(key, None)
+
+    def fire_tag(self, tag, sequence="<Button-1>"):
+        """触发某个 tag 的绑定（测试点击「原文 (N)」用）。"""
+        callback = self.tag_bindings.get((tag, sequence))
+        if callback is None:
+            raise AssertionError(f"tag {tag!r} has no binding for {sequence}")
+        return callback(FakeEvent(self))
 
     def insert(self, index, text, *tags):
         self.operations.append(("insert", index, text, tuple(tags)))
@@ -299,16 +326,32 @@ _CALLBACK_NAMES = (
     "_ON_START", "_ON_HALT", "_IS_RUNNING", "_ON_STOP_AFTER",
     "_IS_STOP_AFTER", "_IS_IN_GAME", "_IS_STARTING", "_SCORE", "_ON_EXIT",
     "_HUMAN_LIKE", "_CONCEDE_DETECT", "_LIVENESS", "_ACCOUNT",
+    "_OCR", "_PHASE",
     "_ON_TOGGLE_ACCOUNT", "_ON_CALIBRATE", "_ON_CALIBRATE_CLOSE",
     "_ON_RESTART", "_ON_EXIT_OVERLAY", "_LOGS", "_ON_OPEN_LOGS",
     "_ON_CLEAR_LOGS", "_ON_EXPORT_FEEDBACK", "_WINDOW_WIDTH",
     "_ON_RESIZE_WINDOW", "_VERSION_INFO",
+    # 浮窗「常驻」页签的三个回调（start() 注入，缺省是安全 lambda）。
+    "_RESIDENT", "_ON_RESIDENT_TOGGLE", "_ON_RESIDENT_APPLY",
 )
+
+# start() 的关键字名 → log_overlay 模块全局名。常驻回调按 start() 的参数名
+# （resident_callback / on_resident_toggle / on_resident_apply）传进来最自然，
+# 这里映射到实际保存回调的模块全局。
+_CALLBACK_ALIASES = {
+    "resident_callback": "_RESIDENT",
+    "on_resident_toggle": "_ON_RESIDENT_TOGGLE",
+    "on_resident_apply": "_ON_RESIDENT_APPLY",
+}
 
 
 @contextmanager
 def overlay_environment(dpi=96, lines=None, tk_module=None, allow_reports=False, **callbacks):
     """Apply fake Tk and overlay callback state without running the window."""
+    # 允许用 start() 的关键字名传常驻回调（见 _CALLBACK_ALIASES）。
+    for alias, target in _CALLBACK_ALIASES.items():
+        if alias in callbacks:
+            callbacks[target] = callbacks.pop(alias)
     fake_tk = tk_module or FakeTkModule(dpi=dpi)
     saved = {name: getattr(log_overlay, name) for name in _CALLBACK_NAMES}
     saved.update(

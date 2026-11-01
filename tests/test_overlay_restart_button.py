@@ -134,6 +134,11 @@ class RestartWorkerTests(unittest.TestCase):
                          else {"log_root": "C:/Logs"}),
             patch.object(web_ui, "_focus_hearthstone_if_present",
                          return_value=False),
+            # 这些用例只验证「手动重启」的编排顺序；常驻是否管事另有测试覆盖。
+            # 不隔离的话，全量跑时前面调用过 status_snapshot 的用例会把
+            # web_ui.RESIDENT 单例建出来，重启收尾会多写一行 SYS（常驻恢复），
+            # 于是「最后一条日志是 ERROR」的断言会倒在全量顺序上、单跑却通过。
+            patch.object(web_ui, "_resident_will_act", return_value=False),
             patch.object(web_ui, "_log") as logger,
         ):
             web_ui._restart_hearthstone_worker()

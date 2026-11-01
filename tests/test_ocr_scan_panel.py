@@ -319,8 +319,9 @@ class MergedFeedPanelCase(unittest.TestCase):
 
 
 class OverlayMergedFeedPanelTests(MergedFeedPanelCase):
-    def test_a_block_renders_ocr_snapshot_then_execution(self):
-        entries = [_entry(lines=("01:07", "结束回合"))]
+    def test_a_block_renders_actions_then_ocr_summary(self):
+        # 用「推荐」区域：结束回合/段位/开始按钮现在只在上方识别轮播窗口出现。
+        entries = [_entry(tag="scaled_color_v1", lines=("01:07", "打出一号位随从"))]
 
         with overlay_harness(_OCR=lambda: entries) as ui:
             action_feed.push("[推荐] 打出1号位随从")
@@ -328,24 +329,59 @@ class OverlayMergedFeedPanelTests(MergedFeedPanelCase):
             self._refresh(ui)
             inserted = self._inserted(self._feed_text(ui))
 
-        self.assertIn("● 结束回合框 2行 0.90", inserted)
-        self.assertIn("▏01:07", inserted)
-        self.assertIn("[推荐] 打出1号位随从", inserted)
-        self.assertIn("执行  [执行] 打出1号位随从", inserted)
-        # 块内顺序：OCR 内容在「执行」段之前。
-        self.assertLess(inserted.index("● 结束回合框"), inserted.index("执行  [执行]"))
+        # 卡片式（R19）：每行显式标出来源 ——[OCR]读到什么、[执行]做了什么；
+        # OCR 原文折进可点的「原文 (N)」；不再有 8 字缩进和 46 字分隔线。
+        self.assertIn("[OCR]打出1号位随从", inserted)
+        self.assertIn("[执行]打出1号位随从「鱼人招潮者」", inserted)
+        self.assertIn("原文 (2)", inserted)
+        self.assertIn("┈", inserted)  # 块与块之间的浅色虚线
+        self.assertNotIn("[推荐]", inserted)
+        self.assertNotIn("▏01:07", inserted)  # 原文默认不出现在卡片里
+        self.assertLess(inserted.index("[OCR]"), inserted.index("[执行]"))
+        self.assertLess(inserted.index("[执行]"), inserted.index("原文 (2)"))
 
     def test_newest_block_is_rendered_on_top(self):
         with overlay_harness(_OCR=lambda: []) as ui:
             action_feed.push("[推荐] 第一步")
-            action_feed.push("[执行] 第一步")
+            action_feed.push("[执行] 点击第一次")
             action_feed.push("[推荐] 第二步")
-            action_feed.push("[执行] 第二步")
+            action_feed.push("[执行] 点击第二次")
             self._refresh(ui)
             inserted = self._inserted(self._feed_text(ui))
 
         self.assertLess(inserted.index("第二步"), inserted.index("第一步"))
-        self.assertIn(action_feed.SEPARATOR, inserted)
+        self.assertNotIn(action_feed.SEPARATOR, inserted)
+
+    def test_clicking_the_expander_reveals_and_hides_the_raw_ocr_lines(self):
+        entries = [_entry(tag="scaled_color_v1", lines=("01:07", "打出一号位随从"))]
+
+        with overlay_harness(_OCR=lambda: entries) as ui:
+            action_feed.push("[执行] 打出1号位随从")
+            self._refresh(ui)
+            widget = self._feed_text(ui)
+            exp_tags = [tag for (tag, _seq) in widget.tag_bindings]
+            self.assertTrue(exp_tags, "「原文 (N)」没有绑定点击")
+
+            widget.fire_tag(exp_tags[0])
+            self._refresh(ui)
+            self.assertIn("01:07", self._inserted(widget))
+            self.assertIn("收起原文", self._inserted(widget))
+
+            widget.fire_tag(exp_tags[0])
+            self._refresh(ui)
+            self.assertIn("原文 (2)", self._inserted(widget))
+
+    def test_expander_tags_are_not_rebound_on_every_rebuild(self):
+        entries = [_entry(lines=("01:07",))]
+
+        with overlay_harness(_OCR=lambda: entries) as ui:
+            action_feed.push("[执行] 打出1号位随从")
+            self._refresh(ui)
+            widget = self._feed_text(ui)
+            first = dict(widget.tag_bindings)
+            self._refresh(ui)
+            self._refresh(ui)
+            self.assertEqual(list(first), list(widget.tag_bindings))
 
     def test_block_header_carries_time_and_phase(self):
         with overlay_harness(_OCR=lambda: []) as ui:
@@ -354,7 +390,9 @@ class OverlayMergedFeedPanelTests(MergedFeedPanelCase):
             self._refresh(ui)
             inserted = self._inserted(self._feed_text(ui))
 
-        self.assertIn("· 我方出牌", inserted)
+        # 阶段居中金标 + 卡头只留时间（不再「· 我方出牌」重复一遍）。
+        self.assertIn("我方出牌", inserted)
+        self.assertNotIn("· 我方出牌", inserted)
 
     def test_identical_data_does_not_rebuild_the_panel(self):
         with overlay_harness(_OCR=lambda: [_entry()]) as ui:
@@ -383,7 +421,7 @@ class OverlayMergedFeedPanelTests(MergedFeedPanelCase):
             self._refresh(ui)
             inserted = self._inserted(self._feed_text(ui))
 
-        self.assertIn("[推荐] 打出1号位随从", inserted)
+        self.assertIn("打出1号位随从", inserted)
         self.assertIn("没有 OCR 扫描", inserted)
 
     def test_phase_callback_reaches_the_ocr_empty_state(self):

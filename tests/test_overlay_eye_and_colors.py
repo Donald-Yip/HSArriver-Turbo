@@ -268,6 +268,7 @@ class LogColorTests(unittest.TestCase):
             log_overlay.TEXT,
             log_overlay.DIM,
             log_overlay.OK,
+            log_overlay.LINE,
         }
         for tag, color in log_overlay.FEED_TAG_COLORS.items():
             self.assertIn(color, palette, tag)
@@ -282,16 +283,23 @@ class LogColorTests(unittest.TestCase):
                 text = next(
                     widget for widget in ui.widgets_of("text")
                     if widget.options.get("wrap") == "char")
-                self.assertEqual(
-                    set(log_overlay.FEED_TAG_COLORS), set(text.tag_configs))
+                expected_tags = (
+                    set(log_overlay.FEED_TAG_COLORS)
+                    | {"bar_" + name for name in log_overlay.FEED_BAR_COLORS}
+                    | {"bar_block_" + name for name in log_overlay.FEED_BAR_COLORS}
+                    | {"card_stage"})
+                self.assertEqual(expected_tags, set(text.tag_configs))
                 for tag, color in log_overlay.FEED_TAG_COLORS.items():
                     self.assertEqual(
                         color, text.tag_configs[tag]["foreground"], tag)
-                self.assertIn("bold", text.tag_configs["head"]["font"])
-                self.assertIn("bold", text.tag_configs["alert"]["font"])
+                for name, color in log_overlay.FEED_BAR_COLORS.items():
+                    self.assertEqual(
+                        color, text.tag_configs["bar_" + name]["foreground"])
+                for tag in log_overlay.FEED_BOLD_TAGS:
+                    self.assertIn("bold", text.tag_configs[tag]["font"])
                 inserts = [op for op in text.operations if op[0] == "insert"]
                 self.assertTrue(inserts)
-                self.assertEqual(("alert",), inserts[-1][3])
+                self.assertTrue(any("card_alert" in str(op[3]) for op in inserts))
         finally:
             action_feed.clear()
 

@@ -9,6 +9,7 @@ import sys
 import time
 
 from src.recommendation_config import RecommendationConfig
+from src.ocr import status as ocr_status
 from hslegend.adapters.legacy.evidence import OcrEvidence, OcrLine
 
 from config import OCR_MODEL_ROOT
@@ -126,6 +127,17 @@ class PaddleOcrAdapter:
                     sys.modules.pop("click", None)
         return self
 
+    def reload(self):
+        """丢弃已加载的 OCR 引擎，下次 ``recognize()`` 重新 ``load()``。
+
+        用途是**跨局回收 OCR 引擎占用的内存**：PaddleOCR 的模型权重与推理
+        缓冲常驻，长跑时按需重建能把这部分交还系统。测试里注入引擎
+        （``engine=...``）的场景同样适用：置空后下一次识别仍走 ``load()``
+        的注入/重建路径，不会复用旧引擎。
+        """
+        self.engine = None
+        return self
+
     def recognize(self, image, frame_id, preprocessing):
         self.load()
         started = time.perf_counter()
@@ -150,6 +162,15 @@ class PaddleOcrAdapter:
         print(f"[OCR] 图 {width}x{height} 行 {len(lines)} 置信 {confidence:.2f} "
               f"耗时 {(time.perf_counter() - started) * 1000:.0f}ms "
               f"({preprocessing})")
+        # 旁路记录给浮窗「OCR 扫描」框（用户 2026-10-31 要求：日志里只有“行 2
+        # 置信 0.91”，看不出到底读到了什么）。记录失败绝不影响识别本身。
+        try:
+            ocr_status.record(
+                preprocessing, (width, height),
+                [(line.text, line.confidence) for line in lines],
+                elapsed_ms=(time.perf_counter() - started) * 1000.0)
+        except Exception:
+            pass
         if self._frame_dir is not None:
             self._frame_counter += 1
             safe_name = str(preprocessing or "frame").replace("/", "_")
